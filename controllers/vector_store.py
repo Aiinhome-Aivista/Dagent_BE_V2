@@ -18,31 +18,35 @@ _chroma_client = chromadb.Client(
 _collection = None
 
 
-def get_global_collection():
+def get_global_collection(collection_name=None):
     """
-    Returns a singleton global ChromaDB collection
-    shared across all uploads and users.
+    Returns a ChromaDB collection. If collection_name is provided, it returns that specific collection.
+    Otherwise, it returns the singleton global ChromaDB collection.
     """
-    global _collection
+    if collection_name:
+        return _chroma_client.get_or_create_collection(
+            name=collection_name,
+            metadata={"hnsw:space": "cosine"}
+        )
 
+    global _collection
     if _collection is None:
         _collection = _chroma_client.get_or_create_collection(
             name=CHROMA_COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"}
         )
-
     return _collection
 
 
-def push_unstructured_to_vector_db(filename, text_content, metadata=None):
+def push_unstructured_to_vector_db(filename, text_content, metadata=None, collection_name=None):
     """
-    Push unstructured document text into global ChromaDB
+    Push unstructured document text into ChromaDB
     (chunked, no manual embedding)
     """
     if not text_content or not text_content.strip():
         return
 
-    collection = get_global_collection()
+    collection = get_global_collection(collection_name)
 
     # ---- Chunking (VERY IMPORTANT) ----
     chunk_size = 800

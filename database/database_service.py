@@ -3,12 +3,12 @@ from arango.exceptions import CollectionCreateError
 from database.config import ARANGO_HOST, ARANGO_USER, ARANGO_PASS, ARANGO_DB
 
 class DatabaseService:
-    def __init__(self):
+    def __init__(self, db_name=None):
         # Use variables from config.py
         self.host = ARANGO_HOST
         self.username = ARANGO_USER
         self.password = ARANGO_PASS
-        self.db_name = ARANGO_DB
+        self.db_name = db_name if db_name else ARANGO_DB
         
         # Initialize Client
         self.client = ArangoClient(hosts=self.host)

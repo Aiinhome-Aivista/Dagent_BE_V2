@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, text
 from email.mime.multipart import MIMEMultipart
 # pyrefly: ignore [missing-import]
 from snowflake.sqlalchemy import URL
-from database.user_db_service import create_workspace_database
+from database.user_db_service import create_workspace_database, create_workspace_arango_database
 # This stores active engines in memory for the agent to use
 active_connectors = {}
 
@@ -152,6 +152,28 @@ def create_workspace_controller(get_db_connection):
                 (workspace_db, new_workspace_id)
             )
             db_conn.commit()
+
+        # --- 3.6. CREATE ARANGODB FOR WORKSPACE ---
+        arango_result = create_workspace_arango_database(workspace_name)
+        workspace_arango_db = arango_result.get("arango_db_name")
+        if workspace_arango_db:
+            cursor.execute(
+                "UPDATE workspaces SET workspace_arango_db = %s WHERE id = %s",
+                (workspace_arango_db, new_workspace_id)
+            )
+            db_conn.commit()
+
+        # --- 3.7. CREATE CHROMA COLLECTION NAME FOR WORKSPACE ---
+        import re
+        safe_name = re.sub(r'[^a-zA-Z0-9]', '_', workspace_name).lower()[:40]
+        # ChromaDB collection names must be 3-63 characters, alphanumeric or underscores, no double dots.
+        workspace_chroma_collection = f"ws_{new_workspace_id}_{safe_name}"
+        
+        cursor.execute(
+            "UPDATE workspaces SET workspace_chroma_collection = %s WHERE id = %s",
+            (workspace_chroma_collection, new_workspace_id)
+        )
+        db_conn.commit()
 
         # --- 4. AUTO-ASSIGN USER TO WORKSPACE ---
         assign_query = """
@@ -1429,7 +1451,7 @@ def delete_workspace_controller(get_db_connection):
 
         # Get workspace
         cursor.execute("""
-            SELECT id, session_id, user_id
+            SELECT id, session_id, user_id, workspace_db, workspace_arango_db, workspace_chroma_collection
             FROM workspaces
             WHERE id = %s
         """, (workspace_id,))
@@ -1444,6 +1466,8 @@ def delete_workspace_controller(get_db_connection):
 
         session_id = workspace["session_id"]
         user_id = workspace.get("user_id")
+        workspace_db = workspace.get("workspace_db")
+        workspace_arango_db = workspace.get("workspace_arango_db")
 
         if not user_id:
             # Fallback to workspace_users to find user_id
@@ -1514,13 +1538,22 @@ def delete_workspace_controller(get_db_connection):
                 except Exception as use_err:
                     print(f"[Workspace Delete] Error switching back to main database: {use_err}")
 
+        # 0.5 Drop custom workspace database if it exists
+        if workspace_db:
+            try:
+                cursor.execute(f"DROP DATABASE IF EXISTS `{workspace_db}`")
+                print(f"[Workspace Delete] Dropped MySQL database: {workspace_db}")
+            except Exception as e:
+                print(f"[Workspace Delete] Error dropping MySQL database {workspace_db}: {e}")
+
         # 1. Delete ChromaDB Collection
         try:
             import hashlib
             import chromadb
             import os
             # Compute the collection name as done in session_rag_chat_controller.py
-            col_name = "s_" + hashlib.md5(session_id.encode()).hexdigest()[:12]
+            workspace_chroma_collection = workspace.get("workspace_chroma_collection")
+            col_name = workspace_chroma_collection if workspace_chroma_collection else "s_" + hashlib.md5(session_id.encode()).hexdigest()[:12]
             # Get persist directory
             CHROMA_PERSIST_DIR = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_store"
@@ -1564,6 +1597,14 @@ def delete_workspace_controller(get_db_connection):
                             print(f"[Workspace Delete] ArangoDB {collection_name} delete warning: {aql_err}")
                 
                 print(f"[Workspace Delete] ArangoDB cleanup complete for session {session_id}")
+
+            if workspace_arango_db and sys_db.has_database(workspace_arango_db):
+                try:
+                    sys_db.delete_database(workspace_arango_db)
+                    print(f"[Workspace Delete] Deleted ArangoDB database: {workspace_arango_db}")
+                except Exception as e:
+                    print(f"[Workspace Delete] Error deleting ArangoDB database {workspace_arango_db}: {e}")
+                    
         except Exception as e:
             print(f"[Workspace Delete] Error connecting to ArangoDB for deletion: {e}")
 
@@ -1611,25 +1652,26 @@ def delete_workspace_controller(get_db_connection):
             print(f"[Workspace Delete] Error deleting chroma_store files: {chroma_fs_err}")
 
         # 3. Delete MySQL Records
+        tables_to_clean = [
+            "analyze", "app_config", "captcha_store", "categories", 
+            "connection_history", "database_credential", "error_logs", 
+            "external_db_sync_log", "ftp_fetch_log", "ftp_schedules", 
+            "graph", "saved_web_results", "session_analysis_cache", 
+            "session_chat_history", "session_log", "session_tracking", 
+            "sheet_scans", "tracker", "tracker2", "unstructured_docs", 
+            "vector_store", "web_searches", "workspace_tables"
+        ]
+
+        for table in tables_to_clean:
+            try:
+                cursor.execute(f"DELETE FROM `{table}` WHERE session_id = %s", (session_id,))
+            except Exception as e:
+                try:
+                    cursor.execute(f"DELETE FROM `{table}` WHERE session_name = %s", (session_id,))
+                except Exception as e2:
+                    print(f"[Workspace Delete] Could not delete from {table}: {e2}")
+
         delete_queries = [
-
-            ("DELETE FROM `analyze` WHERE session_name = %s", (session_id,)),
-            ("DELETE FROM `error_logs` WHERE session_name = %s", (session_id,)),
-            ("DELETE FROM `graph` WHERE session_name = %s", (session_id,)),
-            ("DELETE FROM `session_tracking` WHERE session_name = %s", (session_id,)),
-            ("DELETE FROM `Tracker` WHERE session_name = %s", (session_id,)),
-            ("DELETE FROM `tracker` WHERE session_name = %s", (session_id,)),
-            ("DELETE FROM `tracker2` WHERE SESSION_NAME = %s", (session_id,)),
-            ("DELETE FROM `unstructured_docs` WHERE session_name = %s", (session_id,)),
-
-            ("DELETE FROM `connection_history` WHERE session_id = %s", (session_id,)),
-            ("DELETE FROM `database_credential` WHERE session_id = %s", (session_id,)),
-            ("DELETE FROM `saved_web_results` WHERE session_id = %s", (session_id,)),
-
-            ("DELETE FROM `external_db_sync_log` WHERE session_id = %s", (session_id,)),
-            ("DELETE FROM `session_chat_history` WHERE session_id = %s", (session_id,)),
-            ("DELETE FROM `session_analysis_cache` WHERE session_id = %s", (session_id,)),
-
             ("DELETE FROM `workspace_users` WHERE workspace_id = %s", (workspace_id,)),
             ("DELETE FROM `workspaces` WHERE id = %s", (workspace_id,))
         ]

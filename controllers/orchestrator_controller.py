@@ -44,10 +44,29 @@ def process_books():
     # 1. Determine Source & Session Name
     source_type = request.form.get("source_type", "local") 
     session_name = request.form.get("session_name") or f"session_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    session_id = request.form.get("session_id")
     
+    # Fetch workspace_arango_db if session_id is provided
+    target_arango_db = None
+    if session_id:
+        try:
+            conn_db = mysql.connector.connect(**MYSQL_CONFIG)
+            cursor = conn_db.cursor(dictionary=True)
+            cursor.execute("SELECT workspace_arango_db FROM workspaces WHERE session_id = %s", (session_id,))
+            row = cursor.fetchone()
+            if row and row.get("workspace_arango_db"):
+                target_arango_db = row["workspace_arango_db"]
+            cursor.close()
+            conn_db.close()
+        except Exception as e:
+            print(f"DEBUG: Failed to fetch workspace_arango_db: {e}")
+
+    # Use specific db if found, else default
+    local_db_service = DatabaseService(db_name=target_arango_db) if target_arango_db else db_service
+
     # 2. Clear Database & Prepare
     try:
-        db_service.truncate_collections()
+        local_db_service.truncate_collections()
     except Exception as e:
         print(f"DEBUG: Error clearing database: {e}")
         
@@ -106,9 +125,14 @@ def process_books():
                 entry["name"] = original_filenames.pop(0)
                 books_data.append(entry)
 
+    if not books_data:
+        return jsonify({
+            "error": "Failed to extract any topics or connections from the uploaded file(s). Please check the AI API logs or ensure the file contains readable text."
+        }), 400
+
     # 6. Ingestion into ArangoDB
     try:
-        db_service.insert_document('Metadata', {"_key": unique_session_id, "results": analysis})
+        local_db_service.insert_document('Metadata', {"_key": unique_session_id, "results": analysis})
     except Exception as e:
         print(f"DEBUG: Metadata insert failed: {e}")
 
@@ -121,7 +145,7 @@ def process_books():
         
         # Insert Book
         try:
-            db_service.insert_document('Books', {"_key": book_key, "name": name})
+            local_db_service.insert_document('Books', {"_key": book_key, "name": name})
         except Exception: pass
         
         # Insert Topics & Edges
@@ -130,8 +154,8 @@ def process_books():
             topic_clean = topic.strip()
             topic_key = safe_key(topic_clean)
             try:
-                db_service.insert_document('Topics', {"_key": topic_key, "name": topic_clean})
-                db_service.insert_edge('has_topic', f"Books/{book_key}", f"Topics/{topic_key}")
+                local_db_service.insert_document('Topics', {"_key": topic_key, "name": topic_clean})
+                local_db_service.insert_edge('has_topic', f"Books/{book_key}", f"Topics/{topic_key}")
             except Exception: pass
 
   # ==========================================

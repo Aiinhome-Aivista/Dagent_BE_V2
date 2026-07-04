@@ -4591,7 +4591,21 @@ def _build_store(session_id, get_fn):
         # Batch encode using global model + cache
         embeds = _encode_texts(texts)
 
+        # Fetch workspace_chroma_collection from DB
         col_name = "s_" + hashlib.md5(session_id.encode()).hexdigest()[:12]
+        try:
+            conn = get_fn()
+            cur = conn.cursor(dictionary=True)
+            cur.execute("SELECT workspace_chroma_collection FROM workspaces WHERE session_id = %s", (session_id,))
+            row = cur.fetchone()
+            if row and row.get("workspace_chroma_collection"):
+                col_name = row["workspace_chroma_collection"]
+        except Exception as e:
+            print(f"[RAG] Error fetching workspace_chroma_collection: {e}")
+        finally:
+            if 'cur' in locals() and cur: cur.close()
+            if 'conn' in locals() and conn: conn.close()
+
         if session_id not in _CLIENTS:
             _CLIENTS[session_id] = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
         client = _CLIENTS[session_id]

@@ -1073,7 +1073,7 @@ Return EXACTLY this JSON (no markdown, no extra text):
 # GRAPH GENERATOR
 # ══════════════════════════════════════════════════════
 
-def generate_session_graph(session_id, web_data, db_data):
+def generate_session_graph(session_id, web_data, db_data, target_arango_db=None):
 
     net = Network(
         height="850px",
@@ -1144,7 +1144,7 @@ def generate_session_graph(session_id, web_data, db_data):
 
     # --- Sync to ArangoDB ---
     try:
-        _sync_to_arango(session_id, net.nodes, net.edges)
+        _sync_to_arango(session_id, net.nodes, net.edges, target_arango_db)
     except Exception as e:
         print(f"[ArangoDB] Sync failed: {e}")
 
@@ -1158,16 +1158,18 @@ def _safe_key(val: str) -> str:
     """ArangoDB _key allows only [a-zA-Z0-9_:.@()-]+"""
     return re.sub(r'[^a-zA-Z0-9_:.@()-]', '_', str(val))
 
-def _sync_to_arango(session_id: str, nodes: list, edges: list):
+def _sync_to_arango(session_id: str, nodes: list, edges: list, target_arango_db: str = None):
     print(f"[ArangoDB] Connecting to {ARANGO_HOST} ...")
     client = ArangoClient(hosts=ARANGO_HOST)
     sys_db = client.db('_system', username=ARANGO_USER, password=ARANGO_PASS)
 
+    db_to_use = target_arango_db if target_arango_db else ARANGO_DB
+
     # Ensure database exists
-    if not sys_db.has_database(ARANGO_DB):
-        sys_db.create_database(ARANGO_DB)
+    if not sys_db.has_database(db_to_use):
+        sys_db.create_database(db_to_use)
     
-    db = client.db(ARANGO_DB, username=ARANGO_USER, password=ARANGO_PASS)
+    db = client.db(db_to_use, username=ARANGO_USER, password=ARANGO_PASS)
 
     # Ensure collections exist
     nodes_col_name = "session_nodes"
@@ -1664,6 +1666,17 @@ def session_analysis_controller(get_connection_func):
     conn = None
     try:
         conn = get_connection_func()
+        
+        target_arango_db = None
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT workspace_arango_db FROM workspaces WHERE session_id = %s", (session_id,))
+            row = cursor.fetchone()
+            if row and row.get("workspace_arango_db"):
+                target_arango_db = row["workspace_arango_db"]
+            cursor.close()
+        except Exception as e:
+            print(f"[Analysis] DB fetch target_arango_db error: {e}")
 
         # 1. Fetch raw data
         web_data = _fetch_web_data(session_id, topics, conn)
@@ -1719,7 +1732,7 @@ def session_analysis_controller(get_connection_func):
 
         # 5. Cache MISS or STALE — generate fresh
         analysis  = _call_mistral(context, topics, databases)
-        graph_url = generate_session_graph(session_id, web_data, db_data)
+        graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db)
 
         if not analysis:
             return jsonify({
