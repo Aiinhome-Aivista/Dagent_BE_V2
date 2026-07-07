@@ -1577,21 +1577,10 @@ def _build_context(web_data: list, db_data: list) -> str:
 # MISTRAL — REPORT GENERATION
 # ══════════════════════════════════════════════════════
 
-def _call_mistral(context: str, topics: list, databases: list) -> dict:
+def _call_mistral(context: str, topics: list, databases: list, system_prompt: str) -> dict:
     source_desc = []
     if topics:    source_desc.append(f"web topics: {', '.join(topics)}")
     if databases: source_desc.append(f"databases: {', '.join(databases)}")
-
-    system = """ IQ200 You are an expert business analyst and strategist.
-Your task is to analyze the provided sales data of different types of tyres, tubes, Ret read Belt, Vul Solutions, flap  and extract purely business-focused insights and context.
-CRITICAL INSTRUCTIONS:
-1. Do NOT include ANY technical details (e.g., table names, column names, row counts, distinct values, data types, schema info, missing values, database structure).
-2. Use ONLY actual values, numbers, and facts from the data provided. DO NOT invent or assume any data.
-3. The column "Customer" means the unique customer, buyer, performer who are categorised or grouped under "Group". The column "Region" means the area or the city where the customer is located. The product type or material type is based on the columns "CATEGORY", "CONSTRUCTION",TYRE TYPE". Total sales, invoice value, revenue, performance should be calculated on the column "Invoice value"
-4. Identify the key columns in the data such as region, account group, product category, construction, tyre type and summarise the    taxable value, claims, quantity, tatal gst and invoice value.
-5. The report must dynamically adapt to the dataset and focus purely on actionable business insights, performance, and trends.
-6. Respond ONLY in valid JSON with a single key: "report".
-"""
 
     user = f"""
 Analyze the strictly provided business data ({'; '.join(source_desc)}):
@@ -1629,8 +1618,10 @@ RULES:
 - Every point must reference a specific value, name, or number from the actual data.
 - Do NOT use generic filler sentences.
 """
+
+    # system prompt passed from controller now
     messages = [
-        {"role": "system", "content": system},
+        {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user}
     ]
     try:
@@ -1731,7 +1722,70 @@ def session_analysis_controller(get_connection_func):
             }), 200
 
         # 5. Cache MISS or STALE — generate fresh
-        analysis  = _call_mistral(context, topics, databases)
+        # Fetch workspace_id for this session to get the custom prompt
+        workspace_id = None
+        system_prompt = ""
+        try:
+            cur = conn.cursor(dictionary=True)
+            cur.execute("SELECT workspace_id FROM sessions WHERE session_id = %s", (session_id,))
+            s_row = cur.fetchone()
+            if s_row and s_row.get("workspace_id"):
+                workspace_id = s_row["workspace_id"]
+                
+                # Get custom prompt
+                cur.execute("SELECT custom_prompt FROM workspace_prompts WHERE workspace_id = %s AND prompt_type = 'analysis'", (workspace_id,))
+                p_row = cur.fetchone()
+                if p_row and p_row.get("custom_prompt"):
+                    system_prompt = p_row["custom_prompt"]
+            cur.close()
+        except Exception as e:
+            print(f"[Analysis] Custom prompt fetch error: {e}")
+
+        # Fallback to default if no custom prompt
+        if not system_prompt.strip():
+            system_prompt = """ IQ200 You are an expert business analyst and strategist.
+Your task is to analyze the provided sales data of different types of tyres, tubes, Ret read Belt, Vul Solutions, flap  and extract purely business-focused insights and context.
+CRITICAL INSTRUCTIONS:
+1. Do NOT include ANY technical details (e.g., table names, column names, row counts, distinct values, data types, schema info, missing values, database structure).
+2. Use ONLY actual values, numbers, and facts from the data provided. DO NOT invent or assume any data.
+3. The column "Customer" means the unique customer, buyer, performer who are categorised or grouped under "Group". The column "Region" means the area or the city where the customer is located. The product type or material type is based on the columns "CATEGORY", "CONSTRUCTION",TYRE TYPE". Total sales, invoice value, revenue, performance should be calculated on the column "Invoice value"
+4. Identify the key columns in the data such as region, account group, product category, construction, tyre type and summarise the    taxable value, claims, quantity, tatal gst and invoice value.
+5. The report must dynamically adapt to the dataset and focus purely on actionable business insights, performance, and trends.
+6. Respond ONLY in valid JSON with a single key: "report".
+
+Generate a detailed, purely business-focused summary highlighting key insights. 
+ALSO, generate exactly 5 "What" critical questions about the data.
+ALSO, generate a category-wise trend report as a "line_chart" visualization extracting numeric/categorical trend values.
+
+Return ONLY this JSON:
+{
+  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n<Executive Summary: 3-4 sentences summarizing overall business performance, key trends, and the main takeaway. Do not mention data tables or row counts.>\\n\\n### Key Business Insights\\n\\n- **Overall Performance & Trends**: <Highlight overall metric performance, growth/decline patterns over time, and significant variations>\\n- **Volume Analysis**: <Analyze volume such as high/low periods, increasing/decreasing momentum>\\n- **Time-Based Movements**: <Detail week-wise, month-wise, or date-wise upward/downward movements, peak periods, and lowest periods>\\n- **Anomalies & Spikes**: <Identify sudden spikes, sudden drops, or outlier behavior with corresponding dates or periods>\\n- **Segment Performance**: <Highlight product, category, region, customer, or channel performance based on available data>\\n- **Key Drivers**: <Identify key business drivers and observations derived from the data>\\n\\n### Actionable Recommendations\\n\\n- <Actionable recommendation 1 based on the data>\\n- <Actionable recommendation 2 based on the data>\\n- <Strategic conclusion>",
+  "follow_up_questions": ["What ...?", "What ...?", "What ...?", "What ...?", "What ...?"],
+  "visualizations": [
+    {
+      "type": "line_chart",
+      "title": "Category-wise Trend Report",
+      "xKey": "category",
+      "yKey": "value",
+      "data": [
+        {"category": "A", "value": 100},
+        {"category": "B", "value": 200}
+      ]
+    }
+  ]
+}
+
+RULES:
+- Replace all <...> with REAL business insights and metrics from the actual data provided.
+- DO NOT mention tables, rows, columns, data types, nulls, or database schema. Keep it 100% business-focused.
+- If specific segments (e.g., categories, regions) or time periods are missing in the data, omit that specific bullet or adapt it to what IS available.
+- Minimum 15-20 lines inside the report string.
+- Use \\n for newlines inside the JSON string.
+- Every point must reference a specific value, name, or number from the actual data.
+- Do NOT use generic filler sentences.
+"""
+
+        analysis  = _call_mistral(context, topics, databases, system_prompt)
         graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db)
 
         if not analysis:
