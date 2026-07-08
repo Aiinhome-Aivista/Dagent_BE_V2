@@ -497,7 +497,7 @@ def save_chat_history(get_connection_func):
             # Update the very first turn of this visit
             cursor.execute("""
                 UPDATE session_chat_history
-                SET question=%s, answer=%s, follow_up_questions=%s, visualizations=%s, intent=%s, mode=%s
+                SET question=%s, answer=%s, follow_up_questions=%s, visualizations=%s, intent=%s, mode=%s, updated_at=CURRENT_TIMESTAMP
                 WHERE session_id=%s AND user_id=%s AND visit_number=%s AND turn_index=0
             """, (
                 question,
@@ -544,6 +544,14 @@ def save_chat_history(get_connection_func):
             intent,
             mode
         ))
+        
+        # Explicitly update the updated_at timestamp of the default question (turn_index=0) for this session visit
+        cursor.execute("""
+            UPDATE session_chat_history
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE session_id = %s AND user_id = %s AND visit_number = %s AND turn_index = 0
+        """, (session_id, int(user_id), visit_number))
+
         conn.commit()
         new_id = cursor.lastrowid
 
@@ -563,8 +571,6 @@ def save_chat_history(get_connection_func):
     finally:
         if cursor: cursor.close()
         if conn:   conn.close()
-
-
 # ══════════════════════════════════════════════════════
 # GET /session-chat-history?session_id=xxx&user_id=xxx
 # ══════════════════════════════════════════════════════
@@ -725,6 +731,19 @@ def get_chat_history(get_connection_func):
                 current_date = datetime.datetime.now().strftime("%d_%m_%Y")
                 session_name = f"default_{current_date}"
                 
+            elif v_num == 1 and history and history[0]["question"] == "Updated Analysis from newly uploaded files":
+                created_date = None
+                if history[0].get("created_at"):
+                    try:
+                        from datetime import datetime as dt_parser
+                        dt = dt_parser.fromisoformat(history[0]["created_at"].replace("Z", ""))
+                        created_date = dt.strftime("%d_%m_%Y")
+                    except Exception as e:
+                        print("Error parsing created_at:", e)
+                if not created_date:
+                    import datetime
+                    created_date = datetime.datetime.now().strftime("%d_%m_%Y")
+                session_name = f"default_{created_date}"    
             querySessions.append({
                 # "sessionId": session_id,                        # e.g., "f9c29d15..."
                 "querySessionName": session_name,               # Use first question as name

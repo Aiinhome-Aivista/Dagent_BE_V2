@@ -38,17 +38,18 @@ def classify_intent(user_query: str) -> str:
     if _AGG_RE.search(q) and not _INSIGHT_RE.search(q):
         return "AGGREGATION"
 
-    router_prompt = f"""
-    You are an AI query router for a data system. Analyze the user's query and classify it into exactly one of three categories:
+    router_prompt = """ """
+    # f"""
+    # You are an AI query router for a data system. Analyze the user's query and classify it into exactly one of three categories:
 
-    1. AGGREGATION: Use this if the question can be answered entirely using database operations such as filtering, grouping, counting, ranking, joining, set operations, averages, percentages, or window functions (e.g., "Identify percentage of active customers who bought both", "top 10 customers", "total sales").
-    2. INSIGHT: Use this if the query requires finding conceptual relationships, trends, contextual explanations, or reading specific notes (e.g., "Why did region X fail?", "What do customers think about product Y?").
-    3. HYBRID: Use this if the query requires filtering by specific IDs or categories first, and then finding semantic context (e.g., "Summarize the complaints for our top 5 most expensive products").
+    # 1. AGGREGATION: Use this if the question can be answered entirely using database operations such as filtering, grouping, counting, ranking, joining, set operations, averages, percentages, or window functions (e.g., "Identify percentage of active customers who bought both", "top 10 customers", "total sales").
+    # 2. INSIGHT: Use this if the query requires finding conceptual relationships, trends, contextual explanations, or reading specific notes (e.g., "Why did region X fail?", "What do customers think about product Y?").
+    # 3. HYBRID: Use this if the query requires filtering by specific IDs or categories first, and then finding semantic context (e.g., "Summarize the complaints for our top 5 most expensive products").
 
-    Respond with ONLY the category name: AGGREGATION, INSIGHT, or HYBRID.
+    # Respond with ONLY the category name: AGGREGATION, INSIGHT, or HYBRID.
 
-    User Query: "{user_query}"
-    Category:"""
+    # User Query: "{user_query}"
+    # Category:"""
 
     messages = [{"role": "user", "content": router_prompt}]
     try:

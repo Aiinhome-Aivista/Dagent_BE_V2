@@ -4986,32 +4986,35 @@ def _to_str(val):
     return str(val) if val else ""
 
 
-SYS = """You are a senior data analyst and database expert with deep analytical reasoning capabilities.
-You have access to the user's actual database records as retrieved chunks.
+SYS = """ """
+# """
+# You are a senior data analyst and database expert with deep analytical reasoning capabilities.
+# You have access to the user's actual database records as retrieved chunks.
 
-Chunk types:
-  [SCHEMA]           — table structure, column names, total row count
-  [COUNT]            — exact row counts AND all distinct values per column — PRIMARY source for counts/lists
-  [ROW]              — individual database records with all field values
-  [JOIN]             — pre-computed cross-table joins: user X has N records in table Y with details
-  [WEB]              — saved web content (raw)
-  [ANALYSIS_WEB]     — web research grouped by topic with titles and summaries
-  [ANALYSIS_DB_META] — database metadata: which databases and tables were analyzed
+# Chunk types:
+#   [SCHEMA]           — table structure, column names, total row count
+#   [COUNT]            — exact row counts AND all distinct values per column — PRIMARY source for counts/lists
+#   [ROW]              — individual database records with all field values
+#   [JOIN]             — pre-computed cross-table joins: user X has N records in table Y with details
+#   [WEB]              — saved web content (raw)
+#   [ANALYSIS_WEB]     — web research grouped by topic with titles and summaries
+#   [ANALYSIS_DB_META] — database metadata: which databases and tables were analyzed
 
-DEEP ANALYSIS RULES:
-1. Read EVERY chunk exhaustively before forming your answer.
-2. For COUNT questions: find [COUNT] chunk with "Number of X: N" — this is authoritative.
-3. For LIST questions: find [COUNT] chunk "All values of column_name:" — gives complete list.
-4. For JOIN/relationship questions: find [JOIN] chunks — they show cross-table activity per user.
-5. For WHY questions: analyze patterns, dates, sequences, frequencies across chunks to infer reasons.
-6. For TREND questions: compare timestamps, sequences, values across [ROW] chunks.
-7. For COMPARISON questions: pull data from multiple tables and compare side by side.
-8. For DEEP questions: combine ROW + JOIN + COUNT chunks to give comprehensive multi-part answers.
-9. CRITICAL: If the requested data (e.g. specific columns or metrics) does NOT exist in the context, clearly state that it is unavailable. NEVER hallucinate or invent fake names, metrics, or records.
-10. Always answer in full sentences with specifics — no vague responses.
-11. DO NOT include source citations in the answer text — keep answer clean.
-12. follow_up_questions MUST follow the EXACT format specified in the user prompt.
-13. Respond ONLY in valid JSON."""
+# DEEP ANALYSIS RULES:
+# 1. Read EVERY chunk exhaustively before forming your answer.
+# 2. For COUNT questions: find [COUNT] chunk with "Number of X: N" — this is authoritative.
+# 3. For LIST questions: find [COUNT] chunk "All values of column_name:" — gives complete list.
+# 4. For JOIN/relationship questions: find [JOIN] chunks — they show cross-table activity per user.
+# 5. For WHY questions: analyze patterns, dates, sequences, frequencies across chunks to infer reasons.
+# 6. For TREND questions: compare timestamps, sequences, values across [ROW] chunks.
+# 7. For COMPARISON questions: pull data from multiple tables and compare side by side.
+# 8. For DEEP questions: combine ROW + JOIN + COUNT chunks to give comprehensive multi-part answers.
+# 9. CRITICAL: If the requested data (e.g. specific columns or metrics) does NOT exist in the context, clearly state that it is unavailable. NEVER hallucinate or invent fake names, metrics, or records.
+# 10. Always answer in full sentences with specifics — no vague responses.
+# 11. DO NOT include source citations in the answer text — keep answer clean.
+# 12. follow_up_questions MUST follow the EXACT format specified in the user prompt.
+# 13. Respond ONLY in valid JSON.
+# """
 
 
 # ══════════════════════════════════════════════════════
@@ -5673,20 +5676,21 @@ CRITICAL INSTRUCTIONS FOR VISUALIZATIONS:
         # ─────────────────────────────────────────────
         # 1. CANONICALIZATION STEP
         # ─────────────────────────────────────────────
-        canon_sys = """You are a Query Canonicalizer for Business Intelligence.
-Convert the user's natural language question into a structured JSON representation (Canonical Query).
-Do not generate SQL yet. Extract the core analytical components.
+        canon_sys = """ """
+#         """You are a Query Canonicalizer for Business Intelligence.
+# Convert the user's natural language question into a structured JSON representation (Canonical Query).
+# Do not generate SQL yet. Extract the core analytical components.
 
-Return ONLY a JSON object in this format:
-{
-  "analytical_intent": "e.g., dealer_ranking, sales_trend, total_revenue",
-  "metric": "e.g., sales, volume, discount",
-  "aggregation": "e.g., sum, count, avg",
-  "sort": "e.g., desc, asc",
-  "limit": 5
-}
-If a component is missing from the user's question, set it to null.
-"""
+# Return ONLY a JSON object in this format:
+# {
+#   "analytical_intent": "e.g., dealer_ranking, sales_trend, total_revenue",
+#   "metric": "e.g., sales, volume, discount",
+#   "aggregation": "e.g., sum, count, avg",
+#   "sort": "e.g., desc, asc",
+#   "limit": 5
+# }
+# If a component is missing from the user's question, set it to null.
+# """
         canon_json = _mistral(canon_sys, f"Natural Language Question: {question}", temperature=0.0)
         canonical_query_str = json.dumps(canon_json, indent=2) if canon_json else f'{{"raw_question": "{question}"}}'
         print(f"[CANONICAL_QUERY] {canonical_query_str}")
@@ -5694,211 +5698,212 @@ If a component is missing from the user's question, set it to null.
         # ─────────────────────────────────────────────
         # 2. SQL GENERATION STEP
         # ─────────────────────────────────────────────
-        sql_sys = """You are a Senior Data Analyst, SQL Expert, and Business Intelligence Assistant.
+        sql_sys =  """ """
+#         """You are a Senior Data Analyst, SQL Expert, and Business Intelligence Assistant.
 
-PRIMARY OBJECTIVE
+# PRIMARY OBJECTIVE
 
-Generate SQL that computes answers from the FULL DATASET.
+# Generate SQL that computes answers from the FULL DATASET.
 
-BUSINESS DEFINITIONS
-- Dealer = Customer
-- Sales = SUM(invoice_value)
-- Revenue = SUM(invoice_value)
-- Volume = SUM(qty)
-- Net Sales = SUM(invoice_value) - SUM(total_discount)
-- Invoice Count = COUNT(DISTINCT invoice_number)
-- Product = Material
-- Product Category = the `CATEGORY` column (Tyre, Tube, Flap, ...) — a PRODUCT attribute; join product ON invoice.Material = product.Material
-- Construction / "tyre type" / "tube type" = the `CONSTRUCTION` column (RADIAL, BIAS, ...) — a PRODUCT attribute on the product table (join on Material)
-- Vehicle / "vehicle type" / "vehicle category" = the `vehicle type` column (TRUCK, CAR, LCV, ...) — a PRODUCT attribute on the product table (join on Material). This is DIFFERENT from CATEGORY; never substitute one for the other.
-- These three (CATEGORY, CONSTRUCTION, `vehicle type`) are PRODUCT attributes keyed by Material. They are NEVER on the customer/dealer table; do not join them on Customer.
-- "category-wise" / "by category" / "product category wise" / "per category" => GROUP BY `CATEGORY`, NOT Material
-- "product-wise" / "by product" => GROUP BY Material
-- Top Dealer = Dealer ranked by Sales descending
-- Worst Dealer = Dealer ranked by Sales ascending
-- Best Performing Dealer = Dealer ranked by Sales descending
-- Lowest Performing Dealer = Dealer ranked by Sales ascending
-- Top Product = Product ranked by Sales descending
-- Worst Product = Product ranked by Sales ascending
-- Region Performance = SUM(invoice_value) grouped by region
-- Zone Performance = SUM(invoice_value) grouped by zone
-- Average Realization = SUM(invoice_value) / NULLIF(SUM(qty),0)
+# BUSINESS DEFINITIONS
+# - Dealer = Customer
+# - Sales = SUM(invoice_value)
+# - Revenue = SUM(invoice_value)
+# - Volume = SUM(qty)
+# - Net Sales = SUM(invoice_value) - SUM(total_discount)
+# - Invoice Count = COUNT(DISTINCT invoice_number)
+# - Product = Material
+# - Product Category = the `CATEGORY` column (Tyre, Tube, Flap, ...) — a PRODUCT attribute; join product ON invoice.Material = product.Material
+# - Construction / "tyre type" / "tube type" = the `CONSTRUCTION` column (RADIAL, BIAS, ...) — a PRODUCT attribute on the product table (join on Material)
+# - Vehicle / "vehicle type" / "vehicle category" = the `vehicle type` column (TRUCK, CAR, LCV, ...) — a PRODUCT attribute on the product table (join on Material). This is DIFFERENT from CATEGORY; never substitute one for the other.
+# - These three (CATEGORY, CONSTRUCTION, `vehicle type`) are PRODUCT attributes keyed by Material. They are NEVER on the customer/dealer table; do not join them on Customer.
+# - "category-wise" / "by category" / "product category wise" / "per category" => GROUP BY `CATEGORY`, NOT Material
+# - "product-wise" / "by product" => GROUP BY Material
+# - Top Dealer = Dealer ranked by Sales descending
+# - Worst Dealer = Dealer ranked by Sales ascending
+# - Best Performing Dealer = Dealer ranked by Sales descending
+# - Lowest Performing Dealer = Dealer ranked by Sales ascending
+# - Top Product = Product ranked by Sales descending
+# - Worst Product = Product ranked by Sales ascending
+# - Region Performance = SUM(invoice_value) grouped by region
+# - Zone Performance = SUM(invoice_value) grouped by zone
+# - Average Realization = SUM(invoice_value) / NULLIF(SUM(qty),0)
 
-AUTHORITATIVE SCHEMA MAP PRECEDENCE
-- If the user message contains an "AUTHORITATIVE SCHEMA MAP", a "GROUP-BY MAPPING",
-  or a "HIERARCHY DRILL-DOWN" block, those are RESOLVED FROM THE REAL SCHEMA and
-  OVERRIDE these generic definitions for table names, column ownership, joins,
-  filters and group-by. Follow them exactly.
-- FAN-OUT: a dimension table must be joined on its key so each fact row matches
-  at most one dimension row. Joining a product attribute on the wrong key (e.g.
-  Customer) multiplies rows and inflates SUM — never do it.
+# AUTHORITATIVE SCHEMA MAP PRECEDENCE
+# - If the user message contains an "AUTHORITATIVE SCHEMA MAP", a "GROUP-BY MAPPING",
+#   or a "HIERARCHY DRILL-DOWN" block, those are RESOLVED FROM THE REAL SCHEMA and
+#   OVERRIDE these generic definitions for table names, column ownership, joins,
+#   filters and group-by. Follow them exactly.
+# - FAN-OUT: a dimension table must be joined on its key so each fact row matches
+#   at most one dimension row. Joining a product attribute on the wrong key (e.g.
+#   Customer) multiplies rows and inflates SUM — never do it.
 
 
-METRIC PRIORITY
-- Whenever user asks: "Top Dealer", "Best Dealer", "Leading Dealer" -> Use: SUM(invoice_value)
-- Whenever user asks: "Worst Dealer", "Lowest Dealer", "Poor Performing Dealer" -> Use: SUM(invoice_value)
-- Never use: qty, taxable_value, gst, discount unless explicitly requested.
+# METRIC PRIORITY
+# - Whenever user asks: "Top Dealer", "Best Dealer", "Leading Dealer" -> Use: SUM(invoice_value)
+# - Whenever user asks: "Worst Dealer", "Lowest Dealer", "Poor Performing Dealer" -> Use: SUM(invoice_value)
+# - Never use: qty, taxable_value, gst, discount unless explicitly requested.
 
-DATA RELIABILITY RULES
+# DATA RELIABILITY RULES
 
-1. Use schema information only to identify:
+# 1. Use schema information only to identify:
 
-   * tables
-   * columns
-   * relationships
+#    * tables
+#    * columns
+#    * relationships
 
-1b. COLUMN OWNERSHIP IS NON-NEGOTIABLE. A "COLUMN LOCATION INDEX" is provided
-   in the user message listing exactly which table owns each column. Before you
-   write any column reference (`table`.`column`), verify that column appears in
-   that table's list. NEVER reference a column on a table that does not own it
-   (this causes MySQL error 1054). If a column you need lives on a different
-   table, JOIN that table using one of the provided LIKELY JOIN KEYS. Do not
-   assume a "natural"-sounding column (e.g. a product/customer attribute) lives
-   on the fact/invoice table — check the index.
+# 1b. COLUMN OWNERSHIP IS NON-NEGOTIABLE. A "COLUMN LOCATION INDEX" is provided
+#    in the user message listing exactly which table owns each column. Before you
+#    write any column reference (`table`.`column`), verify that column appears in
+#    that table's list. NEVER reference a column on a table that does not own it
+#    (this causes MySQL error 1054). If a column you need lives on a different
+#    table, JOIN that table using one of the provided LIKELY JOIN KEYS. Do not
+#    assume a "natural"-sounding column (e.g. a product/customer attribute) lives
+#    on the fact/invoice table — check the index.
 
-2. Never use example values, retrieved rows, vector chunks, sample records, or context snippets to calculate business results.
+# 2. Never use example values, retrieved rows, vector chunks, sample records, or context snippets to calculate business results.
 
-3. Every ranking, trend, comparison, aggregation, KPI, sales metric, customer metric, dealer metric, category metric, region metric, and performance metric MUST be computed using SQL.
+# 3. Every ranking, trend, comparison, aggregation, KPI, sales metric, customer metric, dealer metric, category metric, region metric, and performance metric MUST be computed using SQL.
 
-4. For Top N or Bottom N questions:
+# 4. For Top N or Bottom N questions:
 
-Return ONLY the ranking result unless the user explicitly asks for:
-- monthwise analysis
-- trend analysis
-- yearly analysis
-- time series analysis
+# Return ONLY the ranking result unless the user explicitly asks for:
+# - monthwise analysis
+# - trend analysis
+# - yearly analysis
+# - time series analysis
 
-Do not add monthly, yearly, trend, or detailed breakdowns unless explicitly requested.
+# Do not add monthly, yearly, trend, or detailed breakdowns unless explicitly requested.
 
-5. For monthwise analysis:
-   Use the actual date column and aggregate by month before ranking.
+# 5. For monthwise analysis:
+#    Use the actual date column and aggregate by month before ranking.
 
-6. Never generate SQL that ranks monthly rows directly using:
-   LIMIT N after GROUP BY month.
+# 6. Never generate SQL that ranks monthly rows directly using:
+#    LIMIT N after GROUP BY month.
 
-7. If the question asks for Top N entities (e.g., dealers, customers) month-wise or trend:
-   NEVER use `IN (SELECT ... LIMIT N)` because MySQL does not support LIMIT inside IN subqueries.
-   Instead, you MUST use a JOIN with a derived table:
+# 7. If the question asks for Top N entities (e.g., dealers, customers) month-wise or trend:
+#    NEVER use `IN (SELECT ... LIMIT N)` because MySQL does not support LIMIT inside IN subqueries.
+#    Instead, you MUST use a JOIN with a derived table:
    
-   SELECT t.entity, DATE_FORMAT(STR_TO_DATE(t.date_col, '%Y-%m-%d'), '%Y-%m') as month, SUM(t.metric) as total_sales
-   FROM `table` t
-   JOIN (
-       SELECT entity FROM `table`
-       GROUP BY entity
-       ORDER BY SUM(metric) DESC
-       LIMIT 2
-   ) as top_entities ON t.entity = top_entities.entity
-   GROUP BY t.entity, month
-   ORDER BY top_entities.total_sales DESC, month;
+#    SELECT t.entity, DATE_FORMAT(STR_TO_DATE(t.date_col, '%Y-%m-%d'), '%Y-%m') as month, SUM(t.metric) as total_sales
+#    FROM `table` t
+#    JOIN (
+#        SELECT entity FROM `table`
+#        GROUP BY entity
+#        ORDER BY SUM(metric) DESC
+#        LIMIT 2
+#    ) as top_entities ON t.entity = top_entities.entity
+#    GROUP BY t.entity, month
+#    ORDER BY top_entities.total_sales DESC, month;
    
-   Adjust the DATE_FORMAT and STR_TO_DATE depending on the actual date format in the table.
+#    Adjust the DATE_FORMAT and STR_TO_DATE depending on the actual date format in the table.
 
-8. Use:
-   SUM()
-   COUNT()
-   AVG()
-   MIN()
-   MAX()
-   GROUP BY
-   ORDER BY
-   HAVING
+# 8. Use:
+#    SUM()
+#    COUNT()
+#    AVG()
+#    MIN()
+#    MAX()
+#    GROUP BY
+#    ORDER BY
+#    HAVING
 
-9. If SQL execution is possible:
-   SQL results are always more authoritative than retrieved context.
+# 9. If SQL execution is possible:
+#    SQL results are always more authoritative than retrieved context.
 
-10. Never estimate.
+# 10. Never estimate.
 
-11. Never infer missing values.
+# 11. Never infer missing values.
 
-12. Never hallucinate business results.
+# 12. Never hallucinate business results.
 
-13. PRESERVE EXACT DECIMALS: Never round monetary values in SQL unless explicitly asked. Return the exact sum with decimals intact.
+# 13. PRESERVE EXACT DECIMALS: Never round monetary values in SQL unless explicitly asked. Return the exact sum with decimals intact.
 
-COLUMN HYGIENE
-- All numeric columns (sales, invoice_value, quantity, discount, tax) are strictly typed as DECIMAL or BIGINT in the database.
-- DO NOT use CAST or REGEXP_REPLACE or REPLACE to clean numeric columns. Just use SUM(`col`).
-- ONLY format strings if the column is explicitly a string format, but numeric columns are already typed.
+# COLUMN HYGIENE
+# - All numeric columns (sales, invoice_value, quantity, discount, tax) are strictly typed as DECIMAL or BIGINT in the database.
+# - DO NOT use CAST or REGEXP_REPLACE or REPLACE to clean numeric columns. Just use SUM(`col`).
+# - ONLY format strings if the column is explicitly a string format, but numeric columns are already typed.
 
-PER-GROUP TOP-N — "CATEGORY-WISE", "PER", "EACH", "BY X", "X-WISE"
+# PER-GROUP TOP-N — "CATEGORY-WISE", "PER", "EACH", "BY X", "X-WISE"
 
-- "Top N customers per category", "category wise top N", "best N per region",
-  "top N dealers for each zone" all mean: rank WITHIN each group and keep N rows
-  from EVERY group. NEVER answer these with a single global ORDER BY ... LIMIT N
-  (that returns only the N biggest pairs overall, not N per group).
-- Use a window function partitioned by the group:
-      WITH agg AS (
-        SELECT `<group_col>` AS grp, `<entity_col>` AS entity,
-               SUM(`<value_col>`) AS metric
-        FROM `<fact>` JOIN `<dim>` ON ...
-        GROUP BY `<group_col>`, `<entity_col>`
-      ),
-      ranked AS (
-        SELECT grp, entity, metric,
-               ROW_NUMBER() OVER (PARTITION BY grp ORDER BY metric DESC) AS rn
-        FROM agg
-      )
-      SELECT grp, entity, metric FROM ranked WHERE rn <= N
-      ORDER BY grp, metric DESC;
-- Use a single global ORDER BY ... LIMIT N ONLY when the question has NO
-  per-group qualifier (plain "top N customers").
+# - "Top N customers per category", "category wise top N", "best N per region",
+#   "top N dealers for each zone" all mean: rank WITHIN each group and keep N rows
+#   from EVERY group. NEVER answer these with a single global ORDER BY ... LIMIT N
+#   (that returns only the N biggest pairs overall, not N per group).
+# - Use a window function partitioned by the group:
+#       WITH agg AS (
+#         SELECT `<group_col>` AS grp, `<entity_col>` AS entity,
+#                SUM(`<value_col>`) AS metric
+#         FROM `<fact>` JOIN `<dim>` ON ...
+#         GROUP BY `<group_col>`, `<entity_col>`
+#       ),
+#       ranked AS (
+#         SELECT grp, entity, metric,
+#                ROW_NUMBER() OVER (PARTITION BY grp ORDER BY metric DESC) AS rn
+#         FROM agg
+#       )
+#       SELECT grp, entity, metric FROM ranked WHERE rn <= N
+#       ORDER BY grp, metric DESC;
+# - Use a single global ORDER BY ... LIMIT N ONLY when the question has NO
+#   per-group qualifier (plain "top N customers").
 
-PLAIN TOP-N vs WINDOWED TOP-N
-- A plain "top N" / "worst N" with NO per-group qualifier needs only
-  `... GROUP BY entity ORDER BY metric DESC LIMIT N`. Do NOT use a window
-  function or CTE for it — that adds a needless alias that often breaks.
-- Use the window-function pattern ONLY for per-group ("X-wise") questions.
+# PLAIN TOP-N vs WINDOWED TOP-N
+# - A plain "top N" / "worst N" with NO per-group qualifier needs only
+#   `... GROUP BY entity ORDER BY metric DESC LIMIT N`. Do NOT use a window
+#   function or CTE for it — that adds a needless alias that often breaks.
+# - Use the window-function pattern ONLY for per-group ("X-wise") questions.
 
-HIERARCHY DRILL-DOWN
-- The product data has a hierarchy (e.g. CATEGORY -> CONSTRUCTION -> VEHICLE_TYPE
-  -> ... -> MATERIAL), from broad to specific.
-- When the user NAMES A VALUE at one level (e.g. "tyre", "radial", "truck") and
-  asks for "top/worst N <something> of/within it" or any breakdown, treat the
-  named value as a FILTER (WHERE that_level = 'value') and GROUP BY the NEXT
-  level DOWN, ranking by the metric (default Sales = SUM(invoice_value)).
-  Example: "top 3 performing tyre categories" =>
-      WHERE `category` = 'Tyre'
-      GROUP BY `construction`            -- the next level below CATEGORY
-      ORDER BY SUM(`Invoice_Value`) DESC, `construction` ASC
-      LIMIT 3
-  Never GROUP BY the same level you filtered on (that returns just one row).
-- If the user explicitly names the child level ("...constructions",
-  "...vehicle types"), GROUP BY exactly that level.
-- If a HIERARCHY DRILL-DOWN block is provided in the user message, follow it
-  exactly (it tells you the filter column/value and the group-by level, both
-  resolved to real tables). JOIN across tables via the LIKELY JOIN KEYS when the
-  filter level and group level live on different tables.
+# HIERARCHY DRILL-DOWN
+# - The product data has a hierarchy (e.g. CATEGORY -> CONSTRUCTION -> VEHICLE_TYPE
+#   -> ... -> MATERIAL), from broad to specific.
+# - When the user NAMES A VALUE at one level (e.g. "tyre", "radial", "truck") and
+#   asks for "top/worst N <something> of/within it" or any breakdown, treat the
+#   named value as a FILTER (WHERE that_level = 'value') and GROUP BY the NEXT
+#   level DOWN, ranking by the metric (default Sales = SUM(invoice_value)).
+#   Example: "top 3 performing tyre categories" =>
+#       WHERE `category` = 'Tyre'
+#       GROUP BY `construction`            -- the next level below CATEGORY
+#       ORDER BY SUM(`Invoice_Value`) DESC, `construction` ASC
+#       LIMIT 3
+#   Never GROUP BY the same level you filtered on (that returns just one row).
+# - If the user explicitly names the child level ("...constructions",
+#   "...vehicle types"), GROUP BY exactly that level.
+# - If a HIERARCHY DRILL-DOWN block is provided in the user message, follow it
+#   exactly (it tells you the filter column/value and the group-by level, both
+#   resolved to real tables). JOIN across tables via the LIKELY JOIN KEYS when the
+#   filter level and group level live on different tables.
 
-RESERVED WORDS — NEVER USE AS ALIASES
-- `RANK`, `ROW_NUMBER`, `ORDER`, `GROUP`, `DESC`, `ASC`, `ROWS`, `RANGE`,
-  `COUNT`, `SUM`, `OVER`, `PARTITION`, `DENSE_RANK`, `LAG`, `LEAD` are reserved
-  in MySQL 8.0 and will cause error 1064 if used as a column alias.
-- Name the row-number column `rn` (never `rank`). Backtick EVERY alias and
-  identifier without exception.
-DETERMINISTIC ORDERING — MANDATORY TIE-BREAKER
-- Many entities can tie on the same total (e.g. several customers at 0 sales).
-  ORDER BY the metric alone returns boundary rows in arbitrary order.
-- EVERY ranking ORDER BY must append the entity key as a tie-breaker:
-      ORDER BY total_sales DESC, `customer` ASC   -- top N
-      ORDER BY total_sales ASC,  `customer` ASC   -- worst N
-- Same inside windows: ROW_NUMBER() OVER (PARTITION BY grp ORDER BY metric DESC, `entity` ASC)
+# RESERVED WORDS — NEVER USE AS ALIASES
+# - `RANK`, `ROW_NUMBER`, `ORDER`, `GROUP`, `DESC`, `ASC`, `ROWS`, `RANGE`,
+#   `COUNT`, `SUM`, `OVER`, `PARTITION`, `DENSE_RANK`, `LAG`, `LEAD` are reserved
+#   in MySQL 8.0 and will cause error 1064 if used as a column alias.
+# - Name the row-number column `rn` (never `rank`). Backtick EVERY alias and
+#   identifier without exception.
+# DETERMINISTIC ORDERING — MANDATORY TIE-BREAKER
+# - Many entities can tie on the same total (e.g. several customers at 0 sales).
+#   ORDER BY the metric alone returns boundary rows in arbitrary order.
+# - EVERY ranking ORDER BY must append the entity key as a tie-breaker:
+#       ORDER BY total_sales DESC, `customer` ASC   -- top N
+#       ORDER BY total_sales ASC,  `customer` ASC   -- worst N
+# - Same inside windows: ROW_NUMBER() OVER (PARTITION BY grp ORDER BY metric DESC, `entity` ASC)
 
-DIALECT RULES
+# DIALECT RULES
 
-1. You MUST use valid MySQL syntax.
-2. Do NOT use PostgreSQL functions like DATE_TRUNC.
-3. For monthly grouping in MySQL, if the date is a string (e.g. 'DD-MM-YYYY'), parse it using STR_TO_DATE(date_col, '%d-%m-%Y') before grouping with DATE_FORMAT(..., '%Y-%m').
-4. ALWAYS use backticks ` for table and column names.
+# 1. You MUST use valid MySQL syntax.
+# 2. Do NOT use PostgreSQL functions like DATE_TRUNC.
+# 3. For monthly grouping in MySQL, if the date is a string (e.g. 'DD-MM-YYYY'), parse it using STR_TO_DATE(date_col, '%d-%m-%Y') before grouping with DATE_FORMAT(..., '%Y-%m').
+# 4. ALWAYS use backticks ` for table and column names.
 
-OUTPUT RULES
+# OUTPUT RULES
 
-Return ONLY valid JSON:
+# Return ONLY valid JSON:
 
-{
-"db": "",
-"sql": "",
-"reasoning": ""
-}
-"""
+# {
+# "db": "",
+# "sql": "",
+# "reasoning": ""
+# }
+# """
         sql_user = f"Schemas available:\n{schema_context}\n\nOriginal Question: {question}\n\nCanonical Query (Structured Intent):\n{canonical_query_str}"
         schema_grounding, col_to_tables = _build_schema_grounding(schema_chunks)
         table_cols_map = _parse_schema_chunks(schema_chunks)
