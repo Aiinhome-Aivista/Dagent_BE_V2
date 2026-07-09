@@ -93,3 +93,28 @@ def set_workspace_prompt(get_db_connection):
         if 'cursor' in locals() and cursor:
             cursor.close()
         conn.close()
+
+def get_all_workspace_prompts(get_db_connection):
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"success": False, "message": "Database connection failed"}), 500
+    
+    try:
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT wp.workspace_id, w.workspace_name, wp.prompt_type, wp.custom_prompt, pt.display_name as prompt_type_label
+            FROM workspace_prompts wp
+            LEFT JOIN workspaces w ON wp.workspace_id = w.id
+            LEFT JOIN prompt_types_master pt ON wp.prompt_type = pt.type_code
+            ORDER BY w.workspace_name ASC, wp.prompt_type ASC
+        """
+        cursor.execute(query)
+        prompts = cursor.fetchall()
+        return jsonify({"success": True, "prompts": prompts}), 200
+    except Exception as e:
+        print(f"Error fetching all workspace prompts: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if 'cursor' in locals() and cursor:
+            cursor.close()
+        conn.close()

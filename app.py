@@ -100,7 +100,8 @@ from controllers.workspace_prompt_controller import (
     get_all_prompt_types,
     set_workspace_prompt,
     get_workspace_prompts,
-    get_workspace_prompt_by_type
+    get_workspace_prompt_by_type,
+    get_all_workspace_prompts
 )
 
 from flask_socketio import SocketIO
@@ -150,29 +151,26 @@ executor = ThreadPoolExecutor(max_workers=8)
 # ---------------------------------- API Endpoints ---------------------------------
 
 # Workspace Custom Prompts
-@app.route("/api/prompt-types", methods=["GET", "OPTIONS"])
+@app.route("/api/prompt-types", methods=["GET"])
 def api_get_prompt_types():
-    if request.method == "OPTIONS":
-        return {}, 200
     return get_all_prompt_types(get_db_connection)
 
-@app.route("/api/workspace-prompt", methods=["POST", "OPTIONS"])
+@app.route("/api/workspace-prompt", methods=["POST"])
 def api_set_workspace_prompt():
-    if request.method == "OPTIONS":
-        return {}, 200
     return set_workspace_prompt(get_db_connection)
 
-@app.route("/api/workspace-prompt/<string:workspace_id>", methods=["GET", "OPTIONS"])
+@app.route("/api/workspace-prompt/<string:workspace_id>", methods=["GET"])
 def api_get_workspace_prompts(workspace_id):
-    if request.method == "OPTIONS":
-        return {}, 200
     return get_workspace_prompts(get_db_connection, workspace_id)
 
-@app.route("/api/workspace-prompt/<string:workspace_id>/<string:prompt_type>", methods=["GET", "OPTIONS"])
+@app.route("/api/workspace-prompt/<string:workspace_id>/<string:prompt_type>", methods=["GET"])
 def api_get_workspace_prompt_by_type(workspace_id, prompt_type):
-    if request.method == "OPTIONS":
-        return {}, 200
     return get_workspace_prompt_by_type(get_db_connection, workspace_id, prompt_type)
+
+@app.route("/api/workspace-prompts-all", methods=["GET"])
+def api_get_all_workspace_prompts():
+    return get_all_workspace_prompts(get_db_connection)
+
 
 # Insight
 @app.route("/insight", methods=["POST"])

@@ -21,7 +21,7 @@ _INSIGHT_RE = re.compile(
 )
 
 
-def classify_intent(user_query: str) -> str:
+def classify_intent(user_query: str, workspace_id: str = None, conn=None) -> str:
     """
     Classify a query into AGGREGATION, INSIGHT, or HYBRID.
 
@@ -38,18 +38,36 @@ def classify_intent(user_query: str) -> str:
     if _AGG_RE.search(q) and not _INSIGHT_RE.search(q):
         return "AGGREGATION"
 
-    router_prompt = """ """
-    # f"""
-    # You are an AI query router for a data system. Analyze the user's query and classify it into exactly one of three categories:
+    router_prompt = ""
+    if workspace_id and conn:
+        try:
+            cur = conn.cursor(dictionary=True)
+            cur.execute("SELECT custom_prompt FROM workspace_prompts WHERE workspace_id = %s AND prompt_type = 'intent_router'", (workspace_id,))
+            p_row = cur.fetchone()
+            if p_row and p_row.get("custom_prompt"):
+                router_prompt = p_row["custom_prompt"]
+                
+            if not router_prompt.strip():
+                cur.execute("SELECT custom_prompt FROM workspace_prompts WHERE workspace_id = 0 AND prompt_type = 'intent_router'")
+                f_row = cur.fetchone()
+                if f_row and f_row.get("custom_prompt"):
+                    router_prompt = f_row["custom_prompt"]
+            cur.close()
+        except Exception as e:
+            print(f"[Router] Custom prompt fetch error: {e}")
 
-    # 1. AGGREGATION: Use this if the question can be answered entirely using database operations such as filtering, grouping, counting, ranking, joining, set operations, averages, percentages, or window functions (e.g., "Identify percentage of active customers who bought both", "top 10 customers", "total sales").
-    # 2. INSIGHT: Use this if the query requires finding conceptual relationships, trends, contextual explanations, or reading specific notes (e.g., "Why did region X fail?", "What do customers think about product Y?").
-    # 3. HYBRID: Use this if the query requires filtering by specific IDs or categories first, and then finding semantic context (e.g., "Summarize the complaints for our top 5 most expensive products").
+    if not router_prompt.strip():
+        router_prompt = """
+    You are an AI query router for a data system. Analyze the user's query and classify it into exactly one of three categories:
 
-    # Respond with ONLY the category name: AGGREGATION, INSIGHT, or HYBRID.
+    1. AGGREGATION: Use this if the question can be answered entirely using database operations such as filtering, grouping, counting, ranking, joining, set operations, averages, percentages, or window functions (e.g., "Identify percentage of active customers who bought both", "top 10 customers", "total sales").
+    2. INSIGHT: Use this if the query requires finding conceptual relationships, trends, contextual explanations, or reading specific notes (e.g., "Why did region X fail?", "What do customers think about product Y?").
+    3. HYBRID: Use this if the query requires filtering by specific IDs or categories first, and then finding semantic context (e.g., "Summarize the complaints for our top 5 most expensive products").
 
-    # User Query: "{user_query}"
-    # Category:"""
+    Respond with ONLY the category name: AGGREGATION, INSIGHT, or HYBRID."""
+
+    # Append user query to prompt
+    router_prompt += f'\n\nUser Query: "{user_query}"\nCategory:'
 
     messages = [{"role": "user", "content": router_prompt}]
     try:

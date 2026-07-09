@@ -5552,6 +5552,32 @@ def session_rag_chat_controller(get_connection_func):
             if cur: cur.close()
             if conn: conn.close()
 
+    workspace_id = None
+    system_prompt = SYS
+    try:
+        conn = get_connection_func()
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT workspace_id FROM sessions WHERE session_id = %s", (session_id,))
+        s_row = cur.fetchone()
+        if s_row and s_row.get("workspace_id"):
+            workspace_id = s_row["workspace_id"]
+            
+            cur.execute("SELECT custom_prompt FROM workspace_prompts WHERE workspace_id = %s AND prompt_type = 'rag_chat'", (workspace_id,))
+            p_row = cur.fetchone()
+            if p_row and p_row.get("custom_prompt"):
+                system_prompt = p_row["custom_prompt"]
+                
+        # Try global fallback in DB if no custom prompt was found
+        if system_prompt == SYS:
+            cur.execute("SELECT custom_prompt FROM workspace_prompts WHERE workspace_id = 0 AND prompt_type = 'rag_chat'")
+            f_row = cur.fetchone()
+            if f_row and f_row.get("custom_prompt"):
+                system_prompt = f_row["custom_prompt"]
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[RAG] Custom prompt fetch error: {e}")
+
     # Greeting
     if question and _is_greet(question):
         suggested = []
@@ -5589,7 +5615,7 @@ def session_rag_chat_controller(get_connection_func):
     if not question or question.startswith("default_"):
         count_chunks = [c["text"] for c in all_chunks if c["kind"]=="count"]
         sample = "\n".join(count_chunks)[:15000]
-        res = _mistral(SYS, f"""
+        res = _mistral(system_prompt, f"""
 Business data summary ({len(all_chunks)} total chunks):
 {sample}
 
@@ -5643,7 +5669,7 @@ CRITICAL INSTRUCTIONS FOR VISUALIZATIONS:
     print(f"[RAG] intent={understanding['intent']} tables={understanding['table_hints']} entities={understanding['entities']}")
 
     # NEW ARCHITECTURE: INTENT ROUTER 
-    intent = classify_intent(question)
+    intent = classify_intent(question, workspace_id, get_connection_func())
     print(f"[RAG] Router classified intent: {intent}")
     context = ""
 
@@ -6079,7 +6105,7 @@ CRITICAL INSTRUCTIONS FOR VISUALIZATIONS:
     if _is_graph(question):
         ftype        = _next_followup_type(session_id)
         followup_ins = _followup_instruction(ftype)
-        res = _mistral(SYS, f"""
+        res = _mistral(system_prompt, f"""
 Retrieved business data:
 {context}
 
@@ -6198,7 +6224,7 @@ Return ONLY valid JSON in this format:
     if _is_report(question):
         ftype        = _next_followup_type(session_id)
         followup_ins = _followup_instruction(ftype)
-        res = _mistral(SYS, f"""
+        res = _mistral(system_prompt, f"""
 You are a senior business analyst. Write a comprehensive report from the business data below.
 Retrieved data:
 {context}
@@ -6245,7 +6271,7 @@ Return ONLY:
         if len(q_parts) > 1 else ""
     )
 
-    res = _mistral(SYS, f"""
+    res = _mistral(system_prompt, f"""
 You are an advanced business intelligence AI — like Claude or GPT — specialized in analyzing actual business database records.
 This is NOT a general chatbot. Every answer must be grounded in the business data provided below.
 

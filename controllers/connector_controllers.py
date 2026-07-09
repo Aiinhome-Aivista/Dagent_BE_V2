@@ -329,15 +329,12 @@ def assign_workspace_users_controller(get_db_connection):
 # =========================================================
 def get_workspace_users_controller(get_db_connection):
     """
-    Fetch all users assigned to a specific workspace.
+    Fetch all users assigned to a specific workspace, or all if none specified.
     Query params:
-        workspace_id - ID of the workspace
+        workspace_id (optional) - ID of the workspace
     """
-    data = request.json
+    data = request.json or {}
     workspace_id = data.get('workspace_id')
-
-    if not workspace_id:
-        return jsonify({"status": "error", "message": "workspace_id is required"}), 400
 
     try:
         db_conn = get_db_connection()
@@ -346,14 +343,26 @@ def get_workspace_users_controller(get_db_connection):
 
         cursor = db_conn.cursor(dictionary=True)
 
-        query = """
-            SELECT u.id, u.name, u.email, wu.assigned_at
-            FROM workspace_users wu
-            JOIN users u ON wu.user_id = u.id
-            WHERE wu.workspace_id = %s
-            ORDER BY wu.assigned_at ASC
-        """
-        cursor.execute(query, (workspace_id,))
+        if workspace_id:
+            query = """
+                SELECT u.id, u.name, u.email, wu.assigned_at, w.workspace_name
+                FROM workspace_users wu
+                JOIN users u ON wu.user_id = u.id
+                LEFT JOIN workspaces w ON wu.workspace_id = w.id
+                WHERE wu.workspace_id = %s
+                ORDER BY wu.assigned_at ASC
+            """
+            cursor.execute(query, (workspace_id,))
+        else:
+            query = """
+                SELECT u.id, u.name, u.email, wu.assigned_at, w.workspace_name
+                FROM workspace_users wu
+                JOIN users u ON wu.user_id = u.id
+                LEFT JOIN workspaces w ON wu.workspace_id = w.id
+                ORDER BY wu.assigned_at ASC
+            """
+            cursor.execute(query)
+
         assigned_users = cursor.fetchall()
 
         # Format datetime for JSON
@@ -367,7 +376,7 @@ def get_workspace_users_controller(get_db_connection):
         return jsonify({
             "status": "success",
             "statuscode": 200,
-            "workspace_id": int(workspace_id),
+            "workspace_id": int(workspace_id) if workspace_id else None,
             "assigned_users": assigned_users
         }), 200
 
