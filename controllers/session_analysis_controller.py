@@ -814,13 +814,11 @@ def session_analysis_controller(get_connection_func):
 
         # Fallback to default if no custom prompt
         if not system_prompt.strip():
-            system_prompt = """You are an expert business analyst and strategist.
-Your task is to analyze the provided data context and extract purely business-focused insights.
-CRITICAL INSTRUCTIONS:
-1. Do NOT include ANY technical details (e.g., table names, column names, row counts, distinct values, data types, schema info, missing values, database structure).
-2. Use ONLY actual values, numbers, and facts from the data provided. DO NOT invent or assume any data.
-3. The report must dynamically adapt to the dataset and focus purely on actionable business insights, performance, and trends.
-4. Respond ONLY in valid JSON with a single key: "report"."""
+            return jsonify({
+                "status": "error", 
+                "statusCode": 500,
+                "message": "Analysis prompt not configured in database. Please set a global or workspace-specific prompt."
+            }), 500
 
         analysis  = _call_mistral(context, topics, databases, system_prompt)
         graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db)

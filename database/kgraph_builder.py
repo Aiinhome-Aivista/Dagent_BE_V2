@@ -35,6 +35,7 @@ import hashlib
 import pymysql
 
 try:
+    # pyrefly: ignore [missing-import]
     from json_repair import repair_json
 except Exception:                       # pragma: no cover
     repair_json = None
@@ -47,7 +48,8 @@ from model.llm_client import call_llm_chat
 LOW_CARD_MAX      = 60        # columns with <= this many distinct values are "dimensional"
 SAMPLE_VALUES_MAX = 50        # distinct values stored per low-cardinality column
 VERIFY_ROW_CAP    = 500_000   # skip COUNT(DISTINCT) verification above this many rows
-_PROMPT_FILE = os.path.join(os.path.dirname(__file__), "..", "prompts", "kgraph_build_prompt.txt")
+
+from database.db_connection import get_db_connection
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -64,15 +66,7 @@ def _connect(db, host, user, pwd, port):
                            connect_timeout=15)
 
 
-def _load_prompt():
-    try:
-        with open(_PROMPT_FILE, encoding="utf-8") as f:
-            return f.read()
-    except Exception:
-        # Minimal fallback so the builder still works if the file is missing.
-        return ("Return a STRICT JSON knowledge graph with keys fact_tables, nodes, "
-                "edges, hierarchies, synonyms, metrics, using ONLY the columns in:\n"
-                "{SCHEMA_JSON}")
+
 
 
 def _parse_json(text):
@@ -334,7 +328,24 @@ def build_kgraph(allocated_db_name, db_host, db_user, db_pass, db_port, force=Fa
                 pass
 
         # ── LLM proposes the graph ──────────────────────────────────────────
-        prompt = _load_prompt().replace(
+        prompt_template = None
+        try:
+            main_conn = get_db_connection()
+            with main_conn.cursor() as mcur:
+                mcur.execute("SELECT custom_prompt FROM workspace_prompts WHERE workspace_id = 0 AND prompt_type = 'knowledge_graph'")
+                p_row = mcur.fetchone()
+                if p_row and p_row.get("custom_prompt"):
+                    prompt_template = p_row["custom_prompt"]
+            main_conn.close()
+        except Exception as e:
+            print(f"[KGRAPH] Failed to fetch prompt from DB: {e}")
+
+        if not prompt_template or not prompt_template.strip():
+            prompt_template = ("Return a STRICT JSON knowledge graph with keys fact_tables, nodes, "
+                               "edges, hierarchies, synonyms, metrics, using ONLY the columns in:\n"
+                               "{SCHEMA_JSON}")
+
+        prompt = prompt_template.replace(
             "{SCHEMA_JSON}", json.dumps(_schema_for_prompt(schema), indent=2))
         raw = call_llm_chat([{"role": "user", "content": prompt}],
                             json_mode=True, temperature=0.0)

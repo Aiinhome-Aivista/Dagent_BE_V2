@@ -1592,10 +1592,6 @@ def session_rag_chat_controller(get_connection_func):
     workspace_id = None
     system_prompt = SYS
     db_prompts = {}  # holds all fetched prompts keyed by prompt_type
-    _ALL_PROMPT_TYPES = [
-        'rag_chat', 'rag_chat_answer', 'rag_chat_graph',
-        'rag_chat_report', 'rag_chat_default'
-    ]
     try:
         conn = get_connection_func()
         cur = conn.cursor(dictionary=True)
@@ -1606,27 +1602,19 @@ def session_rag_chat_controller(get_connection_func):
         if s_row and s_row.get("workspace_id"):
             workspace_id = s_row["workspace_id"]
 
-        # 2. Load workspace-specific prompts (all types in one query)
+        # 2. Load all workspace-specific prompts for this workspace
         if workspace_id:
-            _ph = ','.join(['%s'] * len(_ALL_PROMPT_TYPES))
             cur.execute(
-                f"SELECT prompt_type, custom_prompt FROM workspace_prompts "
-                f"WHERE workspace_id = %s AND prompt_type IN ({_ph})",
-                [workspace_id] + _ALL_PROMPT_TYPES
+                "SELECT prompt_type, custom_prompt FROM workspace_prompts WHERE workspace_id = %s",
+                (workspace_id,)
             )
             for row in cur.fetchall():
                 db_prompts[row['prompt_type']] = row['custom_prompt']
 
         # 3. Global fallback (workspace_id = 0) for any missing types
-        _missing = [t for t in _ALL_PROMPT_TYPES if t not in db_prompts]
-        if _missing:
-            _ph2 = ','.join(['%s'] * len(_missing))
-            cur.execute(
-                f"SELECT prompt_type, custom_prompt FROM workspace_prompts "
-                f"WHERE workspace_id = 0 AND prompt_type IN ({_ph2})",
-                _missing
-            )
-            for row in cur.fetchall():
+        cur.execute("SELECT prompt_type, custom_prompt FROM workspace_prompts WHERE workspace_id = 0")
+        for row in cur.fetchall():
+            if row['prompt_type'] not in db_prompts:
                 db_prompts[row['prompt_type']] = row['custom_prompt']
 
         cur.close()
@@ -1634,8 +1622,14 @@ def session_rag_chat_controller(get_connection_func):
     except Exception as e:
         print(f"[RAG] Custom prompt fetch error: {e}")
 
-    # Apply fetched prompts (fallback to hardcoded SYS if not found)
-    system_prompt = db_prompts.get('rag_chat') or SYS
+    # Apply fetched prompts
+    system_prompt = db_prompts.get('rag_chat')
+    if not system_prompt or not system_prompt.strip():
+        yield json.dumps({
+            "status": "error", "statusCode": 500,
+            "message": "RAG chat prompt not configured in database. Please configure it in the Admin Panel."
+        }) + "\n"
+        return
 
     # Greeting
     if question and _is_greet(question):
@@ -1735,7 +1729,13 @@ def session_rag_chat_controller(get_connection_func):
         # ─────────────────────────────────────────────
         # 1. CANONICALIZATION STEP
         # ─────────────────────────────────────────────
-        canon_sys = """ """
+        canon_sys = db_prompts.get('canonicalization')
+        if not canon_sys or not canon_sys.strip():
+            yield json.dumps({
+                "status": "error", "statusCode": 500, 
+                "message": "Canonicalization prompt not configured in database."
+            }) + "\n"
+            return
 #         """You are a Query Canonicalizer for Business Intelligence.
 # Convert the user's natural language question into a structured JSON representation (Canonical Query).
 # Do not generate SQL yet. Extract the core analytical components.
@@ -1757,7 +1757,13 @@ def session_rag_chat_controller(get_connection_func):
         # ─────────────────────────────────────────────
         # 2. SQL GENERATION STEP
         # ─────────────────────────────────────────────
-        sql_sys =  """ """
+        sql_sys = db_prompts.get('sql_generation')
+        if not sql_sys or not sql_sys.strip():
+            yield json.dumps({
+                "status": "error", "statusCode": 500, 
+                "message": "SQL Generation prompt not configured in database."
+            }) + "\n"
+            return
 #         """You are a Senior Data Analyst, SQL Expert, and Business Intelligence Assistant.
 
 # PRIMARY OBJECTIVE

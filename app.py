@@ -160,6 +160,10 @@ def api_get_prompt_types():
 def api_set_workspace_prompt():
     return set_workspace_prompt(get_db_connection)
 
+@app.route("/api/delete-workspace-prompt", methods=["DELETE"])
+def api_delete_workspace_prompt():
+    return delete_workspace_prompt(get_db_connection)
+
 @app.route("/api/workspace-prompt/<string:workspace_id>", methods=["GET"])
 def api_get_workspace_prompts(workspace_id):
     return get_workspace_prompts(get_db_connection, workspace_id)
@@ -172,9 +176,6 @@ def api_get_workspace_prompt_by_type(workspace_id, prompt_type):
 def api_get_all_workspace_prompts():
     return get_all_workspace_prompts(get_db_connection)
 
-@app.route("/api/workspace-prompt", methods=["DELETE"])
-def api_delete_workspace_prompt():
-    return delete_workspace_prompt(get_db_connection)
 
 
 # Insight
