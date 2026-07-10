@@ -118,3 +118,35 @@ def get_all_workspace_prompts(get_db_connection):
         if 'cursor' in locals() and cursor:
             cursor.close()
         conn.close()
+
+def delete_workspace_prompt(get_db_connection):
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "No JSON data provided"}), 400
+
+    workspace_id = data.get('workspace_id')
+    prompt_type = data.get('prompt_type')
+
+    if workspace_id is None or not prompt_type:
+        return jsonify({"success": False, "message": "Missing required fields (workspace_id, prompt_type)"}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"success": False, "message": "Database connection failed"}), 500
+
+    try:
+        cursor = conn.cursor()
+        query = "DELETE FROM workspace_prompts WHERE workspace_id = %s AND prompt_type = %s"
+        cursor.execute(query, (workspace_id, prompt_type))
+        conn.commit()
+        if cursor.rowcount == 0:
+            return jsonify({"success": False, "message": "Prompt not found"}), 404
+        return jsonify({"success": True, "message": "Custom prompt deleted successfully"}), 200
+    except Exception as e:
+        print(f"Error deleting workspace prompt: {e}")
+        conn.rollback()
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        if 'cursor' in locals() and cursor:
+            cursor.close()
+        conn.close()

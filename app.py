@@ -101,7 +101,8 @@ from controllers.workspace_prompt_controller import (
     set_workspace_prompt,
     get_workspace_prompts,
     get_workspace_prompt_by_type,
-    get_all_workspace_prompts
+    get_all_workspace_prompts,
+    delete_workspace_prompt
 )
 
 from flask_socketio import SocketIO
@@ -170,6 +171,10 @@ def api_get_workspace_prompt_by_type(workspace_id, prompt_type):
 @app.route("/api/workspace-prompts-all", methods=["GET"])
 def api_get_all_workspace_prompts():
     return get_all_workspace_prompts(get_db_connection)
+
+@app.route("/api/workspace-prompt", methods=["DELETE"])
+def api_delete_workspace_prompt():
+    return delete_workspace_prompt(get_db_connection)
 
 
 # Insight
