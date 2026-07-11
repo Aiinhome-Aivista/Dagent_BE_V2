@@ -15,6 +15,7 @@ except ImportError:
 from flask import request, jsonify
 from database.config import MISTRAL_API_KEY, MISTRAL_MODEL, MYSQL_CONFIG
 from model.llm_client import call_llm_chat
+from database.prompt_loader import get_prompt
 
 # pyrefly: ignore [missing-import]
 from pyvis.network import Network
@@ -660,6 +661,11 @@ def _build_context(web_data: list, db_data: list) -> str:
 # ══════════════════════════════════════════════════════
 
 def _call_mistral(context: str, topics: list, databases: list, system_prompt: str) -> dict:
+    if "JSON" not in system_prompt.upper():
+        system_prompt += "\n\nCRITICAL: Respond ONLY in valid JSON with a single key: \"report\"."
+        
+    print(f"\n[LLM] Final System Prompt being sent:\n{'-'*50}\n{system_prompt}\n{'-'*50}\n")
+    
     source_desc = []
     if topics:    source_desc.append(f"web topics: {', '.join(topics)}")
     if databases: source_desc.append(f"databases: {', '.join(databases)}")
@@ -691,7 +697,25 @@ RULES:
     ]
     try:
         content_str = call_llm_chat(messages, json_mode=True, temperature=0.2)
-        return json.loads(content_str)
+        
+        # Clean potential markdown JSON block formatting from LLM output
+        clean_str = content_str.strip()
+        if clean_str.startswith("```json"):
+            clean_str = clean_str[7:]
+        elif clean_str.startswith("```"):
+            clean_str = clean_str[3:]
+            
+        if clean_str.endswith("```"):
+            clean_str = clean_str[:-3]
+            
+        clean_str = clean_str.strip()
+        
+        try:
+            return json.loads(clean_str)
+        except json.JSONDecodeError as je:
+            print(f"[LLM] JSON parse error: {je}. Raw output was:\n{content_str}")
+            return None
+            
     except Exception as e:
         print(f"[LLM] session analysis error: {e}")
         return None
@@ -792,25 +816,15 @@ def session_analysis_controller(get_connection_func):
         system_prompt = ""
         try:
             cur = conn.cursor(dictionary=True)
-            cur.execute("SELECT workspace_id FROM sessions WHERE session_id = %s", (session_id,))
+            cur.execute("SELECT id AS workspace_id FROM workspaces WHERE session_id = %s", (session_id,))
             s_row = cur.fetchone()
             if s_row and s_row.get("workspace_id"):
                 workspace_id = s_row["workspace_id"]
-                
-                # Get custom prompt
-                cur.execute("SELECT custom_prompt FROM workspace_prompts WHERE workspace_id = %s AND prompt_type = 'analysis'", (workspace_id,))
-                p_row = cur.fetchone()
-                if p_row and p_row.get("custom_prompt"):
-                    system_prompt = p_row["custom_prompt"]
-                    
-            if not system_prompt.strip():
-                cur.execute("SELECT custom_prompt FROM workspace_prompts WHERE workspace_id = 0 AND prompt_type = 'analysis'")
-                f_row = cur.fetchone()
-                if f_row and f_row.get("custom_prompt"):
-                    system_prompt = f_row["custom_prompt"]
             cur.close()
         except Exception as e:
-            print(f"[Analysis] Custom prompt fetch error: {e}")
+            print(f"[Analysis] Session workspace_id fetch error: {e}")
+
+        system_prompt = get_prompt(workspace_id, 'analysis') or ""
 
         # Fallback to default if no custom prompt
         if not system_prompt.strip():

@@ -73,21 +73,11 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
 
             # Try configured remote IP first
             url = f"{MISTRAL_LOCAL_URL}/api/chat"
-            try:
-                res = requests.post(url, json=payload, timeout=300)
-                res.raise_for_status()
-                data = res.json()
-                print(f"[LLM Client] Local Mistral responded in {time.time() - start_time:.2f} seconds (Remote IP)")
-                return data["message"]["content"].strip()
-            except (requests.exceptions.ConnectTimeout, requests.exceptions.ConnectionError, requests.exceptions.HTTPError) as e:
-                print(f"[LLM Client] Remote IP failed ({e}), trying localhost fallback...")
-                # Fallback to localhost if remote IP connection fails/times out
-                fallback_url = "http://localhost:11434/api/chat"
-                res = requests.post(fallback_url, json=payload, timeout=300)
-                res.raise_for_status()
-                data = res.json()
-                print(f"[LLM Client] Local Mistral responded in {time.time() - start_time:.2f} seconds (Fallback Localhost)")
-                return data["message"]["content"].strip()
+            res = requests.post(url, json=payload, timeout=600)
+            res.raise_for_status()
+            data = res.json()
+            print(f"[LLM Client] Local Mistral responded in {time.time() - start_time:.2f} seconds (Remote IP)")
+            return data["message"]["content"].strip()
 
         # Invalid LLM setting
         else:

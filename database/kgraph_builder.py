@@ -328,17 +328,8 @@ def build_kgraph(allocated_db_name, db_host, db_user, db_pass, db_port, force=Fa
                 pass
 
         # ── LLM proposes the graph ──────────────────────────────────────────
-        prompt_template = None
-        try:
-            main_conn = get_db_connection()
-            with main_conn.cursor() as mcur:
-                mcur.execute("SELECT custom_prompt FROM workspace_prompts WHERE workspace_id = 0 AND prompt_type = 'knowledge_graph'")
-                p_row = mcur.fetchone()
-                if p_row and p_row.get("custom_prompt"):
-                    prompt_template = p_row["custom_prompt"]
-            main_conn.close()
-        except Exception as e:
-            print(f"[KGRAPH] Failed to fetch prompt from DB: {e}")
+        from database.prompt_loader import get_prompt
+        prompt_template = get_prompt(0, 'knowledge_graph')
 
         if not prompt_template or not prompt_template.strip():
             prompt_template = ("Return a STRICT JSON knowledge graph with keys fact_tables, nodes, "

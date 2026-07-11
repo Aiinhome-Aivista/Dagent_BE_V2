@@ -14,6 +14,7 @@ from flask import request, jsonify
 from controllers.intent_router import classify_intent
 from controllers.query_branches import execute_hybrid
 from database.config import MISTRAL_API_KEY, MISTRAL_MODEL, MYSQL_CONFIG
+from database.prompt_loader import get_prompt
 from controllers.kgraph_service import (
     load_kgraph, build_sql_rules, resolve_grouping, detect_drilldown, validate_sql)
 # ChromaDB persistent storage — vectors survive server restarts
@@ -1591,39 +1592,22 @@ def session_rag_chat_controller(get_connection_func):
 
     workspace_id = None
     system_prompt = SYS
-    db_prompts = {}  # holds all fetched prompts keyed by prompt_type
     try:
         conn = get_connection_func()
         cur = conn.cursor(dictionary=True)
 
         # 1. Get workspace_id for this session
-        cur.execute("SELECT workspace_id FROM sessions WHERE session_id = %s", (session_id,))
+        cur.execute("SELECT id AS workspace_id FROM workspaces WHERE session_id = %s", (session_id,))
         s_row = cur.fetchone()
         if s_row and s_row.get("workspace_id"):
             workspace_id = s_row["workspace_id"]
-
-        # 2. Load all workspace-specific prompts for this workspace
-        if workspace_id:
-            cur.execute(
-                "SELECT prompt_type, custom_prompt FROM workspace_prompts WHERE workspace_id = %s",
-                (workspace_id,)
-            )
-            for row in cur.fetchall():
-                db_prompts[row['prompt_type']] = row['custom_prompt']
-
-        # 3. Global fallback (workspace_id = 0) for any missing types
-        cur.execute("SELECT prompt_type, custom_prompt FROM workspace_prompts WHERE workspace_id = 0")
-        for row in cur.fetchall():
-            if row['prompt_type'] not in db_prompts:
-                db_prompts[row['prompt_type']] = row['custom_prompt']
-
         cur.close()
         conn.close()
     except Exception as e:
-        print(f"[RAG] Custom prompt fetch error: {e}")
+        print(f"[RAG] Session fetch error: {e}")
 
     # Apply fetched prompts
-    system_prompt = db_prompts.get('rag_chat')
+    system_prompt = get_prompt(workspace_id, 'rag_chat')
     if not system_prompt or not system_prompt.strip():
         yield json.dumps({
             "status": "error", "statusCode": 500,
@@ -1668,7 +1652,7 @@ def session_rag_chat_controller(get_connection_func):
     if not question or question.startswith("default_"):
         count_chunks = [c["text"] for c in all_chunks if c["kind"]=="count"]
         sample = "\n".join(count_chunks)[:15000]
-        _default_tpl = db_prompts.get('rag_chat_default', '')
+        _default_tpl = get_prompt(workspace_id, 'rag_chat_default') or ''
         _default_msg = (
             _default_tpl
             .replace('{sample}', sample)
@@ -1729,7 +1713,7 @@ def session_rag_chat_controller(get_connection_func):
         # ─────────────────────────────────────────────
         # 1. CANONICALIZATION STEP
         # ─────────────────────────────────────────────
-        canon_sys = db_prompts.get('canonicalization')
+        canon_sys = get_prompt(workspace_id, 'canonicalization')
         if not canon_sys or not canon_sys.strip():
             yield json.dumps({
                 "status": "error", "statusCode": 500, 
@@ -1757,7 +1741,7 @@ def session_rag_chat_controller(get_connection_func):
         # ─────────────────────────────────────────────
         # 2. SQL GENERATION STEP
         # ─────────────────────────────────────────────
-        sql_sys = db_prompts.get('sql_generation')
+        sql_sys = get_prompt(workspace_id, 'sql_generation')
         if not sql_sys or not sql_sys.strip():
             yield json.dumps({
                 "status": "error", "statusCode": 500, 
@@ -2144,7 +2128,7 @@ def session_rag_chat_controller(get_connection_func):
     if _is_graph(question):
         ftype        = _next_followup_type(session_id)
         followup_ins = _followup_instruction(ftype)
-        _graph_tpl = db_prompts.get('rag_chat_graph', '')
+        _graph_tpl = get_prompt(workspace_id, 'rag_chat_graph') or ''
         _graph_msg = (
             _graph_tpl
             .replace('{context}', context)
@@ -2197,7 +2181,7 @@ def session_rag_chat_controller(get_connection_func):
     if _is_report(question):
         ftype        = _next_followup_type(session_id)
         followup_ins = _followup_instruction(ftype)
-        _report_tpl = db_prompts.get('rag_chat_report', '')
+        _report_tpl = get_prompt(workspace_id, 'rag_chat_report') or ''
         _report_msg = (
             _report_tpl
             .replace('{context}', context)
@@ -2235,7 +2219,7 @@ def session_rag_chat_controller(get_connection_func):
         if len(q_parts) > 1 else ""
     )
 
-    _answer_tpl = db_prompts.get('rag_chat_answer', '')
+    _answer_tpl = get_prompt(workspace_id, 'rag_chat_answer') or ''
     _answer_msg = (
         _answer_tpl
         .replace('{context}', context)

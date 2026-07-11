@@ -1,5 +1,6 @@
 import re
 from model.llm_client import call_llm_chat
+from database.prompt_loader import get_prompt
 
 # ── Deterministic guards ───────────────────────────────────────────────────
 # Ranking / math phrasing must ALWAYS go to SQL. Relying solely on an LLM
@@ -38,25 +39,9 @@ def classify_intent(user_query: str, workspace_id: str = None, conn=None) -> str
     if _AGG_RE.search(q) and not _INSIGHT_RE.search(q):
         return "AGGREGATION"
 
-    router_prompt = ""
-    if workspace_id and conn:
-        try:
-            cur = conn.cursor(dictionary=True)
-            cur.execute("SELECT custom_prompt FROM workspace_prompts WHERE workspace_id = %s AND prompt_type = 'intent_routing'", (workspace_id,))
-            p_row = cur.fetchone()
-            if p_row and p_row.get("custom_prompt"):
-                router_prompt = p_row["custom_prompt"]
-                
-            if not router_prompt.strip():
-                cur.execute("SELECT custom_prompt FROM workspace_prompts WHERE workspace_id = 0 AND prompt_type = 'intent_routing'")
-                f_row = cur.fetchone()
-                if f_row and f_row.get("custom_prompt"):
-                    router_prompt = f_row["custom_prompt"]
-            cur.close()
-        except Exception as e:
-            print(f"[Router] Custom prompt fetch error: {e}")
+    router_prompt = get_prompt(workspace_id, 'intent_routing')
 
-    if not router_prompt.strip():
+    if not router_prompt or not router_prompt.strip():
         print("[Router] ERROR: No router prompt found in DB for workspace or global fallback. Returning default AGGREGATION.")
         return "AGGREGATION"
     # Append user query to prompt

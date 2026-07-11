@@ -68,7 +68,7 @@ def set_workspace_prompt(get_db_connection):
     prompt_type = data.get('prompt_type')
     custom_prompt = data.get('custom_prompt')
     
-    if not workspace_id or not prompt_type or not custom_prompt:
+    if workspace_id is None or not prompt_type or not custom_prompt:
         return jsonify({"success": False, "message": "Missing required fields (workspace_id, prompt_type, custom_prompt)"}), 400
 
     conn = get_db_connection()
