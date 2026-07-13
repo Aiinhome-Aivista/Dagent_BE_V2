@@ -1682,7 +1682,8 @@ def delete_workspace_controller(get_db_connection):
 
         delete_queries = [
             ("DELETE FROM `workspace_users` WHERE workspace_id = %s", (workspace_id,)),
-            ("DELETE FROM `workspaces` WHERE id = %s", (workspace_id,))
+            ("DELETE FROM `workspaces` WHERE id = %s", (workspace_id,)),
+            ("DELETE FROM `workspace_prompts` WHERE workspace_id = %s", (workspace_id,))
         ]
 
         for query, params in delete_queries:

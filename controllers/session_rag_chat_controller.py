@@ -1246,42 +1246,9 @@ def _column_ref_correction(violations, col_to_tables):
 # by the columns they contain (robust to munged table names), so you usually
 # only need to keep the column/measure names correct.
 
-# ── CONFIG ───────────────────────────────────────────────────────────────────
-FACT_TABLE_HINTS = ["invoice"]          # name substring(s) of the fact table
-MEASURE_COLUMN   = "Invoice_Value"      # the Sales measure column on the fact table
-
-# Dimensions: each is auto-located as the (non-fact) table that contains its
-# `dim_key` AND the most of its `owns` columns. `fact_key` is the column on the
-# fact table that joins to `dim_key` on the dimension.
-DIMENSIONS = [
-    {
-        "label":    "product",
-        "fact_key": "Material",
-        "dim_key":  "Material",
-        "owns":     ["CATEGORY", "CONSTRUCTION", "vehicle type", "OLD CODE"],
-    },
-    {
-        "label":    "customer",
-        "fact_key": "Customer",
-        "dim_key":  "Customer",
-        "owns":     ["CUSTOMER_CATEGORY", "Region", "Zone", "Account group"],
-    },
-]
-
-# Product hierarchy ROOT → LEAF (column names; matched case/space/underscore-insensitively)
-PRODUCT_HIERARCHY = ["CATEGORY", "CONSTRUCTION", "vehicle type"]
-
-# Natural-language phrase → exact column name. Longest phrase wins.
-COLUMN_SYNONYMS = {
-    "product category": "CATEGORY", "category": "CATEGORY", "categories": "CATEGORY",
-    "construction": "CONSTRUCTION", "tyre type": "CONSTRUCTION", "tire type": "CONSTRUCTION",
-    "vehicle category": "vehicle type", "vehicle type": "vehicle type",
-    "vehicle": "vehicle type", "by vehicle": "vehicle type",
-    "region": "Region", "zone": "Zone",
-    "dealer": "Customer", "customer": "Customer",
-}
-# ── END CONFIG ───────────────────────────────────────────────────────────────
-
+# ── DYNAMIC CONFIG (Fetched from DB via workspace_config) ───────────────────
+# Defaults are used if the workspace_config prompt is not found or is invalid JSON.
+# ── END DYNAMIC CONFIG ────────────────────────────────────────────────────────
 # Words that signal the user wants a ranked breakdown (so we apply the GROUP BY).
 _RANK_OR_BREAKDOWN_RE = re.compile(
     r'\b(top|bottom|best|worst|highest|lowest|leading|poor|performing|rank|'
@@ -1323,11 +1290,55 @@ def _orig_col(table_cols, table, col_name):
     return None
 
 
-def _build_business_map(table_cols):
+def _build_business_map(table_cols, workspace_id):
     """Resolve the CONFIG against the actually-loaded schema. Returns a dict with
     the fact table, each dimension's real table + join keys, the column→source map
     (so product attributes are pinned to the product table), the resolved synonym
     map, and the ordered hierarchy levels as (table, col)."""
+    
+    import json
+    from database.prompt_loader import get_prompt
+    
+    # Defaults (Fallback if no config found)
+    FACT_TABLE_HINTS = ["invoice"]
+    MEASURE_COLUMN   = "Invoice_Value"
+    DIMENSIONS = [
+        {
+            "label":    "product",
+            "fact_key": "Material",
+            "dim_key":  "Material",
+            "owns":     ["CATEGORY", "CONSTRUCTION", "vehicle type", "OLD CODE"],
+        },
+        {
+            "label":    "customer",
+            "fact_key": "Customer",
+            "dim_key":  "Customer",
+            "owns":     ["CUSTOMER_CATEGORY", "Region", "Zone", "Account group"],
+        },
+    ]
+    PRODUCT_HIERARCHY = ["CATEGORY", "CONSTRUCTION", "vehicle type"]
+    COLUMN_SYNONYMS = {
+        "product category": "CATEGORY", "category": "CATEGORY", "categories": "CATEGORY",
+        "construction": "CONSTRUCTION", "tyre type": "CONSTRUCTION", "tire type": "CONSTRUCTION",
+        "vehicle category": "vehicle type", "vehicle type": "vehicle type",
+        "vehicle": "vehicle type", "by vehicle": "vehicle type",
+        "region": "Region", "zone": "Zone",
+        "dealer": "Customer", "customer": "Customer",
+    }
+    
+    # Fetch from database
+    config_json = get_prompt(workspace_id, 'workspace_config')
+    if config_json and config_json.strip():
+        try:
+            cfg = json.loads(config_json)
+            FACT_TABLE_HINTS = cfg.get("fact_table_hints", FACT_TABLE_HINTS)
+            MEASURE_COLUMN = cfg.get("measure_column", MEASURE_COLUMN)
+            DIMENSIONS = cfg.get("dimensions", DIMENSIONS)
+            PRODUCT_HIERARCHY = cfg.get("product_hierarchy", PRODUCT_HIERARCHY)
+            COLUMN_SYNONYMS = cfg.get("column_synonyms", COLUMN_SYNONYMS)
+        except Exception as e:
+            print(f"[RAG] Error parsing workspace_config JSON: {e}")
+
     norm_tables = {t: {_norm_ident(c) for c in cols} for t, cols in table_cols.items()}
 
     # Fact table: name hint match, else the table that has the measure column.
@@ -1591,6 +1602,7 @@ def session_rag_chat_controller(get_connection_func):
             if conn: conn.close()
 
     workspace_id = None
+    sql_results = []
     system_prompt = SYS
     try:
         conn = get_connection_func()
@@ -1961,7 +1973,7 @@ def session_rag_chat_controller(get_connection_func):
         # what makes "tyre categories" (=> construction within Tyre) and "vehicle"
         # (=> `vehicle type`, not CATEGORY) resolve correctly and without fan-out.
         try:
-            biz = _build_business_map(table_cols_map)
+            biz = _build_business_map(table_cols_map, workspace_id)
             biz_prompt = _business_prompt(biz)
             if biz_prompt:
                 sql_user += f"\n\n{biz_prompt}"
@@ -1986,6 +1998,14 @@ def session_rag_chat_controller(get_connection_func):
             print(f"[BIZMAP] skipped: {_e}")
 
         sql_json = _mistral(sql_sys, sql_user, temperature=0.0)
+        print(f"[DEBUG SQL JSON] {sql_json}")
+
+        # Local LLM fallbacks (Mistral sometimes nests inside 'query' or uses uppercase)
+        if isinstance(sql_json, dict):
+            if "query" in sql_json and isinstance(sql_json["query"], dict) and "sql" in sql_json["query"]:
+                sql_json["sql"] = sql_json["query"]["sql"]
+            if "SQL" in sql_json and "sql" not in sql_json:
+                sql_json["sql"] = sql_json["SQL"]
 
         # ── Deterministic pre-execution guard ──────────────────────────────
         # The model sometimes attributes a column to the wrong base table
@@ -2013,6 +2033,13 @@ def session_rag_chat_controller(get_connection_func):
 
         if sql_json and sql_json.get("sql"):
             target_db = sql_json.get("db", "").strip()
+            
+            # Fallback: Extract DB from schema_context if the LLM forgot to include it
+            if not target_db:
+                m_db = re.search(r'db:([a-zA-Z0-9_]+)', schema_context)
+                if m_db:
+                    target_db = m_db.group(1)
+
             sql_query = sql_json.get("sql", "").strip()
             print(f"[SQL_GEN] db: {target_db} | sql: {sql_query}")
 
@@ -2087,6 +2114,14 @@ def session_rag_chat_controller(get_connection_func):
                             repair_user += _unknown_column_hint(ex, col_to_tables)
                             repair_user += f"\n\nOriginal Question: {question}"
                             fix_json = _mistral(sql_sys, repair_user, temperature=0.0)
+                            
+                            # Fallback for nested SQL in self-heal
+                            if isinstance(fix_json, dict):
+                                if "query" in fix_json and isinstance(fix_json["query"], dict) and "sql" in fix_json["query"]:
+                                    fix_json["sql"] = fix_json["query"]["sql"]
+                                if "SQL" in fix_json and "sql" not in fix_json:
+                                    fix_json["sql"] = fix_json["SQL"]
+                            
                             if fix_json and fix_json.get("sql"):
                                 sql_query = fix_json.get("sql", "").strip()
                                 print(f"[SQL_REPAIR] Retrying with corrected SQL:\n{sql_query}")
@@ -2232,6 +2267,10 @@ def session_rag_chat_controller(get_connection_func):
         .replace('{intent}', str(understanding.get('intent', '')))
         .replace('{table_hints}', str(understanding.get('table_hints', '')))
     )
+    
+    if understanding.get("intent") == "AGGREGATION":
+        _answer_msg += "\n\nCRITICAL INSTRUCTION FOR VISUALIZATIONS: Because this is an aggregation query, your 'visualizations' array MUST ONLY contain a 'table' (type='table'). DO NOT generate 'line_chart', 'bar_chart', or any other charts. DO NOT hallucinate dates or months!"
+
     res = _mistral(system_prompt, _answer_msg)
 
     if not res:
@@ -2247,11 +2286,40 @@ def session_rag_chat_controller(get_connection_func):
         _normalize_visualizations(res.get("visualizations", []))
     )
 
+    if understanding.get("intent") == "AGGREGATION" and sql_results:
+        keys_lower = [k.lower() for k in sql_results[0].keys()]
+        has_time = any(t in k for k in keys_lower for t in ['month', 'date', 'year'])
+        
+        columns = [{"key": k, "label": str(k).replace("_", " ").title()} for k in sql_results[0].keys()]
+        table_vis = {
+            "type": "table",
+            "title": "Data Table",
+            "columns": columns,
+            "data": sql_results
+        }
+        
+        if not has_time:
+            # Keep only bar_charts; drop hallucinated line/pie charts
+            visualizations = [v for v in visualizations if v.get("type") == "bar_chart"]
+        else:
+            # Keep all non-table charts (like line_chart)
+            visualizations = [v for v in visualizations if v.get("type") != "table"]
+            
+        # ALWAYS append the perfectly formatted Python table, replacing any broken LLM table
+        visualizations.append(table_vis)
+
     # If user explicitly asked for table → keep only table
     if "table" in question.lower():
         visualizations = [v for v in visualizations if v.get("type") == "table"]
 
 
+
+    # Universal safety net: If any table visualization has missing/empty columns, 
+    # dynamically populate them from the data keys to prevent UI binding failures.
+    for v in visualizations:
+        if v.get("type") == "table" and not v.get("columns") and v.get("data") and isinstance(v["data"], list) and len(v["data"]) > 0:
+            if isinstance(v["data"][0], dict):
+                v["columns"] = [{"key": k, "label": str(k).replace("_", " ").title()} for k in v["data"][0].keys()]
 
     _advance_turn(session_id)
     _save_history(get_connection_func, session_id, user_id,

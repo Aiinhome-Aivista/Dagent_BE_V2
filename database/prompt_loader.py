@@ -45,4 +45,9 @@ def get_prompt(workspace_id, prompt_type):
         if conn:
             conn.close()
             
-    return prompt if prompt and prompt.strip() else None
+    if prompt and prompt.strip():
+        # Fix legacy f-string double braces that might have been copied to the DB
+        prompt = prompt.replace("{{", "{").replace("}}", "}")
+        return prompt
+    
+    return None

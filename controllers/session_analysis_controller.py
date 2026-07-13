@@ -114,10 +114,12 @@ def _save_cache(session_id: str, data_hash: str,
 # CROSS-SOURCE RELATIONSHIP DETECTION
 # ══════════════════════════════════════════════════════
 
-def detect_cross_source_relationships(table_columns: dict, web_data: list, db_data: list) -> dict:
+def detect_cross_source_relationships(table_columns: dict, web_data: list, db_data: list, workspace_id=None) -> dict:
     """
     Ask Mistral to dynamically generate a business-focused Knowledge Graph.
     """
+    from database.prompt_loader import get_prompt
+    
     db_summary = {}
     for db in db_data:
         for tbl in db["tables"]:
@@ -135,8 +137,18 @@ def detect_cross_source_relationships(table_columns: dict, web_data: list, db_da
                 "brief": (item.get("brief") or "")[:200]
             })
 
-    prompt = f"""
+    system_prompt = ""
+    if workspace_id:
+        system_prompt = get_prompt(workspace_id, 'dashboard_insights')
+    if not system_prompt:
+        system_prompt = get_prompt('0', 'dashboard_insights') or "Generate a business-focused Knowledge Graph from this data. Return exactly JSON with nodes and edges."
 
+    prompt = f"""
+{system_prompt}
+
+DATA CONTEXT:
+Database Summary: {json.dumps(db_summary)}
+Web Summary: {json.dumps(web_summary)}
 """
 
     messages = [{"role": "user", "content": prompt}]
@@ -156,7 +168,7 @@ def detect_cross_source_relationships(table_columns: dict, web_data: list, db_da
 # GRAPH GENERATOR
 # ══════════════════════════════════════════════════════
 
-def generate_session_graph(session_id, web_data, db_data, target_arango_db=None):
+def generate_session_graph(session_id, web_data, db_data, target_arango_db=None, workspace_id=None):
 
     net = Network(
         height="850px",
@@ -167,26 +179,39 @@ def generate_session_graph(session_id, web_data, db_data, target_arango_db=None)
     )
 
     type_colors = {
-    "ProductCategory": "#ff4081",   # pink — top-level product
-    "Construction":    "#e040fb",   # purple — construction subtype
-    "VehicleSegment":  "#2979ff",   # blue — end-use vehicle
-    "BillingChannel":  "#00bfa5",   # teal — sales channel
-    "Dealer":          "#ffc107",   # amber — customer/dealer
-    "Region":          "#ff9800",   # orange — geography
-    "Zone":            "#ff6d00",   # deep orange — geography parent
-    "Material":        "#9ccc65",   # green — SKU/product code
-    "Customer":        "#ffc107",   # fallback
-    "Category":        "#ff4081",   # fallback
-    "Date":            "#00bcd4",
-    "Month":           "#18ffff",
+        "ProductCategory": "#ff4081",   # pink — top-level product
+        "Construction":    "#e040fb",   # purple — construction subtype
+        "VehicleSegment":  "#2979ff",   # blue — end-use vehicle
+        "BillingChannel":  "#00bfa5",   # teal — sales channel
+        "Dealer":          "#ffc107",   # amber — customer/dealer
+        "Region":          "#ff9800",   # orange — geography
+        "Zone":            "#ff6d00",   # deep orange — geography parent
+        "Material":        "#9ccc65",   # green — SKU/product code
+        "Customer":        "#ffc107",   # fallback
+        "Category":        "#ff4081",   # fallback
+        "Date":            "#00bcd4",
+        "Month":           "#18ffff",
     }
+    
+    if workspace_id:
+        import json
+        from database.prompt_loader import get_prompt
+        config_json = get_prompt(workspace_id, 'workspace_config')
+        if config_json and config_json.strip():
+            try:
+                cfg = json.loads(config_json)
+                if "type_colors" in cfg:
+                    type_colors = cfg["type_colors"]
+            except Exception as e:
+                print(f"[Graph] Error parsing workspace_config JSON for type_colors: {e}")
+
 
     table_columns = {}
     for db in db_data:
         for table in db["tables"]:
             table_columns[table["table_name"]] = table.get("columns", [])
 
-    graph_data = detect_cross_source_relationships(table_columns, web_data, db_data)
+    graph_data = detect_cross_source_relationships(table_columns, web_data, db_data, workspace_id)
     nodes = graph_data.get("nodes", [])
     edges = graph_data.get("edges", [])
 
@@ -833,7 +858,7 @@ def session_analysis_controller(get_connection_func):
             }), 500
 
         analysis  = _call_mistral(context, topics, databases, system_prompt)
-        graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db)
+        graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db, workspace_id)
 
         if not analysis:
             return jsonify({
