@@ -7,6 +7,13 @@ from database.config import ACTIVE_LLM, GEMINI_API_KEY, MODEL_NAME, MISTRAL_API_
 
 def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 0.3) -> str:
     print(f"[LLM Client] Using ACTIVE_LLM: {ACTIVE_LLM}")
+    
+    # --- DEBUG LOG FOR ALL LLM CALLS ---
+    system_msg = next((m["content"] for m in messages if m.get("role") == "system"), None)
+    if system_msg:
+        print(f"\n{'='*60}\n[LLM CLIENT] SYSTEM PROMPT BEING SENT:\n{'-'*60}\n{system_msg}\n{'='*60}\n")
+    # -----------------------------------
+
     try:
         # 1. Gemini Cloud
         if ACTIVE_LLM == "gemini":

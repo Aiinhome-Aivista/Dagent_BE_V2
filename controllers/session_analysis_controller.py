@@ -30,8 +30,8 @@ from database.config import (
 )
 
 MISTRAL_URL   = "https://api.mistral.ai/v1/chat/completions"
-MAX_ROWS      = 100
-MAX_CTX_CHARS = 24000
+MAX_ROWS      = 10
+MAX_CTX_CHARS = 8000
 
 
 # ══════════════════════════════════════════════════════
@@ -664,8 +664,6 @@ def _call_mistral(context: str, topics: list, databases: list, system_prompt: st
     if "JSON" not in system_prompt.upper():
         system_prompt += "\n\nCRITICAL: Respond ONLY in valid JSON with a single key: \"report\"."
         
-    print(f"\n[LLM] Final System Prompt being sent:\n{'-'*50}\n{system_prompt}\n{'-'*50}\n")
-    
     source_desc = []
     if topics:    source_desc.append(f"web topics: {', '.join(topics)}")
     if databases: source_desc.append(f"databases: {', '.join(databases)}")

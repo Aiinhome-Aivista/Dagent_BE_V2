@@ -1609,11 +1609,10 @@ def session_rag_chat_controller(get_connection_func):
     # Apply fetched prompts
     system_prompt = get_prompt(workspace_id, 'rag_chat')
     if not system_prompt or not system_prompt.strip():
-        yield json.dumps({
+        return jsonify({
             "status": "error", "statusCode": 500,
             "message": "RAG chat prompt not configured in database. Please configure it in the Admin Panel."
-        }) + "\n"
-        return
+        }), 500
 
     # Greeting
     if question and _is_greet(question):
@@ -1715,11 +1714,10 @@ def session_rag_chat_controller(get_connection_func):
         # ─────────────────────────────────────────────
         canon_sys = get_prompt(workspace_id, 'canonicalization')
         if not canon_sys or not canon_sys.strip():
-            yield json.dumps({
+            return jsonify({
                 "status": "error", "statusCode": 500, 
                 "message": "Canonicalization prompt not configured in database."
-            }) + "\n"
-            return
+            }), 500
 #         """You are a Query Canonicalizer for Business Intelligence.
 # Convert the user's natural language question into a structured JSON representation (Canonical Query).
 # Do not generate SQL yet. Extract the core analytical components.
@@ -1743,11 +1741,10 @@ def session_rag_chat_controller(get_connection_func):
         # ─────────────────────────────────────────────
         sql_sys = get_prompt(workspace_id, 'sql_generation')
         if not sql_sys or not sql_sys.strip():
-            yield json.dumps({
+            return jsonify({
                 "status": "error", "statusCode": 500, 
                 "message": "SQL Generation prompt not configured in database."
-            }) + "\n"
-            return
+            }), 500
 #         """You are a Senior Data Analyst, SQL Expert, and Business Intelligence Assistant.
 
 # PRIMARY OBJECTIVE
@@ -2219,7 +2216,12 @@ def session_rag_chat_controller(get_connection_func):
         if len(q_parts) > 1 else ""
     )
 
-    _answer_tpl = get_prompt(workspace_id, 'rag_chat_answer') or ''
+    _answer_tpl = get_prompt(workspace_id, 'rag_chat_answer')
+    if not _answer_tpl or not _answer_tpl.strip():
+        return jsonify({
+            "status": "error", "statusCode": 500,
+            "message": "RAG chat answer prompt not configured in database. Please configure it in the Admin Panel."
+        }), 500
     _answer_msg = (
         _answer_tpl
         .replace('{context}', context)
