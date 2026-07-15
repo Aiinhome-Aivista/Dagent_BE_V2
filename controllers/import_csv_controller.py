@@ -246,6 +246,7 @@ def import_csv_data(get_db_connection):
 
         imported_files = []
         unique_tables_info = {}
+        force_import_tables = set()  # Track tables that are newly created or empty during this API call
 
         # fetch credential
         query = """
@@ -368,9 +369,13 @@ def import_csv_data(get_db_connection):
             cursor.execute("SELECT id FROM external_db_sync_log WHERE session_id=%s AND external_database=%s AND action_type='IMPORT'", (session_id, file))
             already_imported = cursor.fetchone() is not None
             
-            # If the table is empty (e.g. because the user dropped it), we should force import!
+            # If the table was just created, or if it is currently empty, mark it for forced import
             user_cursor.execute(f"SELECT COUNT(*) as cnt FROM `{table_name}`")
             if user_cursor.fetchone()['cnt'] == 0:
+                force_import_tables.add(table_name)
+                
+            # If this table is marked for forced import in this run, bypass the session log
+            if table_name in force_import_tables:
                 already_imported = False
             
             rows_inserted = 0
