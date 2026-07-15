@@ -902,7 +902,7 @@ def detect_cross_source_relationships(table_columns: dict, web_data: list, db_da
 You are an expert Knowledge Graph Builder specializing in tyre and automotive parts distribution data.
 
 Analyze the uploaded sales dataset and generate a RICH, HIERARCHICAL, business-focused Knowledge Graph.
-The graph MUST reflect the full product taxonomy AND all business relationships visible in the data.
+The graph MUST reflect the full product taxonomy AND all business relationships visible in the data from the 9 Master tables and 3 Fact tables.
 
 ## DB Tables and Sample Data:
 {json.dumps(db_summary, indent=2)}
@@ -914,83 +914,70 @@ The graph MUST reflect the full product taxonomy AND all business relationships 
 
 ## MANDATORY GRAPH STRUCTURE
 
-### LEVEL 1 — Product Category Nodes (CATEGORY column)
-Create one node per unique product category found in the data.
-Known categories in this dataset: Tyre, Tube, Flap, Ret read Belt, Vul. Solution
+### LEVEL 1 — Product Category Nodes (from Category Master)
+Create one node per unique category found in the data (e.g., Tyre, Tube, Flap).
 Node type: "ProductCategory"
 
-### LEVEL 2 — Construction Type Nodes (CONSTRUCTION column)
-Create one node per unique construction type found in the data.
-Known construction types: BIAS, RADIAL, BIAS DOT
+### LEVEL 2 — Construction Nodes (from Construction Master)
+Create one node per unique construction type (e.g., BIAS, RADIAL).
 Node type: "Construction"
 
-MANDATORY EDGES — for every (Category, Construction) combination that exists in the data:
-  (ProductCategory) --[HAS_CONSTRUCTION]--> (Construction)
+### LEVEL 3 — Tyre/Vehicle Type Nodes (from Tyre Type Master)
+Create one node per unique vehicle/application type (e.g., TRUCK, LCV, CAR, 3W, SCV).
+Node type: "TyreType"
 
-Example: Tyre → BIAS, Tyre → RADIAL, Tube → BIAS, Tube → RADIAL, Flap → BIAS, Flap → RADIAL
+### LEVEL 4 — SKU/Material Nodes (from SKU Master)
+Identify the TOP 15 most frequently appearing SKUs/Materials in the sales data.
+Node type: "SKU"
 
-### LEVEL 3 — Tyre/Vehicle Type Nodes (TYRE TYPE column)
-Create one node per unique vehicle/application type found in the data.
-Known types: TRUCK, LCV, CAR, SCV, Motor Cycle, SCOOTER, 3W, JEEP, TRACTOR FRONT, TRACTOR REAR, TRACTOR TRAILER, OTR, INDUSTRIAL
-Node type: "VehicleSegment"
+### LEVEL 5 — Customer/Dealer Nodes (from Customer Master)
+Identify the TOP 15 most frequently appearing customers in the sales data.
+Node type: "Customer"
 
-MANDATORY EDGES — for every (Construction, TyreType) combination that actually exists in the data:
-  (Construction) --[FITS_VEHICLE]--> (VehicleSegment)
+### LEVEL 6 — Customer Class Nodes (from Class Master)
+Create one node for each customer class (e.g., A, B, C, D).
+Node type: "CustomerClass"
 
-IMPORTANT: Only create edges that actually exist in the data. For example:
-- RADIAL construction connects to: TRUCK, LCV, CAR, SCV (but NOT Motor Cycle, Scooter, 3W — those only appear under BIAS)
-- BIAS construction connects to: TRUCK, LCV, SCV, Motor Cycle, SCOOTER, 3W, JEEP, TRACTOR FRONT, TRACTOR REAR, OTR, INDUSTRIAL
+### LEVEL 7 — Account Group Nodes (from Account Group Master)
+Create one node for each account group (e.g., ZOR, Z1).
+Node type: "AccountGroup"
 
-### LEVEL 4 — Billing/Channel Type Nodes (Billing type column)
-Create nodes for each billing channel found in the data.
+### LEVEL 8 — Geography Nodes (from Region & Territory Masters)
+Create nodes for Zone, Region, and Territory based on the data.
+Node types: "Zone", "Region", "Territory"
+
+### LEVEL 9 — Billing/Channel Type Nodes (from Fact Tables)
+Create nodes for each billing distribution channel (e.g., ZOR, ZBCL, ZCC).
 Node type: "BillingChannel"
-Known billing types and their business meanings:
-  - ZOR = Standard dealer order
-  - ZBCL = Scheme/claim billing
-  - ZFCL = Free of charge (FOC/sample) billing
-  - ZBFO = Bill & forward billing
-  - ZRDR = Return/debit note
-  - ZCCR = Credit note
-  - ZCC = Cash/counter sale
 
-MANDATORY EDGES:
-  (ProductCategory) --[SOLD_VIA]--> (BillingChannel)
-Only create these edges for combinations that actually appear in the sample data.
 
-### LEVEL 5 — Region and Zone Nodes
-Create Region and Zone nodes from the data.
-Node type: "Region" for region values (e.g., JAIPUR)
-Node type: "Zone" for zone values (e.g., Central)
+## MANDATORY EDGES (Only create if supported by data)
 
-MANDATORY EDGES:
-  (Zone) --[CONTAINS]--> (Region)
-  (Region) --[TOP_CATEGORY_IN_REGION]--> (ProductCategory)  [for the highest volume category]
+1. PRODUCT HIERARCHY
+   - (ProductCategory) --[HAS_CONSTRUCTION]--> (Construction)
+   - (Construction) --[FITS_TYRE_TYPE]--> (TyreType)
+   - (SKU) --[BELONGS_TO_CATEGORY]--> (ProductCategory)
+   - (SKU) --[HAS_CONSTRUCTION_TYPE]--> (Construction)
+   - (SKU) --[USED_IN]--> (TyreType)
 
-### LEVEL 6 — Top Material (SKU) Nodes
-From the Material column, identify the TOP 8 most frequently appearing SKUs in the sample data.
-Node type: "Material"
+2. CUSTOMER & GEOGRAPHY HIERARCHY
+   - (Zone) --[CONTAINS_REGION]--> (Region)
+   - (Region) --[CONTAINS_TERRITORY]--> (Territory)
+   - (Territory) --[HAS_CUSTOMER]--> (Customer)
+   - (Customer) --[HAS_CLASS]--> (CustomerClass)
+   - (Customer) --[BELONGS_TO_ACCOUNT_GROUP]--> (AccountGroup)
 
-MANDATORY EDGES:
-  (Material) --[BELONGS_TO]--> (ProductCategory)  [based on the category column for that material]
-  (Material) --[HAS_CONSTRUCTION_TYPE]--> (Construction)
-  (Material) --[USED_IN]--> (VehicleSegment)
-
-### LEVEL 7 — Top Customer/Dealer Nodes
-From the Customer column, identify the TOP 5 most frequently appearing customers in the sample data.
-Node type: "Dealer"
-
-MANDATORY EDGES:
-  (Dealer) --[LOCATED_IN]--> (Region)
-  (Dealer) --[PRIMARILY_BUYS]--> (ProductCategory)  [the category with most transactions for this dealer]
+3. FACT / TRANSACTION EDGES (Linking Customer to Material via Sales Data)
+   - (Customer) --[PURCHASED]--> (SKU)
+   - (Customer) --[PRIMARILY_BUYS]--> (ProductCategory)
+   - (ProductCategory) --[SOLD_VIA]--> (BillingChannel)
 
 ---
 
 ## NUMERICAL PROPERTIES (store as node/edge properties, NEVER as separate nodes)
-- On ProductCategory nodes: total_quantity, total_invoice_value, transaction_count
-- On VehicleSegment nodes: dominant_category (most common product category for this segment)
-- On FITS_VEHICLE edges: transaction_count, avg_invoice_value
-- On SOLD_VIA edges: transaction_count
-- On PRIMARILY_BUYS edges: transaction_count, total_value
+- On ProductCategory / SKU nodes: total_sales_qty, total_invoice_value, total_discount
+- On Customer nodes: total_invoice_value, total_claims
+- On PURCHASED edges: transaction_count, total_invoice_value, total_qty
 
 ---
 
@@ -998,62 +985,54 @@ MANDATORY EDGES:
 Return EXACTLY this JSON (no markdown, no extra text):
 {{
   "nodes": [
-    {{"id": "cat_tyre", "label": "Tyre", "type": "ProductCategory", "properties": {{"transaction_count": 0}}}},
-    {{"id": "cat_tube", "label": "Tube", "type": "ProductCategory", "properties": {{}}}},
-    {{"id": "cat_flap", "label": "Flap", "type": "ProductCategory", "properties": {{}}}},
+    {{"id": "cat_tyre", "label": "Tyre", "type": "ProductCategory", "properties": {{"total_invoice_value": 0}}}},
     {{"id": "const_bias", "label": "BIAS", "type": "Construction", "properties": {{}}}},
-    {{"id": "const_radial", "label": "RADIAL", "type": "Construction", "properties": {{}}}},
-    {{"id": "seg_truck", "label": "TRUCK", "type": "VehicleSegment", "properties": {{"dominant_category": "Tyre"}}}},
-    {{"id": "seg_car", "label": "CAR", "type": "VehicleSegment", "properties": {{}}}},
-    {{"id": "ch_zor", "label": "ZOR (Standard Order)", "type": "BillingChannel", "properties": {{}}}},
+    {{"id": "tt_truck", "label": "TRUCK", "type": "TyreType", "properties": {{}}}},
+    {{"id": "sku_1001", "label": "1001-TYRE", "type": "SKU", "properties": {{}}}},
+    {{"id": "cust_99", "label": "CUST 99", "type": "Customer", "properties": {{}}}},
+    {{"id": "cls_A", "label": "Class A", "type": "CustomerClass", "properties": {{}}}},
+    {{"id": "acc_z1", "label": "Z1 Group", "type": "AccountGroup", "properties": {{}}}},
+    {{"id": "zone_central", "label": "Central", "type": "Zone", "properties": {{}}}},
     {{"id": "reg_jaipur", "label": "JAIPUR", "type": "Region", "properties": {{}}}},
-    {{"id": "zone_central", "label": "Central", "type": "Zone", "properties": {{}}}}
+    {{"id": "ter_north", "label": "North Terr", "type": "Territory", "properties": {{}}}},
+    {{"id": "ch_zor", "label": "ZOR", "type": "BillingChannel", "properties": {{}}}}
   ],
   "edges": [
     {{"from": "cat_tyre", "to": "const_bias", "label": "HAS_CONSTRUCTION", "properties": {{}}}},
-    {{"from": "cat_tyre", "to": "const_radial", "label": "HAS_CONSTRUCTION", "properties": {{}}}},
-    {{"from": "const_bias", "to": "seg_truck", "label": "FITS_VEHICLE", "properties": {{}}}},
-    {{"from": "const_radial", "to": "seg_car", "label": "FITS_VEHICLE", "properties": {{}}}},
-    {{"from": "cat_tyre", "to": "ch_zor", "label": "SOLD_VIA", "properties": {{}}}},
-    {{"from": "zone_central", "to": "reg_jaipur", "label": "CONTAINS", "properties": {{}}}},
-    {{"from": "reg_jaipur", "to": "cat_tyre", "label": "TOP_CATEGORY_IN_REGION", "properties": {{}}}}
+    {{"from": "sku_1001", "to": "cat_tyre", "label": "BELONGS_TO_CATEGORY", "properties": {{}}}},
+    {{"from": "cust_99", "to": "sku_1001", "label": "PURCHASED", "properties": {{"total_invoice_value": 50000}}}},
+    {{"from": "zone_central", "to": "reg_jaipur", "label": "CONTAINS_REGION", "properties": {{}}}},
+    {{"from": "reg_jaipur", "to": "ter_north", "label": "CONTAINS_TERRITORY", "properties": {{}}}},
+    {{"from": "ter_north", "to": "cust_99", "label": "HAS_CUSTOMER", "properties": {{}}}},
+    {{"from": "cust_99", "to": "cls_A", "label": "HAS_CLASS", "properties": {{}}}},
+    {{"from": "cust_99", "to": "acc_z1", "label": "BELONGS_TO_ACCOUNT_GROUP", "properties": {{}}}}
   ],
-  "identified_node_types": ["ProductCategory", "Construction", "VehicleSegment", "BillingChannel", "Region", "Zone", "Material", "Dealer"],
-  "identified_relationship_types": ["HAS_CONSTRUCTION", "FITS_VEHICLE", "SOLD_VIA", "CONTAINS", "TOP_CATEGORY_IN_REGION", "BELONGS_TO", "HAS_CONSTRUCTION_TYPE", "USED_IN", "LOCATED_IN", "PRIMARILY_BUYS"],
+  "identified_node_types": ["ProductCategory", "Construction", "TyreType", "SKU", "Customer", "CustomerClass", "AccountGroup", "Zone", "Region", "Territory", "BillingChannel"],
+  "identified_relationship_types": ["HAS_CONSTRUCTION", "FITS_TYRE_TYPE", "BELONGS_TO_CATEGORY", "HAS_CONSTRUCTION_TYPE", "USED_IN", "CONTAINS_REGION", "CONTAINS_TERRITORY", "HAS_CUSTOMER", "HAS_CLASS", "BELONGS_TO_ACCOUNT_GROUP", "PURCHASED", "PRIMARILY_BUYS", "SOLD_VIA"],
   "graph_schema": [
-    "(ProductCategory)-[:HAS_CONSTRUCTION]->(Construction)",
-    "(Construction)-[:FITS_VEHICLE]->(VehicleSegment)",
-    "(ProductCategory)-[:SOLD_VIA]->(BillingChannel)",
-    "(Zone)-[:CONTAINS]->(Region)",
-    "(Material)-[:BELONGS_TO]->(ProductCategory)",
-    "(Dealer)-[:PRIMARILY_BUYS]->(ProductCategory)"
+    "(Customer)-[:PURCHASED]->(SKU)",
+    "(SKU)-[:BELONGS_TO_CATEGORY]->(ProductCategory)",
+    "(Territory)-[:HAS_CUSTOMER]->(Customer)"
   ],
   "sample_cypher_queries": [
-    "MATCH (c:ProductCategory)-[:HAS_CONSTRUCTION]->(cn:Construction)-[:FITS_VEHICLE]->(v:VehicleSegment) RETURN c.label, cn.label, v.label",
-    "MATCH (d:Dealer)-[:PRIMARILY_BUYS]->(c:ProductCategory) RETURN d.label, c.label ORDER BY d.transaction_count DESC LIMIT 10",
-    "MATCH (m:Material)-[:USED_IN]->(v:VehicleSegment) WHERE v.label='TRUCK' RETURN m.label"
+    "MATCH (c:Customer)-[p:PURCHASED]->(s:SKU) RETURN c.label, s.label, p.total_invoice_value ORDER BY p.total_invoice_value DESC LIMIT 10",
+    "MATCH (t:Territory)-[:HAS_CUSTOMER]->(c:Customer) RETURN t.label, count(c) as customer_count"
   ],
   "business_insights": [
-    "RADIAL construction dominates CAR and LCV segments while BIAS covers two-wheeler, SCV and tractor segments",
-    "Tyre is the highest-volume ProductCategory, followed by Tube and Flap",
-    "ZOR (standard order) is the primary billing channel, with ZBCL (scheme billing) significant for Tyre category",
-    "TRUCK segment consumes both Tyre, Tube and Flap — all three product categories — making it the most cross-category vehicle type"
+    "Identify any insights based on the relationship between Customer Classes and Top SKUs",
+    "Identify top regions based on Customer purchases"
   ],
   "suggested_graphrag_paths": [
-    "Start from ProductCategory → HAS_CONSTRUCTION → Construction → FITS_VEHICLE → VehicleSegment (full product-to-market path)",
-    "Start from Dealer → PRIMARILY_BUYS → ProductCategory → HAS_CONSTRUCTION → Construction (dealer preference path)",
-    "Start from Zone → CONTAINS → Region → TOP_CATEGORY_IN_REGION → ProductCategory (geographic demand path)"
+    "Start from Customer → PURCHASED → SKU → BELONGS_TO_CATEGORY → ProductCategory",
+    "Start from Zone → CONTAINS_REGION → Region → CONTAINS_TERRITORY → Territory → HAS_CUSTOMER → Customer"
   ]
 }}
 
 ## RULES
 1. Use ONLY node IDs you defined in the "nodes" array for "from"/"to" in edges.
 2. Extract actual values from the sample data — do NOT invent SKU codes or customer IDs.
-3. Every ProductCategory node MUST have at least one HAS_CONSTRUCTION edge.
-4. Every Construction node MUST have at least one FITS_VEHICLE edge.
-5. BIAS and RADIAL are different construction types for the SAME categories (Tyre, Tube, Flap) — they are siblings under each category, not children of each other.
-6. Do NOT create a node for every single Material or Customer — only the top 5-8 most frequent ones from the sample.
-7. Node IDs must be unique strings with no spaces (use underscores).
+3. Node IDs must be unique strings with no spaces (use underscores).
+4. For nodes like Customer, SKU, limit to the top 15 most frequent/significant ones from the sample to avoid overwhelming the graph, but capture all master table reference nodes (like Category, Construction, Region, etc.).
 """
 
     messages = [{"role": "user", "content": prompt}]
@@ -1086,14 +1065,15 @@ def generate_session_graph(session_id, web_data, db_data, target_arango_db=None)
     type_colors = {
     "ProductCategory": "#ff4081",   # pink — top-level product
     "Construction":    "#e040fb",   # purple — construction subtype
-    "VehicleSegment":  "#2979ff",   # blue — end-use vehicle
-    "BillingChannel":  "#00bfa5",   # teal — sales channel
-    "Dealer":          "#ffc107",   # amber — customer/dealer
-    "Region":          "#ff9800",   # orange — geography
+    "TyreType":        "#2979ff",   # blue — end-use vehicle
+    "SKU":             "#9ccc65",   # green — SKU/product code
+    "Customer":        "#ffc107",   # amber — customer/dealer
+    "CustomerClass":   "#ff9800",   # orange — customer class
+    "AccountGroup":    "#ff5722",   # deep orange — account group
     "Zone":            "#ff6d00",   # deep orange — geography parent
-    "Material":        "#9ccc65",   # green — SKU/product code
-    "Customer":        "#ffc107",   # fallback
-    "Category":        "#ff4081",   # fallback
+    "Region":          "#fb8c00",   # orange — geography
+    "Territory":       "#f57c00",   # orange — geography child
+    "BillingChannel":  "#00bfa5",   # teal — sales channel
     "Date":            "#00bcd4",
     "Month":           "#18ffff",
     }
