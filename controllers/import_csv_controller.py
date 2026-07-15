@@ -368,6 +368,11 @@ def import_csv_data(get_db_connection):
             cursor.execute("SELECT id FROM external_db_sync_log WHERE session_id=%s AND external_database=%s AND action_type='IMPORT'", (session_id, file))
             already_imported = cursor.fetchone() is not None
             
+            # If the table is empty (e.g. because the user dropped it), we should force import!
+            user_cursor.execute(f"SELECT COUNT(*) as cnt FROM `{table_name}`")
+            if user_cursor.fetchone()['cnt'] == 0:
+                already_imported = False
+            
             rows_inserted = 0
             
             if not already_imported:
