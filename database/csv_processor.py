@@ -32,7 +32,7 @@ from sqlalchemy.types import DECIMAL, BigInteger, Date, Text
 # ──────────────────────────────────────────────────────────────────────────
 CHUNK_SIZE          = 300_000
 SAMPLE_ROWS         = 50_000          # rows used to infer column types
-NUMERIC_THRESHOLD   = 0.80            # ≥80% of non-blank values parse as number
+NUMERIC_THRESHOLD   = 0.99            # ≥99% of non-blank values parse as number (strict to protect text data)
 DATE_THRESHOLD      = 0.80            # ≥80% of non-blank values parse as a date
 MONEY_PRECISION     = 30              # DECIMAL(precision, scale) for numeric cols
 MONEY_SCALE         = 8
