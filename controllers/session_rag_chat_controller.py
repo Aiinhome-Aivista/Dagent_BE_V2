@@ -5708,10 +5708,10 @@ BUSINESS DEFINITIONS
 - Net Sales = SUM(invoice_value) - SUM(total_discount)
 - Invoice Count = COUNT(DISTINCT invoice_number)
 - Product = Material
-- Product Category = the `CATEGORY` column (Tyre, Tube, Flap, ...) — a PRODUCT attribute; join product ON invoice.Material = product.Material
-- Construction / "tyre type" / "tube type" = the `CONSTRUCTION` column (RADIAL, BIAS, ...) — a PRODUCT attribute on the product table (join on Material)
-- Vehicle / "vehicle type" / "vehicle category" = the `vehicle type` column (TRUCK, CAR, LCV, ...) — a PRODUCT attribute on the product table (join on Material). This is DIFFERENT from CATEGORY; never substitute one for the other.
-- These three (CATEGORY, CONSTRUCTION, `vehicle type`) are PRODUCT attributes keyed by Material. They are NEVER on the customer/dealer table; do not join them on Customer.
+- Product Category ("Tyre", "Tube", "Flap") = ALWAYS LEFT JOIN `category_master` on `sku_master.category = category_master.category_code` and select `category_name`. Do NOT just select the category code from `sku_master`.
+- Construction / "tyre type" / "tube type" ("RADIAL", "BIAS") = ALWAYS LEFT JOIN `construction_master` on `sku_master.construction = construction_master.construction_code` and select `construction_description`.
+- Vehicle / "vehicle type" / "vehicle category" ("TRUCK", "CAR") = ALWAYS LEFT JOIN `tyre_type_master` on `sku_master.tyre_type = tyre_type_master.tyre_type_code` and select `tyre_type_name`. This is DIFFERENT from CATEGORY.
+- These attributes are PRODUCT attributes keyed by Material (`sku_master`). First LEFT JOIN `sku_master` to fact, then LEFT JOIN these master tables to `sku_master`. Never join them directly on Customer.
 - "category-wise" / "by category" / "product category wise" / "per category" => GROUP BY `CATEGORY`, NOT Material
 - "product-wise" / "by product" => GROUP BY Material
 - Top Dealer = Dealer ranked by Sales descending
@@ -5862,6 +5862,12 @@ PLAIN TOP-N vs WINDOWED TOP-N
   `... GROUP BY entity ORDER BY metric DESC LIMIT N`. Do NOT use a window
   function or CTE for it — that adds a needless alias that often breaks.
 - Use the window-function pattern ONLY for per-group ("X-wise") questions.
+
+JOINS AND MISSING DIMENSIONS (CRITICAL)
+- ALWAYS use `LEFT JOIN` when joining a fact table (e.g. `sales_data`) to a dimension table (e.g. `customer_master`, `sku_master`) to fetch names.
+- NEVER use an `INNER JOIN` (or plain `JOIN`) that might drop valid fact records just because the dimension data is missing.
+- When selecting the name from a dimension table, ALWAYS use `COALESCE(dim.name_col, 'N/A')` to handle missing records.
+  Example: `LEFT JOIN customer_master cm ON s.customer = cm.KUNNR` -> `SELECT COALESCE(cm.Cname, 'N/A') AS dealer_name`
   
 
 MULTI-LEVEL BREAKDOWN ("Top/Worst N along with their X-wise breakup")
@@ -5898,7 +5904,7 @@ Rank Products because "product construction" appears in the question.
 - When asked to find the Top N or Worst N entities overall AND THEN show their breakdown (e.g., "worst 2 performers along with their product category wise sales breakup"):
   1. FIRST, create a CTE to calculate the total aggregate (SUM) per entity and LIMIT to Top/Worst N.
      Example: `WITH top_entities AS (SELECT entity, SUM(metric) as total FROM fact GROUP BY entity ORDER BY total DESC LIMIT N)`
-  2. THEN, write a main query that joins this CTE back to the fact table and dimension tables.
+  2. THEN, write a main query that LEFT JOINS this CTE back to the fact table and dimension tables.
   3. FINALLY, GROUP BY both the entity AND the breakdown dimension, selecting `SUM(metric)` as the category sales.
   4. NEVER rank individual unaggregated rows using ROW_NUMBER() without summing first.
 
