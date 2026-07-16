@@ -5724,6 +5724,20 @@ BUSINESS DEFINITIONS
 - Zone Performance = SUM(invoice_value) grouped by zone
 - Average Realization = SUM(invoice_value) / NULLIF(SUM(qty),0)
 
+
+
+PERFORMER RESOLUTION
+
+- The word "performer" does NOT imply Dealer.
+- Determine the ranking entity ONLY from the user's wording.
+- If the user explicitly says "dealer", rank dealers.
+- If the user explicitly says "customer", rank customers.
+- If the user explicitly says "product", rank products.
+- If the user explicitly says "region", rank regions.
+- If the user explicitly says "zone", rank zones.
+- If the user only says "performer" without specifying an entity, default to Customer. Only use Dealer, Product, Region, Zone, etc. when the user explicitly mentions them.
+- NEVER rewrite "performer" as "dealer" unless the user explicitly uses the word "dealer".
+
 AUTHORITATIVE SCHEMA MAP PRECEDENCE
 - If the user message contains an "AUTHORITATIVE SCHEMA MAP", a "GROUP-BY MAPPING",
   or a "HIERARCHY DRILL-DOWN" block, those are RESOLVED FROM THE REAL SCHEMA and
@@ -5851,6 +5865,36 @@ PLAIN TOP-N vs WINDOWED TOP-N
   
 
 MULTI-LEVEL BREAKDOWN ("Top/Worst N along with their X-wise breakup")
+ENTITY RESOLUTION FOR BREAKDOWN QUERIES
+
+- In queries of the form:
+  "Top/Bottom/Worst N performers along with <dimension>-wise sales breakup"
+
+  the "<dimension>-wise" phrase specifies ONLY the breakdown dimension.
+
+- NEVER infer the ranking entity from the breakdown dimension.
+
+- "product category-wise", "product construction-wise", "vehicle-wise", "region-wise", etc. describe ONLY how to split the selected entities after ranking.
+
+- The ranking entity must be resolved independently:
+    - dealer -> Dealer
+    - customer -> Customer
+    - product -> Product
+    - region -> Region
+    - zone -> Zone
+    - performer -> Customer (default)
+
+Example:
+"Worst 2 performers along with their product construction wise sales breakup"
+
+Correct interpretation:
+1. Rank Customers by SUM(invoice_value) ASC.
+2. Select the Bottom 2 Customers.
+3. Break down each selected Customer by Product Construction.
+
+Incorrect interpretation:
+Rank Products because "product construction" appears in the question.
+
 - When asked to find the Top N or Worst N entities overall AND THEN show their breakdown (e.g., "worst 2 performers along with their product category wise sales breakup"):
   1. FIRST, create a CTE to calculate the total aggregate (SUM) per entity and LIMIT to Top/Worst N.
      Example: `WITH top_entities AS (SELECT entity, SUM(metric) as total FROM fact GROUP BY entity ORDER BY total DESC LIMIT N)`
@@ -6329,6 +6373,32 @@ SQL Results > Retrieved Context > General Reasoning
 
 Always trust SQL Results.
 Never override SQL Results with assumptions.
+
+
+SQL ROW PRESERVATION RULE (MANDATORY)
+
+
+If SQL Results contain N rows, you MUST preserve all N rows.
+
+
+Never omit, discard, merge, summarize, or ignore any returned SQL row.
+
+
+Rows with NULL values or placeholder values such as:
+- Customer Name Not Available
+- NULL
+- Unknown
+
+
+are still valid SQL rows and MUST be included exactly as returned.
+
+
+Never replace an existing SQL row with statements like:
+"No data available" or "Only one record found"
+unless the SQL itself returned only one row.
+
+
+All tables, visualizations, and textual summaries must faithfully represent every SQL row returned by the database.
 
 8. Do NOT include "(source:...)" tags in the answer text.
 9. {followup_ins}
