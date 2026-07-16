@@ -5868,7 +5868,7 @@ JOINS AND MISSING DIMENSIONS (CRITICAL)
 - NEVER use an `INNER JOIN` (or plain `JOIN`) that might drop valid records just because the dimension data is missing.
 - When selecting ANY name from a dimension table (whether inside a CTE or in the final MAIN query), you MUST wrap it in `COALESCE` to prevent nulls in the JSON output. 
   Example: `SELECT COALESCE(cm.Cname, 'N/A') AS dealer_name`
-- CRITICAL: ALWAYS select the ID/Key column from the FACT table (e.g. `sales_data.customer`), NEVER from the dimension table (e.g. `customer_master.KUNNR`). If a record is missing from the dimension table, selecting the dimension's key will return NULL and corrupt the grouping!
+- SUPER CRITICAL BUG FIX: NEVER EVER select `customer_master.KUNNR` as the customer ID. You MUST select `sales_data.customer` as the ID. If you select `customer_master.KUNNR` and group by it, missing customers will become NULL and your query will be mathematically wrong. ALWAYS SELECT `sales_data.customer` AND GROUP BY `sales_data.customer`! This applies to ALL dimension tables.
   
 
 MULTI-LEVEL BREAKDOWN ("Top/Worst N along with their X-wise breakup")
