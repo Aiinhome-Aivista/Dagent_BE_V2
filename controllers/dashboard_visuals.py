@@ -697,13 +697,22 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
 
     # Find the fact table
     fact_table = None
-    for tbl, cols in table_columns.items():
-        req_keys = list(required_metrics.keys())
-        # Check if first required metric is in this table
-        if req_keys and check_match(cols, required_metrics[req_keys[0]]):
+    
+    # ALWAYS prioritize sales_data if it exists
+    for tbl in table_columns.keys():
+        if tbl.lower() == "sales_data":
             fact_table = tbl
-            if any("invoice" in k for k in cols.keys()):
-                break
+            break
+            
+    # Fallback to original logic if sales_data is not found
+    if not fact_table:
+        for tbl, cols in table_columns.items():
+            req_keys = list(required_metrics.keys())
+            # Check if first required metric is in this table
+            if req_keys and check_match(cols, required_metrics[req_keys[0]]):
+                fact_table = tbl
+                if any("invoice" in k for k in cols.keys()):
+                    break
     
     if not fact_table:
         fact_table = synced_tables[0] if synced_tables else None
@@ -714,7 +723,78 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
     resolved_cols = {}
     
     all_metrics = {**required_metrics, **optional_dims}
+    
+    # --- MULTI-HOP LOGIC FOR SALES_DATA ---
+    # Since zone is in region_master, it requires a 3-hop join from sales_data.
+    # We must handle this explicitly because the generic logic below only does single-hop.
+    fact_table_actual = None
+    for tbl in table_columns.keys():
+        if tbl.lower() == "sales_data":
+            fact_table_actual = tbl
+            break
 
+    if fact_table_actual and fact_table.lower() == "sales_data":
+        synced_lower = {t.lower(): t for t in synced_tables}
+        from_clause = f"`{user_db}`.`{fact_table_actual}` s"
+        joins = []
+        
+        def add_join(table_key, alias, on_clause):
+            if table_key in synced_lower:
+                actual_tbl = synced_lower[table_key]
+                joins.append(f"LEFT JOIN `{user_db}`.`{actual_tbl}` {alias} ON {on_clause}")
+                return True
+            return False
+
+        add_join("customer_master", "cm", "s.`customer` = cm.`KUNNR`")
+        add_join("territory_master", "tm", "cm.`territory` = tm.`territory_code`")
+        add_join("region_master", "rm", "tm.`region_code` = rm.`region`")
+        add_join("sku_master", "sm", "s.`material` = sm.`MATNR`")
+        add_join("tyre_type_master", "ttm", "sm.`tyre_type` = ttm.`tyre_type_code`")
+        add_join("category_master", "catm", "sm.`category` = catm.`category_code`")
+        add_join("construction_master", "consm", "sm.`construction` = consm.`construction_code`")
+            
+        from_clause += " " + " ".join(joins)
+
+        resolved_cols = {}
+        alias_map = {
+            "customer_master": "cm",
+            "territory_master": "tm",
+            "region_master": "rm",
+            "sku_master": "sm",
+            "tyre_type_master": "ttm",
+            "category_master": "catm",
+            "construction_master": "consm"
+        }
+        
+        for req_key, opts in all_metrics.items():
+            found = check_match(table_columns[fact_table_actual], opts)
+            if found:
+                resolved_cols[req_key] = f"s.`{found}`"
+                continue
+            resolved = False
+            for tbl_key, alias in alias_map.items():
+                if tbl_key in synced_lower:
+                    actual_tbl = synced_lower[tbl_key]
+                    found = check_match(table_columns[actual_tbl], opts)
+                    if found:
+                        resolved_cols[req_key] = f"{alias}.`{found}`"
+                        resolved = True
+                        break
+            if not resolved:
+                resolved_cols[req_key] = None
+                
+        # If required metrics are met, return immediately
+        missing_required = False
+        for req_key in required_metrics.keys():
+            if not resolved_cols.get(req_key):
+                missing_required = True
+                
+        if not missing_required:
+            return from_clause, user_db, resolved_cols
+
+    # --- GENERIC SINGLE-HOP LOGIC FALLBACK ---
+    resolved_cols = {}
+    
     # Try to find all columns in fact_table first
     for req_key, opts in all_metrics.items():
         found = check_match(table_columns[fact_table], opts)
@@ -740,16 +820,42 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
                 # Compare original keys but ignoring spaces and underscores
                 common_cols = set(table_columns[fact_table].keys()) & set(table_columns[tbl].keys())
                 join_key = None
-                for pref in ["material", "customer", "plant", "id", "oldcode"]:
-                    if pref in common_cols:
-                        join_key = pref
-                        break
-                if not join_key and common_cols:
-                    join_key = list(common_cols)[0]
-                    
+                # Check for special mappings first (like material -> MATNR, customer -> KUNNR)
+                fact_keys = table_columns[fact_table].keys()
+                dim_keys = table_columns[tbl].keys()
+                
+                join_col_fact = None
+                join_col_dim = None
+                
+                if "material" in fact_keys and "matnr" in dim_keys:
+                    join_col_fact = table_columns[fact_table]["material"]
+                    join_col_dim = table_columns[tbl]["matnr"]
+                    join_key = "special_mapping"
+                elif "customer" in fact_keys and "kunnr" in dim_keys:
+                    join_col_fact = table_columns[fact_table]["customer"]
+                    join_col_dim = table_columns[tbl]["kunnr"]
+                    join_key = "special_mapping"
+                elif "territory" in fact_keys and "territorycode" in dim_keys:
+                    join_col_fact = table_columns[fact_table]["territory"]
+                    join_col_dim = table_columns[tbl]["territorycode"]
+                    join_key = "special_mapping"
+                elif "regioncode" in fact_keys and "region" in dim_keys:
+                    join_col_fact = table_columns[fact_table]["regioncode"]
+                    join_col_dim = table_columns[tbl]["region"]
+                    join_key = "special_mapping"
+                else:
+                    for pref in ["material", "customer", "plant", "id", "oldcode"]:
+                        if pref in common_cols:
+                            join_key = pref
+                            break
+                    if not join_key and common_cols:
+                        join_key = list(common_cols)[0]
+                        
+                    if join_key:
+                        join_col_fact = table_columns[fact_table][join_key]
+                        join_col_dim = table_columns[tbl][join_key]
+                        
                 if join_key:
-                    join_col_fact = table_columns[fact_table][join_key]
-                    join_col_dim = table_columns[tbl][join_key]
                     joins.append(f"LEFT JOIN `{user_db}`.`{tbl}` {alias} ON s.`{join_col_fact}` = {alias}.`{join_col_dim}`")
                     resolved_cols[req_key] = f"{alias}.`{found_col}`"
                     dim_count += 1
@@ -804,11 +910,11 @@ def tyre_sales_data_controller(get_db_connection):
 
         required_metrics = {
             "vehicle_type": ["vehicle_type", "tyre_type", "category"],
-            "invoice_value": ["invoice_value", "taxable_value", "revenue"]
+            "invoice_value": ["invoice_value", "taxable_value", "revenue", "Invoice_Value_INR"]
         }
         optional_dims = {}
         if has_valid_filters(selected_years):
-            optional_dims["invoice_date"] = ["invoice_date", "date"]
+            optional_dims["invoice_date"] = ["invoice_date", "date", "billing__doc_date"]
         if has_valid_filters(selected_customer_categories):
             optional_dims["customer_category"] = ["customer_type", "customer_category", "cust_type", "type"]
         if has_valid_filters(selected_zones):
@@ -1423,11 +1529,11 @@ def sales_by_zone_data_controller(get_db_connection):
 
         required_metrics = {
             "zone": ["Zone", "zone"],
-            "invoice_value": ["Invoice_Value", "invoice_value", "Taxable_Value", "taxable_value"]
+            "invoice_value": ["Invoice_Value", "invoice_value", "Taxable_Value", "taxable_value", "Invoice_Value_INR"]
         }
         optional_dims = {}
         if has_valid_filters(selected_years) or has_valid_filters(selected_months):
-            optional_dims["invoice_date"] = ["invoice_date", "date"]
+            optional_dims["invoice_date"] = ["invoice_date", "date", "billing__doc_date"]
         if product_type and product_type.lower() != 'all':
             optional_dims["customer_category"] = ["CATEGORY", "product_category", "category"]
         if vehicle_type and vehicle_type.lower() != 'all':
@@ -1672,12 +1778,14 @@ def year_wise_sales_comparison_controller(get_db_connection):
             inv_date = (
                 get_actual_column_name(cursor, tbl, "invoice_date")
                 or get_actual_column_name(cursor, tbl, "date")
+                or get_actual_column_name(cursor, tbl, "billing__doc_date")
             )
 
             inv_value = (
                 get_actual_column_name(cursor, tbl, "invoice_value")
                 or get_actual_column_name(cursor, tbl, "taxable_value")
                 or get_actual_column_name(cursor, tbl, "value")
+                or get_actual_column_name(cursor, tbl, "Invoice_Value_INR")
             )
 
             if inv_date and inv_value:
@@ -1703,7 +1811,8 @@ def year_wise_sales_comparison_controller(get_db_connection):
 
         # Determine actual column names dynamically
         actual_invoice_date = (get_actual_column_name(cursor, table_name, "invoice_date") or 
-                               get_actual_column_name(cursor, table_name, "date"))
+                               get_actual_column_name(cursor, table_name, "date") or
+                               get_actual_column_name(cursor, table_name, "billing__doc_date"))
 
         if not actual_invoice_date:
             return jsonify({
@@ -1717,7 +1826,8 @@ def year_wise_sales_comparison_controller(get_db_connection):
 
         actual_invoice_value = (get_actual_column_name(cursor, table_name, "invoice_value") or 
                                 get_actual_column_name(cursor, table_name, "taxable_value") or
-                                get_actual_column_name(cursor, table_name, "value"))
+                                get_actual_column_name(cursor, table_name, "value") or
+                                get_actual_column_name(cursor, table_name, "Invoice_Value_INR"))
 
         if not actual_invoice_value:
             return jsonify({
@@ -1851,10 +1961,9 @@ def year_wise_sales_comparison_controller(get_db_connection):
                 placeholders = ",".join(["%s"] * len(valid_types))
 
                 where_clauses.append(
-                f"UPPER({actual_customer_type_expr}) IN ({placeholders})"
-            )
-
-        params.extend(valid_types)
+                    f"UPPER({actual_customer_type_expr}) IN ({placeholders})"
+                )
+                params.extend(valid_types)
 
         where_sql = " AND ".join(where_clauses)
         if where_sql:
@@ -2069,7 +2178,8 @@ def available_years_controller(get_db_connection):
         for tbl in tables:
             t_name = f"`{user_db}`.`{tbl}`"
             actual_invoice_date = (get_actual_column_name(cursor, t_name, "invoice_date") or 
-                                   get_actual_column_name(cursor, t_name, "date"))
+                                   get_actual_column_name(cursor, t_name, "date") or
+                                   get_actual_column_name(cursor, t_name, "billing__doc_date"))
             if actual_invoice_date:
                 try:
                     cursor.execute(f"SELECT 1 FROM {t_name} LIMIT 1")
