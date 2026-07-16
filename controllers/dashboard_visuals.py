@@ -2004,7 +2004,19 @@ def default_dashboard_metrics_controller(get_db_connection):
         "metric_1": {"label": "Total Sales Revenue", "value": "N/A", "subtext": "No data available"},
         "metric_2": {"label": "Top Performing Tyre", "value": "N/A", "subtext": "No data available"},
         "metric_3": {"label": "Leading Region", "value": "N/A", "subtext": "No data available"},
-        "metric_4": {"label": "Year-over-Year Growth", "value": "N/A", "subtext": "No data available"}
+        "metric_4": {"label": "Year-over-Year Growth", "value": "N/A", "subtext": "No data available"},
+        # "metric_5": {"label": "Achievement", "value": "42%", "subtext": "Current achievement"},
+        "metric_6": {"label": "Sales Target", "value": "800 Cr", "subtext": "Target sales"},
+        "metric_7": {"label": "Sales Actual", "value": "334 Cr", "subtext": "Actual sales"},
+        "metric_8": {"label": "SAS IN", "value": "951.45 Cr", "subtext": "SAS IN value"},
+        "metric_9": {"label": "SAS Variance", "value": "9.44 Cr", "subtext": "Variance"},
+        "metric_10": {"label": "Billing Scope", "value": "0 Cr", "subtext": "Billing scope"},
+        "metric_11": {"label": "Dealer Spread", "value": "76%", "subtext": "Dealer spread"},
+        "metric_12": {"label": "Overdue", "value": "32%", "subtext": "Overdue percentage"},
+        "metric_13": {"label": "Exposure", "value": "37%", "subtext": "Exposure percentage"},
+        "metric_14": {"label": "Rotation", "value": "0.53", "subtext": "Rotation metric"},
+        "metric_15": {"label": "New Dealer", "value": "37", "subtext": "New dealers"},
+        "metric_16": {"label": "Attrition", "value": "795", "subtext": "Attrition count"}
     }
 
     try:
@@ -2310,7 +2322,19 @@ def default_dashboard_metrics_controller(get_db_connection):
                 "label": "Year-over-Year Growth", 
                 "value": f"{yoy}%" if (current_year > 0 or previous_year > 0) else "N/A", 
                 "subtext": "Compared to last year" if (current_year > 0 or previous_year > 0) else "No data available"
-            }
+            },
+            "metric_5": {"label": "Achievement", "value": "42%", "subtext": "Current achievement"},
+            "metric_6": {"label": "Sales Target", "value": "800 Cr", "subtext": "Target sales"},
+            "metric_7": {"label": "Sales Actual", "value": "334 Cr", "subtext": "Actual sales"},
+            "metric_8": {"label": "SAS IN", "value": "951.45 Cr", "subtext": "SAS IN value"},
+            "metric_9": {"label": "SAS Variance", "value": "9.44 Cr", "subtext": "Variance"},
+            "metric_10": {"label": "Billing Scope", "value": "0 Cr", "subtext": "Billing scope"},
+            "metric_11": {"label": "Dealer Spread", "value": "76%", "subtext": "Dealer spread"},
+            "metric_12": {"label": "Overdue", "value": "32%", "subtext": "Overdue percentage"},
+            "metric_13": {"label": "Exposure", "value": "37%", "subtext": "Exposure percentage"},
+            "metric_14": {"label": "Rotation", "value": "0.53", "subtext": "Rotation metric"},
+            "metric_15": {"label": "New Dealer", "value": "37", "subtext": "New dealers"},
+            "metric_16": {"label": "Attrition", "value": "795", "subtext": "Attrition count"}
         }
 
         return jsonify({"status": "success", "data": metrics_data}), 200
