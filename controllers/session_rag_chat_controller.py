@@ -5813,6 +5813,7 @@ Do not add monthly, yearly, trend, or detailed breakdowns unless explicitly requ
 12. Never hallucinate business results.
 
 13. PRESERVE EXACT DECIMALS: Never round monetary values in SQL unless explicitly asked. Return the exact sum with decimals intact.
+14. NEGATIVE VALUES: NEVER add `> 0` or `>= 0` filters to sales or invoice columns unless the user explicitly asks to "exclude returns" or "only show positive sales". If a dealer's total sales are negative (e.g. -19022.00), that is a valid exact figure and must be included.
 
 COLUMN HYGIENE
 - All numeric columns (sales, invoice_value, quantity, discount, tax) are strictly typed as DECIMAL or BIGINT in the database.
@@ -5847,6 +5848,15 @@ PLAIN TOP-N vs WINDOWED TOP-N
   `... GROUP BY entity ORDER BY metric DESC LIMIT N`. Do NOT use a window
   function or CTE for it — that adds a needless alias that often breaks.
 - Use the window-function pattern ONLY for per-group ("X-wise") questions.
+  
+
+MULTI-LEVEL BREAKDOWN ("Top/Worst N along with their X-wise breakup")
+- When asked to find the Top N or Worst N entities overall AND THEN show their breakdown (e.g., "worst 2 performers along with their product category wise sales breakup"):
+  1. FIRST, create a CTE to calculate the total aggregate (SUM) per entity and LIMIT to Top/Worst N.
+     Example: `WITH top_entities AS (SELECT entity, SUM(metric) as total FROM fact GROUP BY entity ORDER BY total DESC LIMIT N)`
+  2. THEN, write a main query that joins this CTE back to the fact table and dimension tables.
+  3. FINALLY, GROUP BY both the entity AND the breakdown dimension, selecting `SUM(metric)` as the category sales.
+  4. NEVER rank individual unaggregated rows using ROW_NUMBER() without summing first.
 
 HIERARCHY DRILL-DOWN
 - The product data has a hierarchy (e.g. CATEGORY -> CONSTRUCTION -> VEHICLE_TYPE
