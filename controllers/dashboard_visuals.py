@@ -700,7 +700,7 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
     
     # ALWAYS prioritize sales_data if it exists
     for tbl in table_columns.keys():
-        if tbl.lower() == "sales_data":
+        if "sales_data" in tbl.lower():
             fact_table = tbl
             break
             
@@ -729,11 +729,11 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
     # We must handle this explicitly because the generic logic below only does single-hop.
     fact_table_actual = None
     for tbl in table_columns.keys():
-        if tbl.lower() == "sales_data":
+        if "sales_data" in tbl.lower():
             fact_table_actual = tbl
             break
 
-    if fact_table_actual and fact_table.lower() == "sales_data":
+    if fact_table_actual and "sales_data" in fact_table.lower():
         synced_lower = {t.lower(): t for t in synced_tables}
         from_clause = f"`{user_db}`.`{fact_table_actual}` s"
         joins = []
@@ -760,10 +760,10 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
             "customer_master": "cm",
             "territory_master": "tm",
             "region_master": "rm",
-            "sku_master": "sm",
             "tyre_type_master": "ttm",
             "category_master": "catm",
-            "construction_master": "consm"
+            "construction_master": "consm",
+            "sku_master": "sm"
         }
         
         for req_key, opts in all_metrics.items():
@@ -909,7 +909,7 @@ def tyre_sales_data_controller(get_db_connection):
             return any(f and str(f).strip().lower() != "all" for f in filters)
 
         required_metrics = {
-            "vehicle_type": ["vehicle_type", "tyre_type", "category"],
+            "vehicle_type": ["tyre_type_name", "tyre_type_description", "tyre_type_desc", "vehicle_type", "tyre_type", "category_name", "category"],
             "invoice_value": ["invoice_value", "taxable_value", "revenue", "Invoice_Value_INR"]
         }
         optional_dims = {}
