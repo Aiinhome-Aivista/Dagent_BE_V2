@@ -5792,11 +5792,11 @@ Do not add monthly, yearly, trend, or detailed breakdowns unless explicitly requ
 
 7. If the question asks for Top N entities (e.g., dealers, customers) month-wise or trend:
    NEVER use `IN (SELECT ... LIMIT N)` because MySQL does not support LIMIT inside IN subqueries.
-   Instead, you MUST use a JOIN with a derived table:
+   Instead, you MUST use a LEFT JOIN with a derived table:
    
    SELECT t.entity, DATE_FORMAT(STR_TO_DATE(t.date_col, '%Y-%m-%d'), '%Y-%m') as month, SUM(t.metric) as total_sales
    FROM `table` t
-   JOIN (
+   LEFT JOIN (
        SELECT entity FROM `table`
        GROUP BY entity
        ORDER BY SUM(metric) DESC
@@ -5813,7 +5813,7 @@ Do not add monthly, yearly, trend, or detailed breakdowns unless explicitly requ
    AVG()
    MIN()
    MAX()
-   GROUP BY
+   GROUP BY (CRITICAL: Every non-aggregated column in the SELECT clause MUST be present in the GROUP BY clause to prevent `only_full_group_by` errors.)
    ORDER BY
    HAVING
 
@@ -5844,7 +5844,7 @@ PER-GROUP TOP-N — "CATEGORY-WISE", "PER", "EACH", "BY X", "X-WISE"
       WITH agg AS (
         SELECT `<group_col>` AS grp, `<entity_col>` AS entity,
                SUM(`<value_col>`) AS metric
-        FROM `<fact>` JOIN `<dim>` ON ...
+        FROM `<fact>` LEFT JOIN `<dim>` ON ...
         GROUP BY `<group_col>`, `<entity_col>`
       ),
       ranked AS (
@@ -5866,8 +5866,9 @@ PLAIN TOP-N vs WINDOWED TOP-N
 JOINS AND MISSING DIMENSIONS (CRITICAL)
 - ALWAYS use `LEFT JOIN` for ANY join to a dimension table (e.g., `customer_master`, `sku_master`, `category_master`, etc.). NEVER use an `INNER JOIN` or `JOIN` anywhere in the query when fetching dimension data, even when joining from a CTE!
 - NEVER use an `INNER JOIN` (or plain `JOIN`) that might drop valid records just because the dimension data is missing.
-- When selecting the name from a dimension table, ALWAYS use `COALESCE(dim.name_col, 'N/A')` to handle missing records.
-  Example: `LEFT JOIN customer_master cm ON s.customer = cm.KUNNR` -> `SELECT COALESCE(cm.Cname, 'N/A') AS dealer_name`
+- When selecting ANY name from a dimension table (whether inside a CTE or in the final MAIN query), you MUST wrap it in `COALESCE` to prevent nulls in the JSON output. 
+  Example: `SELECT COALESCE(cm.Cname, 'N/A') AS dealer_name`
+- CRITICAL: ALWAYS select the ID/Key column from the FACT table (e.g. `sales_data.customer`), NEVER from the dimension table (e.g. `customer_master.KUNNR`). If a record is missing from the dimension table, selecting the dimension's key will return NULL and corrupt the grouping!
   
 
 MULTI-LEVEL BREAKDOWN ("Top/Worst N along with their X-wise breakup")
@@ -5904,9 +5905,11 @@ Rank Products because "product construction" appears in the question.
 - When asked to find the Top N or Worst N entities overall AND THEN show their breakdown (e.g., "worst 2 performers along with their product category wise sales breakup"):
   1. FIRST, create a CTE to calculate the total aggregate (SUM) per entity and LIMIT to Top/Worst N.
      Example: `WITH top_entities AS (SELECT entity, SUM(metric) as total FROM fact GROUP BY entity ORDER BY total DESC LIMIT N)`
-  2. THEN, write a main query that LEFT JOINS this CTE back to the fact table and dimension tables.
-  3. FINALLY, GROUP BY both the entity AND the breakdown dimension, selecting `SUM(metric)` as the category sales.
-  4. NEVER rank individual unaggregated rows using ROW_NUMBER() without summing first.
+  2. THEN, create a breakdown CTE that joins the first CTE back to the fact/dimensions. YOU MUST include the `total` from the first CTE in this second CTE so it can be used for sorting later.
+     Example: `breakdown AS (SELECT wp.entity, wp.total, dim.category, SUM(fact.metric) as category_sales FROM top_entities wp LEFT JOIN fact ... GROUP BY wp.entity, wp.total, dim.category)`
+  3. FINALLY, in the main query, select the columns from the breakdown CTE.
+  4. CRITICAL: In the final main query, you MUST `ORDER BY` the `total` column (e.g. `ORDER BY breakdown.total DESC`) so that the overall Top N / Worst N sequence is preserved, followed by the category sales!
+  5. NEVER rank individual unaggregated rows using ROW_NUMBER() without summing first.
 
 HIERARCHY DRILL-DOWN
 - The product data has a hierarchy (e.g. CATEGORY -> CONSTRUCTION -> VEHICLE_TYPE
@@ -6347,7 +6350,7 @@ Then answer only from those fields.
 
 7. Never convert customer IDs into names unless SQL explicitly returns a name column.
 
-8. Never create fictional examples such as:
+8. PRESERVE SORT ORDER: When presenting lists, rankings, or tables in the answer text, you MUST preserve the EXACT row order returned by the SQL Results. NEVER sort or re-order the items alphabetically or otherwise.
 
    * John Smith
    * Emily Davis
@@ -6447,6 +6450,7 @@ If the question is trend-related (contains: trend, growth, decline, increase, de
 CRITICAL INSTRUCTIONS FOR ALL VISUALIZATIONS:
 1. The object keys inside the "data" array MUST exactly match what you specify for "xKey" and "yKey".
 2. Only include categories/points that ACTUALLY EXIST in the data. Do NOT invent missing categories with 0 values.
+3. PRESERVE SORT ORDER: When building the "data" array (especially for tables), you MUST preserve the EXACT row order returned by the SQL Results. NEVER sort or re-order the rows alphabetically or otherwise.
 
 Supported visualization types:
 
