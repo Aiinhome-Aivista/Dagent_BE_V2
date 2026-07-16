@@ -5864,8 +5864,8 @@ PLAIN TOP-N vs WINDOWED TOP-N
 - Use the window-function pattern ONLY for per-group ("X-wise") questions.
 
 JOINS AND MISSING DIMENSIONS (CRITICAL)
-- ALWAYS use `LEFT JOIN` when joining a fact table (e.g. `sales_data`) to a dimension table (e.g. `customer_master`, `sku_master`) to fetch names.
-- NEVER use an `INNER JOIN` (or plain `JOIN`) that might drop valid fact records just because the dimension data is missing.
+- ALWAYS use `LEFT JOIN` for ANY join to a dimension table (e.g., `customer_master`, `sku_master`, `category_master`, etc.). NEVER use an `INNER JOIN` or `JOIN` anywhere in the query when fetching dimension data, even when joining from a CTE!
+- NEVER use an `INNER JOIN` (or plain `JOIN`) that might drop valid records just because the dimension data is missing.
 - When selecting the name from a dimension table, ALWAYS use `COALESCE(dim.name_col, 'N/A')` to handle missing records.
   Example: `LEFT JOIN customer_master cm ON s.customer = cm.KUNNR` -> `SELECT COALESCE(cm.Cname, 'N/A') AS dealer_name`
   
