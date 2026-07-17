@@ -23,8 +23,11 @@ def get_sales_revenue_data_controller(get_db_connection):
                 user_db = sync_row["new_user_db"]
                 cursor.execute(f"USE `{user_db}`")
         
+        zone = request.args.get("zone")
+        
         # Calling the Stored Procedure
-        cursor.callproc('sp_get_sales_revenue_by_zone')
+        args = (zone,) if zone else (None,)
+        cursor.callproc('sp_get_sales_revenue_by_zone', args)
         
         chart_data = []
         # Fetching the result set from the stored procedure
@@ -65,7 +68,9 @@ def get_sales_by_account_category_controller(get_db_connection):
             if sync_row:
                 cursor.execute(f"USE `{sync_row['new_user_db']}`")
         
-        cursor.callproc('sp_get_sales_by_account_category')
+        zone = request.args.get("zone")
+        args = (zone,) if zone else (None,)
+        cursor.callproc('sp_get_sales_by_account_category', args)
         
         chart_data = []
         for result in cursor.stored_results():
@@ -101,7 +106,9 @@ def get_non_billed_accounts_controller(get_db_connection):
             if sync_row:
                 cursor.execute(f"USE `{sync_row['new_user_db']}`")
         
-        cursor.callproc('sp_get_non_billed_accounts_pct')
+        zone = request.args.get("zone")
+        args = (zone,) if zone else (None,)
+        cursor.callproc('sp_get_non_billed_accounts_pct', args)
         
         chart_data = []
         for result in cursor.stored_results():
@@ -137,7 +144,9 @@ def get_overdue_pct_controller(get_db_connection):
             if sync_row:
                 cursor.execute(f"USE `{sync_row['new_user_db']}`")
         
-        cursor.callproc('sp_get_overdue_pct')
+        zone = request.args.get("zone")
+        args = (zone,) if zone else (None,)
+        cursor.callproc('sp_get_overdue_pct', args)
         
         chart_data = []
         for result in cursor.stored_results():
@@ -173,7 +182,9 @@ def get_exposure_pct_controller(get_db_connection):
             if sync_row:
                 cursor.execute(f"USE `{sync_row['new_user_db']}`")
         
-        cursor.callproc('sp_get_exposure_pct')
+        zone = request.args.get("zone")
+        args = (zone,) if zone else (None,)
+        cursor.callproc('sp_get_exposure_pct', args)
         
         chart_data = []
         for result in cursor.stored_results():

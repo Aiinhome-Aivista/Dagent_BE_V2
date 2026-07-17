@@ -30,7 +30,12 @@ def get_category_sales_controller(get_db_connection):
         if db_name:
             cursor.execute(f"USE `{db_name}`;")
             
-        cursor.execute("CALL sp_get_category_sales()")
+        zone = request.args.get("zone")
+        if zone:
+            cursor.execute("CALL sp_get_category_sales(%s)", (zone,))
+        else:
+            cursor.execute("CALL sp_get_category_sales(NULL)")
+        
         results = cursor.fetchall()
         
         cursor.close()
