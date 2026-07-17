@@ -2005,7 +2005,7 @@ def default_dashboard_metrics_controller(get_db_connection):
         "metric_2": {"label": "Top Performing Tyre", "value": "N/A", "subtext": "No data available"},
         "metric_3": {"label": "Leading Region", "value": "N/A", "subtext": "No data available"},
         "metric_4": {"label": "Year-over-Year Growth", "value": "N/A", "subtext": "No data available"},
-        # "metric_5": {"label": "Achievement", "value": "42%", "subtext": "Current achievement"},
+        "metric_5": {"label": "Achievement", "value": "42%", "subtext": "Current achievement"},
         "metric_6": {"label": "Sales Target", "value": "800 Cr", "subtext": "Target sales"},
         "metric_7": {"label": "Sales Actual", "value": "334 Cr", "subtext": "Actual sales"},
         "metric_8": {"label": "SAS IN", "value": "951.45 Cr", "subtext": "SAS IN value"},
@@ -2301,6 +2301,7 @@ def default_dashboard_metrics_controller(get_db_connection):
         elif total_revenue >= 100000:
             formatted_revenue = f"₹{(total_revenue / 100000):.2f} Lac"
 
+        total_revenue = float(total_revenue)
         # Format output as dynamic metrics for frontend
         metrics_data = {
             "metric_1": {
@@ -2323,18 +2324,18 @@ def default_dashboard_metrics_controller(get_db_connection):
                 "value": f"{yoy}%" if (current_year > 0 or previous_year > 0) else "N/A", 
                 "subtext": "Compared to last year" if (current_year > 0 or previous_year > 0) else "No data available"
             },
-            "metric_5": {"label": "Achievement", "value": "42%", "subtext": "Current achievement"},
-            "metric_6": {"label": "Sales Target", "value": "800 Cr", "subtext": "Target sales"},
-            "metric_7": {"label": "Sales Actual", "value": "334 Cr", "subtext": "Actual sales"},
-            "metric_8": {"label": "SAS IN", "value": "951.45 Cr", "subtext": "SAS IN value"},
-            "metric_9": {"label": "SAS Variance", "value": "9.44 Cr", "subtext": "Variance"},
-            "metric_10": {"label": "Billing Scope", "value": "0 Cr", "subtext": "Billing scope"},
-            "metric_11": {"label": "Dealer Spread", "value": "76%", "subtext": "Dealer spread"},
-            "metric_12": {"label": "Overdue", "value": "32%", "subtext": "Overdue percentage"},
-            "metric_13": {"label": "Exposure", "value": "37%", "subtext": "Exposure percentage"},
-            "metric_14": {"label": "Rotation", "value": "0.53", "subtext": "Rotation metric"},
-            "metric_15": {"label": "New Dealer", "value": "37", "subtext": "New dealers"},
-            "metric_16": {"label": "Attrition", "value": "795", "subtext": "Attrition count"}
+            "metric_5": {"label": "Achievement", "value": "N/A", "subtext": "Current achievement"},
+            "metric_6": {"label": "Sales Target", "value": "N/A", "subtext": "Target sales"},
+            "metric_7": {"label": "Sales Actual", "value": formatted_revenue, "subtext": "Actual sales"},
+            "metric_8": {"label": "SAS IN", "value": "N/A", "subtext": "SAS IN value"},
+            "metric_9": {"label": "SAS Variance", "value": "N/A", "subtext": "Variance"},
+            "metric_10": {"label": "Billing Scope", "value": "N/A", "subtext": "Billing scope"},
+            "metric_11": {"label": "Dealer Spread", "value": "N/A", "subtext": "Dealer spread"},
+            "metric_12": {"label": "Overdue", "value": "N/A", "subtext": "Overdue percentage"},
+            "metric_13": {"label": "Exposure", "value": "N/A", "subtext": "Exposure percentage"},
+            "metric_14": {"label": "Rotation", "value": "N/A", "subtext": "Rotation metric"},
+            "metric_15": {"label": "New Dealer", "value": "N/A", "subtext": "New dealers"},
+            "metric_16": {"label": "Attrition", "value": "N/A", "subtext": "Attrition count"}
         }
 
         return jsonify({"status": "success", "data": metrics_data}), 200

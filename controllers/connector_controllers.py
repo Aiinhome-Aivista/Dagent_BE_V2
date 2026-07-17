@@ -104,7 +104,6 @@ def create_workspace_controller(get_db_connection):
                 "message": "Access denied. Only Admin users can create workspaces."
             }), 403
 
-        # --- 2. CHECK DUPLICATE WORKSPACE NAME ---
         cursor.execute(
             "SELECT id, session_id, workspace_name FROM workspaces WHERE user_id = %s AND workspace_name = %s",
             (user_id, workspace_name)
@@ -1150,13 +1149,6 @@ def get_user_workspaces_simple(get_db_connection):
 
     user_id = request.args.get('user_id')
 
-    if not user_id:
-        return jsonify({
-            "status": "error",
-            "statuscode": 400,
-            "message": "user_id is required"
-        }), 400
-
     try:
         db_conn = get_db_connection()
         if not db_conn:
@@ -1168,14 +1160,21 @@ def get_user_workspaces_simple(get_db_connection):
 
         cursor = db_conn.cursor(dictionary=True)
 
-        query = """
-            SELECT id, workspace_name, session_id
-            FROM workspaces
-            WHERE user_id = %s
-            ORDER BY id DESC
-        """
-
-        cursor.execute(query, (user_id,))
+        if user_id:
+            query = """
+                SELECT id, workspace_name, workspace_name as name, session_id
+                FROM workspaces
+                WHERE user_id = %s
+                ORDER BY id DESC
+            """
+            cursor.execute(query, (user_id,))
+        else:
+            query = """
+                SELECT id, workspace_name, workspace_name as name, session_id
+                FROM workspaces
+                ORDER BY id DESC
+            """
+            cursor.execute(query)
         workspaces = cursor.fetchall()
 
         cursor.close()
