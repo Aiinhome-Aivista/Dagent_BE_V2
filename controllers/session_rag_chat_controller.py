@@ -1834,7 +1834,7 @@ Do not add monthly, yearly, trend, or detailed breakdowns unless explicitly requ
        SELECT entity FROM `table`
        GROUP BY entity
        ORDER BY SUM(metric) DESC
-       LIMIT 2
+       LIMIT N
    ) as top_entities ON t.entity = top_entities.entity
    GROUP BY t.entity, month
    ORDER BY top_entities.total_sales DESC, month;
@@ -1902,8 +1902,7 @@ JOINS AND MISSING DIMENSIONS (CRITICAL)
 - NEVER use an `INNER JOIN` (or plain `JOIN`) that might drop valid records just because the dimension data is missing.
 - When selecting ANY name from a dimension table (whether inside a CTE or in the final MAIN query), you MUST wrap it in `COALESCE` to prevent nulls in the JSON output. 
   Example: `SELECT COALESCE(cm.Cname, 'N/A') AS dealer_name`
-- SUPER CRITICAL BUG FIX: NEVER EVER select `customer_master.KUNNR` as the customer ID. You MUST select `sales_data.customer` as the ID. If you select `customer_master.KUNNR` and group by it, missing customers will become NULL and your query will be mathematically wrong. ALWAYS SELECT `sales_data.customer` AND GROUP BY `sales_data.customer`! This applies to ALL dimension tables.
-  
+- SUPER CRITICAL BUG FIX: When grouping or selecting after a LEFT JOIN, ALWAYS use the foreign key from the FACT table (e.g., `sales_data.customer`), NEVER the primary key from the DIMENSION table (e.g., `customer_master.KUNNR`). Grouping by the dimension key will lump all unmatched records into a single NULL bucket! This applies to ALL dimension tables.
 
 MULTI-LEVEL BREAKDOWN ("Top/Worst N along with their X-wise breakup")
 ENTITY RESOLUTION FOR BREAKDOWN QUERIES
@@ -1916,6 +1915,7 @@ ENTITY RESOLUTION FOR BREAKDOWN QUERIES
 - NEVER infer the ranking entity from the breakdown dimension.
 
 - "product category-wise", "product construction-wise", "vehicle-wise", "region-wise", etc. describe ONLY how to split the selected entities after ranking.
+- EXCEPTION: If the user explicitly asks for "Top/Worst N <Entity> wise sales" WITHOUT another ranking entity (e.g., "worst 2 construction type wise sales"), it means you must rank the <Entity> itself. Just GROUP BY the <Entity>, ORDER BY sales, and LIMIT N. DO NOT use ROW_NUMBER() or PARTITION BY unless explicitly asked to find "per <Entity>".
 
 - The ranking entity must be resolved independently:
     - dealer -> Dealer
@@ -1944,6 +1944,8 @@ Rank Products because "product construction" appears in the question.
   3. FINALLY, in the main query, select the columns from the breakdown CTE.
   4. CRITICAL: In the final main query, you MUST `ORDER BY` the `total` column (e.g. `ORDER BY breakdown.total DESC`) so that the overall Top N / Worst N sequence is preserved, followed by the category sales!
   5. NEVER rank individual unaggregated rows using ROW_NUMBER() without summing first.
+  6. Prefer simple `ORDER BY ... LIMIT N` for direct Top/Worst queries. Avoid complex window functions like `ROW_NUMBER()` unless a nested breakdown is strictly required.
+  7. CRITICAL: MySQL 8 supports `LIMIT` inside `WITH` CTEs. DO NOT comment out the `LIMIT N` clause inside the CTE. Use `LIMIT N` directly (e.g. `LIMIT 2` and NOT `-- LIMIT 2`).
 
 HIERARCHY DRILL-DOWN
 - The product data has a hierarchy (e.g. CATEGORY -> CONSTRUCTION -> VEHICLE_TYPE
@@ -1997,6 +1999,7 @@ Return ONLY valid JSON:
 }
 """
         sql_user = f"Schemas available:\n{schema_context}\n\nOriginal Question: {question}\n\nCanonical Query (Structured Intent):\n{canonical_query_str}"
+        sql_user += "\n\nCRITICAL FINAL RULE: NEVER SELECT or GROUP BY `customer_master.KUNNR` or any other dimension's Primary Key! You MUST SELECT and GROUP BY the Fact Table's Foreign Key (e.g. `sales_data.customer`) instead. Selecting dimension keys causes unmatched rows to lump together as NULLs."
         schema_grounding, col_to_tables = _build_schema_grounding(schema_chunks)
         table_cols_map = _parse_schema_chunks(schema_chunks)
         if schema_grounding:
