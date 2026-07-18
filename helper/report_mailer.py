@@ -204,11 +204,11 @@ def check_and_send_scheduled_reports():
                 w.workspace_db,
                 w.workspace_name,
                 w.session_id,
-                rr.email,
-                rr.name
+                u.email,
+                u.name
             FROM scheduled_reports sr
             JOIN scheduled_report_days srd ON sr.id = srd.schedule_id
-            JOIN report_recipients rr ON sr.recipient_id = rr.id
+            JOIN users u ON sr.recipient_id = u.id
             JOIN workspaces w ON sr.workspace_id = w.id
             WHERE sr.is_active = TRUE 
               AND srd.day_of_week = %s 

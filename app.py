@@ -97,10 +97,7 @@ from controllers.ftp_connector_controller import (
 )
 from controllers.dashboard_visuals import graph_metrics_controller,extract_graph_data_controller, default_dashboard_metrics_controller
 
-from controllers.report_recipients_controller import (
-    add_recipient_controller, get_recipients_controller, 
-    update_recipient_controller, delete_recipient_controller
-)
+
 from controllers.scheduled_reports_controller import (
     add_schedule_controller, get_schedules_controller, 
     update_schedule_controller, delete_schedule_controller
@@ -595,21 +592,7 @@ def exposure_pct():
 # ==========================================
 # Report Recipients API
 # ==========================================
-@app.route("/api/report-recipients", methods=["GET"])
-def get_report_recipients():
-    return get_recipients_controller()
 
-@app.route("/api/report-recipients", methods=["POST"])
-def add_report_recipient():
-    return add_recipient_controller()
-
-@app.route("/api/report-recipients/<int:recipient_id>", methods=["PUT"])
-def update_report_recipient(recipient_id):
-    return update_recipient_controller(recipient_id)
-
-@app.route("/api/report-recipients/<int:recipient_id>", methods=["DELETE"])
-def delete_report_recipient(recipient_id):
-    return delete_recipient_controller(recipient_id)
 
 # ==========================================
 # Scheduled Reports API
@@ -631,9 +614,9 @@ def delete_scheduled_report(schedule_id):
     return delete_schedule_controller(schedule_id)
 
 # Start APScheduler
-# scheduler = BackgroundScheduler()
-# scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
-# scheduler.start()
+scheduler = BackgroundScheduler()
+scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
+scheduler.start()
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5005, debug=True, use_reloader=False)

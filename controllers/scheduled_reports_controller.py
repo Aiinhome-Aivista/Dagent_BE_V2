@@ -50,10 +50,10 @@ def get_schedules_controller():
         query = """
             SELECT 
                 sr.id, sr.recipient_id, sr.workspace_id, sr.report_ids, sr.delivery_time as time,
-                rr.name as recipient_name, rr.email as recipient_email,
+                u.name as recipient_name, u.email as recipient_email,
                 w.workspace_name
             FROM scheduled_reports sr
-            JOIN report_recipients rr ON sr.recipient_id = rr.id
+            JOIN users u ON sr.recipient_id = u.id
             LEFT JOIN workspaces w ON sr.workspace_id = w.id
             ORDER BY sr.id DESC
         """
