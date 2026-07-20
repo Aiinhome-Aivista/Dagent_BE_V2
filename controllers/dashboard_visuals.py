@@ -1255,6 +1255,7 @@ def sales_by_zone_data_controller(get_db_connection):
 
     selected_years = make_list(data.get("selected_years") or data.get("years") or data.get("year"))
     selected_months = make_list(data.get("selected_months") or data.get("months") or data.get("month"))
+    selected_zones = make_list(data.get("selected_zones") or data.get("zones") or data.get("zone") or data.get("Zone"))
 
     if not session_id:
         return jsonify({"error": "Missing session_id"}), 400
@@ -1338,6 +1339,14 @@ def sales_by_zone_data_controller(get_db_connection):
                 placeholders = ",".join(["%s"] * len(valid_months))
                 where_clauses.append(f"MONTHNAME({actual_invoice_date}) IN ({placeholders})")
                 params.extend(valid_months)
+                
+        # Zones filter
+        if actual_zone and selected_zones:
+            valid_zones = [str(z).strip() for z in selected_zones if z and str(z).strip().lower() != "all"]
+            if valid_zones:
+                placeholders = ",".join(["%s"] * len(valid_zones))
+                where_clauses.append(f"{actual_zone} IN ({placeholders})")
+                params.extend(valid_zones)
 
         where_sql = " AND ".join(where_clauses)
 
@@ -1455,139 +1464,40 @@ def year_wise_sales_comparison_controller(get_db_connection):
             
         cursor = conn.cursor(dictionary=True)
 
-        # 1. Look up the dynamic table name and database from external_db_sync_log
-        # cursor.execute("""
-        #     SELECT new_user_db, table_name 
-        #     FROM external_db_sync_log 
-        #     WHERE session_id=%s 
-        #       AND new_user_db IS NOT NULL 
-        #       AND new_user_db != ''
-        #       AND table_name IS NOT NULL
-        #     ORDER BY id DESC LIMIT 1
-        # """, (session_id,))
-        # sync_row = cursor.fetchone()
+        def has_valid_filters(filters):
+            return any(f and str(f).strip().lower() != "all" for f in filters)
 
-        # if not sync_row:
-        #     return jsonify({
-        #         "title": "Year-wise Sales Comparison",
-        #         "type": "bar_chart",
-        #         "xKey": "month",
-        #         "yKey": "sales_value",
-        #         "seriesKey": "year",
-        #         "visualization": visualization_data
-        #     }), 200
+        required_metrics = {
+            "invoice_value": ["Invoice_Value", "invoice_value", "Taxable_Value", "taxable_value", "Invoice_Value_INR"],
+            "invoice_date": ["invoice_date", "date", "billing__doc_date"]
+        }
+        optional_dims = {}
+        if has_valid_filters(selected_zones):
+            optional_dims["zone"] = ["Zone", "zone"]
+        if has_valid_filters(selected_regions):
+            optional_dims["region"] = ["Region", "region"]
+        if has_valid_filters(selected_customer_types):
+            optional_dims["customer_type"] = ["customer_type", "customer_category", "cust_type", "type"]
 
-        # user_db = sync_row["new_user_db"]
-        # tbl_name = sync_row["table_name"]
-        # table_name = f"`{user_db}`.`{tbl_name}`"
-        
-        # cursor.execute(f"USE `{user_db}`")
-        # cursor.execute("SHOW TABLES")
-        # tables = [list(r.values())[0] for r in cursor.fetchall()]
-        cursor.execute("""
-            SELECT new_user_db, table_name
-            FROM external_db_sync_log
-            WHERE session_id=%s
-            AND new_user_db IS NOT NULL
-            AND new_user_db != ''
-            AND table_name IS NOT NULL
-            ORDER BY id DESC
-        """, (session_id,))
+        from_clause, user_db, cols = get_query_context_for_session(cursor, session_id, required_metrics, optional_dims)
 
-        sync_rows = cursor.fetchall()
-
-        if not sync_rows:
+        if not from_clause:
             return jsonify({
+                "seriesKey": "year",
                 "title": "Year-wise Sales Comparison",
                 "type": "bar_chart",
                 "xKey": "month",
                 "yKey": "sales_value",
-                "seriesKey": "year",
                 "visualization": []
             }), 200
-
-        user_db = sync_rows[0]["new_user_db"]
 
         cursor.execute(f"USE `{user_db}`")
 
-        session_tables = [
-            f"`{user_db}`.`{row['table_name']}`"
-            for row in sync_rows
-        ]
-
-        print("SESSION TABLES:", session_tables)
-
-        invoice_table = None
-
-        for tbl in session_tables:
-
-            inv_date = (
-                get_actual_column_name(cursor, tbl, "invoice_date")
-                or get_actual_column_name(cursor, tbl, "date")
-                or get_actual_column_name(cursor, tbl, "billing__doc_date")
-            )
-
-            inv_value = (
-                get_actual_column_name(cursor, tbl, "invoice_value")
-                or get_actual_column_name(cursor, tbl, "taxable_value")
-                or get_actual_column_name(cursor, tbl, "value")
-                or get_actual_column_name(cursor, tbl, "Invoice_Value_INR")
-            )
-
-            if inv_date and inv_value:
-                invoice_table = tbl
-                break
-
-        if not invoice_table:
-            return jsonify({
-                "seriesKey": "year",
-                "title": "Year-wise Sales Comparison",
-                "type": "bar_chart",
-                "xKey": "month",
-                "yKey": "sales_value",
-                "visualization": []
-            }), 200
-
-        table_name = invoice_table
-
-        print("FACT TABLE:", table_name)
-
-        cursor.execute("SHOW TABLES")
-        tables = [list(r.values())[0] for r in cursor.fetchall()]
-
-        # Determine actual column names dynamically
-        actual_invoice_date = (get_actual_column_name(cursor, table_name, "invoice_date") or 
-                               get_actual_column_name(cursor, table_name, "date") or
-                               get_actual_column_name(cursor, table_name, "billing__doc_date"))
-
-        if not actual_invoice_date:
-            return jsonify({
-                "seriesKey": "year",
-                "title": "Year-wise Sales Comparison",
-                "type": "bar_chart",
-                "xKey": "month",
-                "yKey": "sales_value",
-                "visualization": []
-            }), 200
-
-        actual_invoice_value = (get_actual_column_name(cursor, table_name, "invoice_value") or 
-                                get_actual_column_name(cursor, table_name, "taxable_value") or
-                                get_actual_column_name(cursor, table_name, "value") or
-                                get_actual_column_name(cursor, table_name, "Invoice_Value_INR"))
-
-        if not actual_invoice_value:
-            return jsonify({
-                "seriesKey": "year",
-                "title": "Year-wise Sales Comparison",
-                "type": "bar_chart",
-                "xKey": "month",
-                "yKey": "sales_value",
-                "visualization": []
-            }), 200
-
-        # Fully qualify columns of table_name to avoid ambiguity in JOINs
-        actual_invoice_date_expr = f"{table_name}.{actual_invoice_date}"
-        actual_invoice_value_expr = f"{table_name}.{actual_invoice_value}"
+        actual_invoice_date_expr = cols["invoice_date"]
+        actual_invoice_value_expr = cols["invoice_value"]
+        actual_zone = cols.get("zone")
+        actual_region = cols.get("region")
+        actual_customer_type_expr = cols.get("customer_type")
 
         revenue_expr = f"""
             CAST(
@@ -1596,58 +1506,9 @@ def year_wise_sales_comparison_controller(get_db_connection):
             )
         """
 
-        # from_clause = table_name
-        # actual_customer_type_expr = None
-        from_clause = table_name
-        actual_customer_type_expr = None
-        customer_tbl_name = None
-        actual_cust_category_col = None
-
-        # Check if customer type column is directly in table_name
-        direct_customer_type = (get_actual_column_name(cursor, table_name, "customer_type") or 
-                                get_actual_column_name(cursor, table_name, "customer_category") or 
-                                get_actual_column_name(cursor, table_name, "cust_type") or 
-                                get_actual_column_name(cursor, table_name, "type"))
-
-        if direct_customer_type:
-            actual_customer_type_expr = f"{table_name}.{direct_customer_type}"
-        else:
-            # If not in table_name, look for another table that has it (e.g. customer table)
-            customer_tbl_name = None
-            actual_cust_category_col = None
-            for tbl in tables:
-                t_name = f"`{user_db}`.`{tbl}`"
-                if t_name == table_name:
-                    continue
-                col = (get_actual_column_name(cursor, t_name, "customer_type") or 
-                       get_actual_column_name(cursor, t_name, "customer_category") or 
-                       get_actual_column_name(cursor, t_name, "cust_type"))
-                if col:
-                    customer_tbl_name = t_name
-                    actual_cust_category_col = col
-                    break
-
-            if customer_tbl_name:
-                # Find linking columns
-                actual_inv_customer_col = (get_actual_column_name(cursor, table_name, "customer") or 
-                                           get_actual_column_name(cursor, table_name, "customer_id") or 
-                                           get_actual_column_name(cursor, table_name, "cust_no"))
-                                           
-                actual_cust_customer_col = (get_actual_column_name(cursor, customer_tbl_name, "customer") or 
-                                            get_actual_column_name(cursor, customer_tbl_name, "customer_id") or 
-                                            get_actual_column_name(cursor, customer_tbl_name, "cust_no"))
-
-                if actual_inv_customer_col and actual_cust_customer_col:
-                    from_clause = f"{table_name} JOIN {customer_tbl_name} ON {table_name}.{actual_inv_customer_col} = {customer_tbl_name}.{actual_cust_customer_col}"
-                    actual_customer_type_expr = f"{customer_tbl_name}.{actual_cust_category_col}"
-
         where_clauses = [f"{actual_invoice_date_expr} IS NOT NULL"]
         params = []
-        # print("CUSTOMER TABLE:", customer_tbl_name)
-        # print("CUSTOMER TYPE COLUMN:", actual_customer_type_expr)
 
-        # print("FROM CLAUSE:")
-        # print(from_clause)
         # Years filter
         if selected_years:
             valid_years = []
@@ -1672,21 +1533,19 @@ def year_wise_sales_comparison_controller(get_db_connection):
                 params.extend(valid_months)
 
         # Zone Filter
-        actual_zone = get_actual_column_name(cursor, table_name, "zone")
         if actual_zone and selected_zones:
             valid_zones = [str(z).strip() for z in selected_zones if z and str(z).strip().lower() != "all"]
             if valid_zones:
                 placeholders = ",".join(["%s"] * len(valid_zones))
-                where_clauses.append(f"{table_name}.{actual_zone} IN ({placeholders})")
+                where_clauses.append(f"{actual_zone} IN ({placeholders})")
                 params.extend(valid_zones)
 
         # Region Filter
-        actual_region = get_actual_column_name(cursor, table_name, "region")
         if actual_region and selected_regions:
             valid_regions = [str(r).strip() for r in selected_regions if r and str(r).strip().lower() != "all"]
             if valid_regions:
                 placeholders = ",".join(["%s"] * len(valid_regions))
-                where_clauses.append(f"{table_name}.{actual_region} IN ({placeholders})")
+                where_clauses.append(f"{actual_region} IN ({placeholders})")
                 params.extend(valid_regions)
 
         # Customer Type Filter
@@ -2294,6 +2153,76 @@ def default_dashboard_metrics_controller(get_db_connection):
             except Exception as yoy_err:
                 print(f"[Default Metrics] YoY query failed: {yoy_err}")
 
+        # 5. Billing Scope
+        billing_scope = "N/A"
+        real_cust_col_sales = None
+        if "customer" in sales_cols:
+            real_cust_col_sales = sales_cols["customer"]
+        elif "kunnr" in sales_cols:
+            real_cust_col_sales = sales_cols["kunnr"]
+        
+        if real_cust_col_sales:
+            try:
+                cursor.execute(f"SELECT COUNT(DISTINCT `{real_cust_col_sales}`) AS count FROM `{sales_table}`")
+                row = cursor.fetchone()
+                if row and row["count"] is not None:
+                    billing_scope = str(row["count"])
+            except Exception as e:
+                print(f"[Default Metrics] Billing scope query failed: {e}")
+
+        # 6. Dealer Spread
+        dealer_spread = "N/A"
+        customer_table = None
+        for tbl, cols in table_columns.items():
+            if "kunnr" in cols and "acc_grp" in cols:
+                customer_table = tbl
+                break
+        
+        if real_cust_col_sales and customer_table:
+            cust_id_col = table_columns[customer_table]["kunnr"]
+            acc_grp_col = table_columns[customer_table]["acc_grp"]
+            try:
+                cursor.execute(f"""
+                    SELECT COUNT(DISTINCT s.`{real_cust_col_sales}`) AS count
+                    FROM `{sales_table}` s
+                    JOIN `{customer_table}` c ON s.`{real_cust_col_sales}` = c.`{cust_id_col}`
+                    WHERE c.`{acc_grp_col}` = 'Z001'
+                """)
+                row = cursor.fetchone()
+                if row and row["count"] is not None:
+                    dealer_spread = str(row["count"])
+            except Exception as e:
+                print(f"[Default Metrics] Dealer spread query failed: {e}")
+
+        # 7. Attrition
+        attrition = "N/A"
+        if real_cust_col_sales and real_date_col:
+            try:
+                if "date" in col_type or "timestamp" in col_type:
+                    date_expr = f"`{real_date_col}`"
+                else:
+                    date_expr = f"STR_TO_DATE(`{real_date_col}`, '%d-%m-%Y')"
+                    
+                cursor.execute(f"""
+                    SELECT COUNT(DISTINCT prev_month_cust) AS attrition_count
+                    FROM (
+                        SELECT DISTINCT `{real_cust_col_sales}` AS prev_month_cust
+                        FROM `{sales_table}`
+                        WHERE {date_expr} >= DATE_FORMAT(CURRENT_DATE - INTERVAL 1 MONTH, '%Y-%m-01')
+                          AND {date_expr} < DATE_FORMAT(CURRENT_DATE, '%Y-%m-01')
+                    ) AS prev
+                    WHERE prev_month_cust NOT IN (
+                        SELECT DISTINCT `{real_cust_col_sales}`
+                        FROM `{sales_table}`
+                        WHERE {date_expr} >= DATE_FORMAT(CURRENT_DATE, '%Y-%m-01')
+                    )
+                """)
+                row = cursor.fetchone()
+                if row and row["attrition_count"] is not None:
+                    attrition = str(row["attrition_count"])
+            except Exception as e:
+                print(f"[Default Metrics] Attrition query failed: {e}")
+
         # Format total revenue smartly (Cr or Lacs)
         formatted_revenue = f"₹{float(total_revenue):,.2f}"
         if total_revenue >= 10000000:
@@ -2329,13 +2258,13 @@ def default_dashboard_metrics_controller(get_db_connection):
             "metric_7": {"label": "Sales Actual", "value": formatted_revenue, "subtext": "Actual sales"},
             "metric_8": {"label": "SAS IN", "value": "N/A", "subtext": "SAS IN value"},
             "metric_9": {"label": "SAS Variance", "value": "N/A", "subtext": "Variance"},
-            "metric_10": {"label": "Billing Scope", "value": "N/A", "subtext": "Billing scope"},
-            "metric_11": {"label": "Dealer Spread", "value": "N/A", "subtext": "Dealer spread"},
+            "metric_10": {"label": "Billing Scope", "value": billing_scope, "subtext": "Customers billed"},
+            "metric_11": {"label": "Dealer Spread", "value": dealer_spread, "subtext": "Active dealers"},
             "metric_12": {"label": "Overdue", "value": "N/A", "subtext": "Overdue percentage"},
             "metric_13": {"label": "Exposure", "value": "N/A", "subtext": "Exposure percentage"},
             "metric_14": {"label": "Rotation", "value": "N/A", "subtext": "Rotation metric"},
             "metric_15": {"label": "New Dealer", "value": "N/A", "subtext": "New dealers"},
-            "metric_16": {"label": "Attrition", "value": "N/A", "subtext": "Attrition count"}
+            "metric_16": {"label": "Attrition", "value": attrition, "subtext": "Inactive from last month"}
         }
 
         return jsonify({"status": "success", "data": metrics_data}), 200

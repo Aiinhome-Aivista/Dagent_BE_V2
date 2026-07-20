@@ -613,10 +613,10 @@ def update_scheduled_report(schedule_id):
 def delete_scheduled_report(schedule_id):
     return delete_schedule_controller(schedule_id)
 
-# Start APScheduler
-scheduler = BackgroundScheduler()
-scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
-scheduler.start()
-
 if __name__ == '__main__':
+    # Start APScheduler
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
+    scheduler.start()
+
     app.run(host="0.0.0.0", port=5005, debug=True, use_reloader=False)

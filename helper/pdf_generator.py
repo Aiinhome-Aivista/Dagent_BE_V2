@@ -98,12 +98,14 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
             res_json = extract_response(default_dashboard_metrics_controller(get_db_connection))
             data = res_json.get("data", {})
             if data:
-                kpis = [
-                    {"label": data.get("metric_1", {}).get("label", "Total Sales Revenue"), "value": str(data.get("metric_1", {}).get("value", "N/A")).replace("₹", "Rs. ")},
-                    {"label": data.get("metric_2", {}).get("label", "Top Performing Tyre"), "value": str(data.get("metric_2", {}).get("value", "N/A")).replace("₹", "Rs. ")},
-                    {"label": data.get("metric_3", {}).get("label", "Leading Region"), "value": str(data.get("metric_3", {}).get("value", "N/A")).replace("₹", "Rs. ")},
-                    {"label": data.get("metric_4", {}).get("label", "Year-over-Year Growth"), "value": str(data.get("metric_4", {}).get("value", "N/A")).replace("₹", "Rs. ")}
-                ]
+                kpis = []
+                for i in range(1, 17):
+                    metric = data.get(f"metric_{i}")
+                    if metric and metric.get("label"):
+                        kpis.append({
+                            "label": metric.get("label"), 
+                            "value": str(metric.get("value", "N/A")).replace("₹", "Rs. ")
+                        })
     except Exception as e:
         print(f"Error fetching KPIs: {e}")
 
@@ -245,28 +247,40 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
         start_y = pdf.get_y()
         
         col_width = 45
+        row_height = 30
+        current_y = start_y
+        
         for i, kpi in enumerate(kpis):
-            x = start_x + (i * (col_width + 5))
-            pdf.set_xy(x, start_y)
+            col_idx = i % 4
+            
+            # If it's the start of a new row and we are near the bottom
+            if col_idx == 0 and i > 0:
+                current_y += row_height
+                if current_y > 250:
+                    pdf.add_page()
+                    current_y = pdf.get_y()
+            
+            x = start_x + (col_idx * (col_width + 5))
+            pdf.set_xy(x, current_y)
             
             # Draw box
             pdf.set_fill_color(248, 250, 252) # Slate-50
             pdf.set_draw_color(226, 232, 240) # Slate-200
-            pdf.rect(x, start_y, col_width, 25, style='DF')
+            pdf.rect(x, current_y, col_width, 25, style='DF')
             
             # Label
-            pdf.set_xy(x + 2, start_y + 4)
+            pdf.set_xy(x + 2, current_y + 4)
             pdf.set_font("Arial", 'B', 8)
             pdf.set_text_color(100, 116, 139) # Slate-500
-            pdf.cell(col_width - 4, 5, kpi['label'].upper(), ln=True, align='L')
+            pdf.cell(col_width - 4, 5, kpi['label'][:25].upper(), ln=True, align='L')
             
             # Value
-            pdf.set_xy(x + 2, start_y + 12)
+            pdf.set_xy(x + 2, current_y + 12)
             pdf.set_font("Arial", 'B', 12)
             pdf.set_text_color(15, 23, 42) # Slate-900
             pdf.cell(col_width - 4, 8, str(kpi['value']), ln=True, align='L')
             
-        pdf.set_y(start_y + 35)
+        pdf.set_y(current_y + 35)
     
     # Insert Chart 1 (Year-wise)
     if '1' in report_ids and os.path.exists(img1_path):
