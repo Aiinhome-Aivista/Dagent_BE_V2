@@ -619,4 +619,4 @@ if __name__ == '__main__':
     scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
     scheduler.start()
 
-    app.run(host="0.0.0.0", port=5005, debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=3019, debug=True, use_reloader=False)
