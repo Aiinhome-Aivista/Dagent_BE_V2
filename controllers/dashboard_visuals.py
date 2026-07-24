@@ -2223,6 +2223,37 @@ def default_dashboard_metrics_controller(get_db_connection):
             except Exception as e:
                 print(f"[Default Metrics] Attrition query failed: {e}")
 
+        # 8. Sales Target and Achievement
+        sales_target_val = "N/A"
+        achievement_val = "N/A"
+        
+        target_table = None
+        for tbl in table_columns.keys():
+            if tbl.lower() == "sales_target":
+                target_table = tbl
+                break
+                
+        if target_table:
+            try:
+                cursor.execute(f"SELECT SUM(Value) AS total_target FROM `{target_table}`")
+                t_row = cursor.fetchone()
+                if t_row and t_row["total_target"] is not None:
+                    t_val = float(t_row["total_target"])
+                    if t_val > 0:
+                        # Format target like revenue
+                        formatted_target = f"₹{t_val:,.2f}"
+                        if t_val >= 10000000:
+                            formatted_target = f"₹{(t_val / 10000000):.2f} Cr"
+                        elif t_val >= 100000:
+                            formatted_target = f"₹{(t_val / 100000):.2f} Lac"
+                        sales_target_val = formatted_target
+                        
+                        if float(total_revenue) > 0:
+                            ach = (float(total_revenue) / t_val) * 100
+                            achievement_val = f"{ach:.2f}%"
+            except Exception as e:
+                print(f"[Default Metrics] Sales target query failed: {e}")
+
         # Format total revenue smartly (Cr or Lacs)
         formatted_revenue = f"₹{float(total_revenue):,.2f}"
         if total_revenue >= 10000000:
@@ -2253,8 +2284,8 @@ def default_dashboard_metrics_controller(get_db_connection):
                 "value": f"{yoy}%" if (current_year > 0 or previous_year > 0) else "N/A", 
                 "subtext": "Compared to last year" if (current_year > 0 or previous_year > 0) else "No data available"
             },
-            "metric_5": {"label": "Achievement", "value": "N/A", "subtext": "Current achievement"},
-            "metric_6": {"label": "Sales Target", "value": "N/A", "subtext": "Target sales"},
+            "metric_5": {"label": "Achievement", "value": achievement_val, "subtext": "Current achievement"},
+            "metric_6": {"label": "Sales Target", "value": sales_target_val, "subtext": "Target sales"},
             "metric_7": {"label": "Sales Actual", "value": formatted_revenue, "subtext": "Actual sales"},
             "metric_8": {"label": "SAS IN", "value": "N/A", "subtext": "SAS IN value"},
             "metric_9": {"label": "SAS Variance", "value": "N/A", "subtext": "Variance"},
