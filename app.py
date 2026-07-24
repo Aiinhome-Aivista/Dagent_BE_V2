@@ -589,6 +589,12 @@ def overdue_pct():
 def exposure_pct():
     return get_exposure_pct_controller(get_db_connection)
 
+from controllers.export_report_controller import export_domestic_sales_report_controller
+
+@app.route("/export-domestic-sales-report", methods=["GET", "POST"])
+def export_domestic_sales_report():
+    return export_domestic_sales_report_controller(get_db_connection)
+
 # ==========================================
 # Report Recipients API
 # ==========================================
@@ -615,8 +621,8 @@ def delete_scheduled_report(schedule_id):
 
 if __name__ == '__main__':
     # Start APScheduler
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
-    scheduler.start()
+    # scheduler = BackgroundScheduler()
+    # scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
+    # scheduler.start()
 
     app.run(host="0.0.0.0", port=3019, debug=True, use_reloader=False)
