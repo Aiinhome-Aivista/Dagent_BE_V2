@@ -139,7 +139,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day):
         # Title Row (Row 1)
         ws.merge_cells('A1:H1')
         cell = ws['A1']
-        cell.value = "Domestic Sales Value Achv."
+        cell.value = "Domestic Sales Value Achievement"
         cell.font = bold_font
         cell.fill = fill_title
         cell.border = border
@@ -294,6 +294,9 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day):
                     c.font = bold_font
                 if fill_color:
                     c.fill = fill_color
+                    
+            c6.alignment = center_aligned_text
+            c8.alignment = center_aligned_text
             
             # Add to totals (Skip adding known subtotals to avoid double counting)
             if not is_subtotal:
@@ -332,6 +335,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day):
         ws.cell(row=row_num, column=6, value=achv).font = bold_font
         ws.cell(row=row_num, column=6).fill = fill_blue
         ws.cell(row=row_num, column=6).border = border
+        ws.cell(row=row_num, column=6).alignment = center_aligned_text
         
         ws.cell(row=row_num, column=7, value=totals["Sale_For_Day"]).font = bold_font
         ws.cell(row=row_num, column=7).fill = fill_blue
@@ -341,6 +345,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day):
         ws.cell(row=row_num, column=8, value=grth).font = bold_font
         ws.cell(row=row_num, column=8).fill = fill_blue
         ws.cell(row=row_num, column=8).border = border
+        ws.cell(row=row_num, column=8).alignment = center_aligned_text
 
         # Adjust column widths for WS
         from openpyxl.utils import get_column_letter
@@ -411,7 +416,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day):
                 ws1.cell(row=1, column=c).fill = fill_title
             
             # Headers Group 1 (Row 2)
-            fill_cat = fill_header # Cyan
+            fill_cat = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid") # White
             fill_rep = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid") # Yellow
             fill_oem = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid") # Pink
             fill_stu = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid") # Light Blue
@@ -497,13 +502,50 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day):
                 dom_actual = float(r.get('domestic_actual') or 0)
                 r['domestic_achievement'] = round((dom_actual / dom_target * 100), 2) if dom_target > 0 else 0
                 
+            # Compute Grand Total
+            grand_total = {
+                'category': 'Total',
+                'row_no': 99999,  # Ensure it appears at the absolute bottom
+                'achievement': 0,
+                'domestic_achievement': 0
+            }
+            for cat, r in aggregated.items():
+                if cat in ("Pack Tube", "Treel", "Total"):
+                    continue
+                for k, v in r.items():
+                    if k not in ('row_no', 'category', 'tyre_type_name', 'construction_description', 'achievement', 'domestic_achievement'):
+                        grand_total[k] = grand_total.get(k, 0) + float(v or 0)
+            
+            target = float(grand_total.get('target') or 0)
+            total = float(grand_total.get('total') or 0)
+            grand_total['achievement'] = round((total / target * 100), 2) if target > 0 else 0
+            
+            dom_target = float(grand_total.get('domestic_target') or 0)
+            dom_actual = float(grand_total.get('domestic_actual') or 0)
+            grand_total['domestic_achievement'] = round((dom_actual / dom_target * 100), 2) if dom_target > 0 else 0
+            
+            aggregated['Total'] = grand_total
+            
+            # Ensure Pack Tube and Treel are at the very bottom
+            if "Pack Tube" in aggregated:
+                aggregated["Pack Tube"]['row_no'] = 9998
+            if "Treel" in aggregated:
+                aggregated["Treel"]['row_no'] = 9999
+            
             final_rows = sorted(aggregated.values(), key=lambda x: float(x.get('row_no') or 9999))
-                
             # Data rows
             r_idx = 5
+            data_row_counter = 0
+            
+            fill_light_grey = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
             
             def sv(val):
-                return val if val is not None and str(val).strip() != '' else ""
+                if val is None or str(val).strip() == '': return ""
+                try:
+                    if float(val) == 0: return ""
+                except ValueError:
+                    pass
+                return val
                 
             for r in final_rows:
                 cat = r.get('category', '')
@@ -550,15 +592,21 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day):
                     f_color = fill_yellow
                 elif cat in ["Pack Tube", "Treel"]:
                     f_color = fill_pink
+                else:
+                    data_row_counter += 1
+                    if data_row_counter % 2 == 0:
+                        f_color = fill_light_grey
                 
                 for cell in c_cells:
                     cell.border = border
-                    cell.font = bold_font # Make ALL values bold
+                    
                     if is_subtotal:
                         cell.fill = fill_yellow
+                        cell.font = bold_font
                     elif f_color == fill_pink:
                         cell.fill = fill_pink
-                    if f_color:
+                        cell.font = bold_font
+                    elif f_color:
                         cell.fill = f_color
                         
                 r_idx += 1
@@ -721,8 +769,11 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day):
                 c16 = ws2.cell(row=r_idx, column=16, value=f"{int(round(float(achv_tot_val)))}%" if achv_tot_val else "0%")
                 
                 for c in range(1, 17):
-                    ws2.cell(row=r_idx, column=c).border = border
-                    ws2.cell(row=r_idx, column=c).font = bold_font
+                    cell = ws2.cell(row=r_idx, column=c)
+                    cell.border = border
+                    cell.font = bold_font
+                    if c in [11, 14, 15, 16]:
+                        cell.alignment = center_aligned_text
                     
                 # Update totals
                 for k in totals_ws2:
@@ -771,56 +822,68 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day):
             ws2.cell(row=r_idx, column=16, value=f"{t_achv_tot}%").fill = fill_yellow
             
             for c in range(2, 17):
-                ws2.cell(row=r_idx, column=c).border = border
-                ws2.cell(row=r_idx, column=c).font = bold_font
+                cell = ws2.cell(row=r_idx, column=c)
+                cell.border = border
+                cell.font = bold_font
+                if c in [11, 14, 15, 16]:
+                    cell.alignment = center_aligned_text
 
             # Percentage Contribution Row
             r_idx += 1
             fill_magenta = PatternFill(start_color="FFCCFF", end_color="FFCCFF", fill_type="solid")
+            fill_light_pink = PatternFill(start_color="FFF0F5", end_color="FFF0F5", fill_type="solid")
             ws2.cell(row=r_idx, column=1, value="% Contribution").font = bold_font
-            ws2.cell(row=r_idx, column=1).fill = fill_magenta
-            ws2.cell(row=r_idx, column=1).border = border
+            ws2.cell(row=r_idx, column=1).alignment = center_aligned_text
             
-            # Empty cells up to D with pink fill
-            for c in range(2, 5):
+            # Merge columns 1 to 4 for % Contribution
+            ws2.merge_cells(start_row=r_idx, start_column=1, end_row=r_idx, end_column=4)
+            
+            # Apply fill and border to all merged cells (columns 1 to 4)
+            for c in range(1, 5):
                 ws2.cell(row=r_idx, column=c).fill = fill_magenta
                 ws2.cell(row=r_idx, column=c).border = border
 
             # Target percentage contribution placeholders
-            ws2.cell(row=r_idx, column=5, value="%").fill = fill_magenta
+            ws2.cell(row=r_idx, column=5, value="%").fill = fill_light_pink
             ws2.cell(row=r_idx, column=5).font = bold_font
             ws2.cell(row=r_idx, column=5).border = border
+            ws2.cell(row=r_idx, column=5).alignment = center_aligned_text
             
-            ws2.cell(row=r_idx, column=6, value="%").fill = fill_magenta
+            ws2.cell(row=r_idx, column=6, value="%").fill = fill_light_pink
             ws2.cell(row=r_idx, column=6).font = bold_font
             ws2.cell(row=r_idx, column=6).border = border
+            ws2.cell(row=r_idx, column=6).alignment = center_aligned_text
             
             ws2.cell(row=r_idx, column=7, value="").fill = fill_yellow
             ws2.cell(row=r_idx, column=7).border = border
+            ws2.cell(row=r_idx, column=7).alignment = center_aligned_text
             
             # Actual sales contribution
             ws2.cell(row=r_idx, column=8, value="100%").fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
             ws2.cell(row=r_idx, column=8).font = bold_font
             ws2.cell(row=r_idx, column=8).border = border
+            ws2.cell(row=r_idx, column=8).alignment = center_aligned_text
             
-            ws2.cell(row=r_idx, column=9, value="%").fill = fill_magenta
+            ws2.cell(row=r_idx, column=9, value="%").fill = fill_light_pink
             ws2.cell(row=r_idx, column=9).font = bold_font
             ws2.cell(row=r_idx, column=9).border = border
+            ws2.cell(row=r_idx, column=9).alignment = center_aligned_text
 
-            # Fill rest with yellow and pink
+            # Actual total contribution and rest of the columns
             for c in range(10, 17):
-                if c == 10:
-                    ws2.cell(row=r_idx, column=c).fill = fill_magenta
-                else:
-                    ws2.cell(row=r_idx, column=c).fill = fill_yellow
+                ws2.cell(row=r_idx, column=c).fill = fill_yellow
                 ws2.cell(row=r_idx, column=c).border = border
+                ws2.cell(row=r_idx, column=c).alignment = center_aligned_text
                 
+
             from openpyxl.utils import get_column_letter
             for idx, col in enumerate(ws2.columns, start=1):
                 max_length = 0
                 column = get_column_letter(idx)
                 for cell in col:
                     try:
+                        if cell.row == 1:
+                            continue
                         if len(str(cell.value)) > max_length:
                             max_length = len(str(cell.value))
                     except:
@@ -874,13 +937,15 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day):
             ws3.merge_cells('A1:AC1')
             ws3['A1'].value = f"Sales Summary in No's & Values for {month_abbr}-{curr_year_str}"
             ws3['A1'].font = bold_font
-            ws3['A1'].alignment = center_aligned_text
+            ws3['A1'].alignment = Alignment(horizontal='left', vertical='center')
             
+            ws3_title_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
             for c in range(1, 30):
                 ws3.cell(row=1, column=c).border = border
+                ws3.cell(row=1, column=c).fill = ws3_title_fill
 
             if rows_ws3:
-                fill_ws3_header = PatternFill(start_color="E0FFFF", end_color="E0FFFF", fill_type="solid") # Light Cyan
+                fill_ws3_header = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid") # White
                 
                 # Row 2: Grouped Headers
                 ws3.merge_cells('A2:A3')
@@ -952,11 +1017,14 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day):
                         # Don't apply sv to Zone and Type if they are empty for some reason, though they shouldn't be
                         cell = ws3.cell(row=r_idx, column=c_idx, value=sv_ws3(val) if c_idx > 2 else val)
                         cell.border = border
-                        cell.font = bold_font # Make ALL values bold
                         
-                        # Apply green background for Achv % rows or Grand Total rows
-                        if is_grand_total or is_achv:
+                        # Apply green background for Target rows or ALL rows in Grand Total
+                        is_target = "rget" in str(row_type).lower()
+                        if is_grand_total or is_target:
                             cell.fill = fill_achv
+                            
+                        if is_grand_total:
+                            cell.font = bold_font
                             
                     r_idx += 1
                 
