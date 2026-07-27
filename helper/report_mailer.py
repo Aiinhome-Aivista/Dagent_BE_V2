@@ -246,13 +246,16 @@ def check_and_send_scheduled_reports():
             # 1b. Generate Excel Report
             from controllers.export_report_controller import generate_domestic_sales_excel
             now = datetime.datetime.now()
+            excel_conn = get_db_connection()
             excel_path = generate_domestic_sales_excel(
-                conn=conn, 
+                conn=excel_conn, 
                 session_id=schedule['session_id'],
                 year=now.year,
                 month=now.month,
                 day=now.day
             )
+            if excel_conn:
+                excel_conn.close()
             
             if not excel_path:
                 print(f"[Mailer] Failed to generate Excel for {schedule['email']}", flush=True)

@@ -22,6 +22,7 @@ from controllers.sales_dashboard import (
     get_overdue_pct_controller,
     get_exposure_pct_controller
 )
+from controllers.category_sales import get_category_sales_controller
 
 def draw_data_table(pdf, title, data, col1_header, col2_header):
     if not data: return
@@ -41,9 +42,23 @@ def draw_data_table(pdf, title, data, col1_header, col2_header):
     
     # Table Rows
     pdf.set_font("Arial", '', 9)
-    for key, val in data.items():
-        pdf.cell(90, 8, str(key), border=1)
-        pdf.cell(90, 8, str(val), border=1, ln=True)
+    
+    # Handle both dict and list formats
+    if isinstance(data, dict):
+        items = data.items()
+    else:
+        # Convert list of dicts to key-val pairs (taking first two columns)
+        items = []
+        for item in data:
+            if isinstance(item, dict):
+                vals = list(item.values())
+                k = vals[0] if len(vals) > 0 else ""
+                v = vals[1] if len(vals) > 1 else ""
+                items.append((k, v))
+            
+    for key, val in items:
+        pdf.cell(90, 8, str(key)[:40], border=1)
+        pdf.cell(90, 8, str(val)[:40], border=1, ln=True)
     pdf.ln(5)
 
 def extract_response(r):
@@ -164,90 +179,64 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
 
     get_url = f"/?session_id={session_id}"
 
-    chart_data_4 = {}
+    chart_data_4 = []
     # Chart 4: Sales Revenue Data by Zone
     try:
         print("[PDF Generation] Fetching Chart 4 data...", flush=True)
         with app.test_request_context(get_url, method="GET"):
             res_json = extract_response(get_sales_revenue_data_controller(get_db_connection))
-            arr = res_json.get("data", [])
-            if arr:
-                keys = list(arr[0].keys())
-                k1 = keys[0]
-                k2 = keys[1] if len(keys) > 1 else keys[0]
-                chart_data_4 = {str(item.get(k1, f"I{i}")): float(item.get(k2, 0) or 0) for i, item in enumerate(arr)}
+            chart_data_4 = res_json.get("data", [])
         print("[PDF Generation] Chart 4 data fetched successfully.", flush=True)
     except Exception as e:
         print(f"Chart 4 Controller Exception: {e}")
-        chart_data_4 = {}
 
-    chart_data_5 = {}
+    chart_data_5_acc = []
+    chart_data_5_cat = []
     # Chart 5: Sales by Account Category
     try:
         print("[PDF Generation] Fetching Chart 5 data...", flush=True)
         with app.test_request_context(get_url, method="GET"):
             res_json = extract_response(get_sales_by_account_category_controller(get_db_connection))
-            arr = res_json.get("data", [])
-            if arr:
-                keys = list(arr[0].keys())
-                k1 = keys[0]
-                k2 = keys[1] if len(keys) > 1 else keys[0]
-                chart_data_5 = {str(item.get(k1, f"I{i}")): float(item.get(k2, 0) or 0) for i, item in enumerate(arr)}
+            chart_data_5_acc = res_json.get("data", [])
+            
+            res_json_cat = extract_response(get_category_sales_controller(get_db_connection))
+            chart_data_5_cat = res_json_cat.get("data", [])
         print("[PDF Generation] Chart 5 data fetched successfully.", flush=True)
     except Exception as e:
         print(f"Chart 5 Controller Exception: {e}")
-        chart_data_5 = {}
 
-    chart_data_6 = {}
+    chart_data_6 = []
     # Chart 6: Non Billed Accounts
     try:
         print("[PDF Generation] Fetching Chart 6 data...", flush=True)
         with app.test_request_context(get_url, method="GET"):
             res_json = extract_response(get_non_billed_accounts_controller(get_db_connection))
-            arr = res_json.get("data", [])
-            if arr:
-                keys = list(arr[0].keys())
-                k1 = keys[0]
-                k2 = keys[1] if len(keys) > 1 else keys[0]
-                chart_data_6 = {str(item.get(k1, f"I{i}")): float(item.get(k2, 0) or 0) for i, item in enumerate(arr)}
+            chart_data_6 = res_json.get("data", [])
         print("[PDF Generation] Chart 6 data fetched successfully.", flush=True)
     except Exception as e:
         print(f"Chart 6 Controller Exception: {e}")
-        chart_data_6 = {}
 
-    chart_data_7 = {}
+    chart_data_7 = []
     # Chart 7: Overdue Pct
     try:
         print("[PDF Generation] Fetching Chart 7 data...", flush=True)
         with app.test_request_context(get_url, method="GET"):
             res_json = extract_response(get_overdue_pct_controller(get_db_connection))
-            arr = res_json.get("data", [])
-            if arr:
-                keys = list(arr[0].keys())
-                k1 = keys[0]
-                k2 = keys[1] if len(keys) > 1 else keys[0]
-                chart_data_7 = {str(item.get(k1, f"I{i}")): float(item.get(k2, 0) or 0) for i, item in enumerate(arr)}
+            chart_data_7 = res_json.get("data", [])
         print("[PDF Generation] Chart 7 data fetched successfully.", flush=True)
     except Exception as e:
         print(f"Chart 7 Controller Exception: {e}")
-        chart_data_7 = {}
 
-    chart_data_8 = {}
+    chart_data_8 = []
     # Chart 8: Exposure Pct
     try:
         print("[PDF Generation] Fetching Chart 8 data...", flush=True)
         with app.test_request_context(get_url, method="GET"):
             res_json = extract_response(get_exposure_pct_controller(get_db_connection))
-            arr = res_json.get("data", [])
-            if arr:
-                keys = list(arr[0].keys())
-                k1 = keys[0]
-                k2 = keys[1] if len(keys) > 1 else keys[0]
-                chart_data_8 = {str(item.get(k1, f"I{i}")): float(item.get(k2, 0) or 0) for i, item in enumerate(arr)}
+            chart_data_8 = res_json.get("data", [])
         print("[PDF Generation] Chart 8 data fetched successfully.", flush=True)
     except Exception as e:
         print(f"Chart 8 Controller Exception: {e}")
-        chart_data_8 = {}
     
     cursor.close()
 
@@ -259,15 +248,47 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
     if not chart_data_3:
         chart_data_3 = {"TRUCK": 100, "CAR": 80, "TRACTOR": 60, "BIKE": 40}
     if not chart_data_4:
-        chart_data_4 = {"Zone A": 120, "Zone B": 90, "Zone C": 110}
-    if not chart_data_5:
-        chart_data_5 = {"Retail": 45, "Wholesale": 35, "Direct": 20}
+        chart_data_4 = [
+            {"Zone": "EZ", "Achev": 69.81, "Plan": 0.0, "Sale": 0.0},
+            {"Zone": "NZ", "Achev": 87.53, "Plan": 0.0, "Sale": 0.0},
+            {"Zone": "WZ", "Achev": 2.52, "Plan": 0.0, "Sale": 0.0},
+            {"Zone": "CZ", "Achev": 196.10, "Plan": 0.0, "Sale": 0.0},
+            {"Zone": "TZ", "Achev": 93.68, "Plan": 0.0, "Sale": 0.0},
+            {"Zone": "SZ", "Achev": 63.28, "Plan": 0.0, "Sale": 0.0}
+        ]
+    if not chart_data_5_cat:
+        chart_data_5_cat = [
+            {"category": "Tyre", "sales": 673.31},
+            {"category": "Tube", "sales": 38.93},
+            {"category": "Others", "sales": 15.17},
+            {"category": "Flap", "sales": 13.18}
+        ]
+    if not chart_data_5_acc:
+        chart_data_5_acc = [
+            {"account": "Dealer", "account_sales": 451.69, "pct": "60%"},
+            {"account": "Fleet", "account_sales": 60.41, "pct": "8%"},
+            {"account": "Ship to Party", "account_sales": 0.83, "pct": "0%"}
+        ]
     if not chart_data_6:
-        chart_data_6 = {"Billed": 80, "Non Billed": 20}
+        chart_data_6 = [
+            {"account": "Dealer", "pct": 100.0},
+            {"account": "Fleet", "pct": 100.0},
+            {"account": "OEM", "pct": 100.0},
+            {"account": "Ship to Party", "pct": 100.0}
+        ]
     if not chart_data_7:
-        chart_data_7 = {"On Time": 85, "Overdue": 15}
+        chart_data_7 = [
+            {"category": "31-45", "pct": 60.7},
+            {"category": "46-90", "pct": 29.9},
+            {"category": "90+", "pct": 9.5}
+        ]
     if not chart_data_8:
-        chart_data_8 = {"Safe": 70, "Exposure": 30}
+        chart_data_8 = [
+            {"account": "Dealer", "pct": 75.0},
+            {"account": "Fleet", "pct": 88.0},
+            {"account": "OEM", "pct": 88.0},
+            {"account": "Ship to Party", "pct": 50.0}
+        ]
 
     # 2. Generate Chart Images
     timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
@@ -278,8 +299,6 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
     img2_path = os.path.join(temp_dir, f"chart2_{timestamp}.png")
     img3_path = os.path.join(temp_dir, f"chart3_{timestamp}.png")
     img4_path = os.path.join(temp_dir, f"chart4_{timestamp}.png")
-    img5_path = os.path.join(temp_dir, f"chart5_{timestamp}.png")
-    img6_path = os.path.join(temp_dir, f"chart6_{timestamp}.png")
     img7_path = os.path.join(temp_dir, f"chart7_{timestamp}.png")
     img8_path = os.path.join(temp_dir, f"chart8_{timestamp}.png")
     
@@ -309,9 +328,20 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
     
     # Chart 2: Sales by Zone (Pie)
     plt.figure(figsize=(6, 5))
-    colors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6']
-    plt.pie(list(chart_data_2.values()), labels=list(chart_data_2.keys()), autopct='%1.1f%%', colors=colors[:len(chart_data_2)])
-    plt.title('Sales by Zone', fontsize=12, fontweight='bold', loc='left')
+    colors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#6366F1', '#F97316', '#64748B']
+    
+    vals2 = list(chart_data_2.values())
+    total2 = sum(vals2) if vals2 else 0
+    labels2 = [f"{k}: {(v/total2)*100:.1f}%" if total2 else f"{k}: 0.0%" for k, v in chart_data_2.items()]
+    
+    wedges, texts = plt.pie(vals2, labels=labels2, colors=colors[:len(chart_data_2)])
+    
+    for text, wedge in zip(texts, wedges):
+        text.set_color(wedge.get_facecolor())
+        text.set_fontweight('bold')
+        text.set_fontsize(9)
+        
+    # We do not use autopct so no numbers appear inside the pie, only outside.
     plt.tight_layout()
     plt.savefig(img2_path, dpi=150)
     plt.close()
@@ -340,58 +370,183 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
     plt.savefig(img3_path, dpi=150)
     plt.close()
 
-    # Chart 4: Sales Revenue Data by Zone (Bar)
-    vals4 = list(chart_data_4.values())
-    max_val4 = max(vals4) if vals4 else 0
-    scale4 = 10000000 if max_val4 >= 10000000 else 1
-    unit4 = " (Cr)" if scale4 == 10000000 else ""
-    plot_vals4 = [round(v / scale4, 2) for v in vals4]
-    
-    plt.figure(figsize=(10, 4))
-    bars4 = plt.bar(list(chart_data_4.keys()), plot_vals4, color='#10B981', width=0.15)
-    plt.bar_label(bars4, fmt='%.2f', padding=3, fontsize=9)
-    plt.title('Sales Revenue by Zone', fontsize=12, fontweight='bold', loc='left')
-    plt.ylabel(f'Sales Value{unit4}')
-    plt.grid(axis='y', linestyle='--', alpha=0.3)
-    plt.gca().spines['top'].set_visible(False)
-    plt.gca().spines['right'].set_visible(False)
-    if plot_vals4: plt.ylim(0, max(plot_vals4) * 1.15)
-    plt.tight_layout()
-    plt.savefig(img4_path, dpi=150)
-    plt.close()
+    # Helper to extract a label and numeric values from a dictionary regardless of key order
+    def extract_label_and_numbers(item):
+        label = "Unknown"
+        numbers = []
+        strings = []
+        for v in item.values():
+            if v is None: continue
+            try:
+                numbers.append(float(v))
+            except (ValueError, TypeError):
+                strings.append(str(v))
+        if strings: label = strings[0]
+        return label, numbers, strings
 
-    # Chart 5: Sales by Account Category (Horizontal Bar)
-    vals5 = list(chart_data_5.values())
-    max_val5 = max(vals5) if vals5 else 0
-    scale5 = 10000000 if max_val5 >= 10000000 else 1
-    unit5 = " (Cr)" if scale5 == 10000000 else ""
-    plot_vals5 = [round(v / scale5, 2) for v in vals5]
-    
-    plt.figure(figsize=(10, 6))
-    bars5 = plt.barh(list(chart_data_5.keys())[::-1], plot_vals5[::-1], color='#3B82F6')
-    plt.bar_label(bars5, fmt='%.2f', padding=5, fontsize=9)
-    plt.title('Sales by Account Category', fontsize=12, fontweight='bold', loc='left')
-    plt.xlabel(f'Sales Value{unit5}')
-    plt.gca().spines['top'].set_visible(False)
-    plt.gca().spines['right'].set_visible(False)
-    if plot_vals5: plt.xlim(0, max(plot_vals5) * 1.15)
-    plt.tight_layout()
-    plt.savefig(img5_path, dpi=150)
-    plt.close()
-
-    def plot_pie_chart(data, title, save_path):
-        plt.figure(figsize=(6, 5))
-        plt.pie(list(data.values()), labels=list(data.keys()), autopct='%1.1f%%', colors=colors[:len(data)])
-        plt.title(title, fontsize=12, fontweight='bold', loc='left')
+    # Chart 4: Sales Revenue Data by Zone (Grouped Bar Chart)
+    if chart_data_4:
+        labels = []
+        achev = []
+        plan = []
+        sale = []
+        for item in chart_data_4:
+            lbl, nums, strs = extract_label_and_numbers(item)
+            labels.append(lbl)
+            achev.append(nums[0] if len(nums) > 0 else 0)
+            plan.append(nums[1] if len(nums) > 1 else 0)
+            sale.append(nums[2] if len(nums) > 2 else 0)
+        
+        x = list(range(len(labels)))
+        
+        plt.figure(figsize=(10, 5))
+        
+        # Combo Chart matching exact.pdf
+        plt.bar(x, sale, 0.35, label='Sale Value', color='#0EA5E9', zorder=2)
+        plt.plot(x, achev, marker='o', label='Achev Value %', color='#84CC16', zorder=3, linestyle='-', linewidth=2)
+        plt.plot(x, plan, marker='o', label='Plan Value', color='#F59E0B', zorder=3, linestyle='-', linewidth=2)
+        
+        for i in range(len(labels)):
+            # In exact.pdf, text labels only appear above the Sale Value bars
+            if sale[i] > 0: 
+                plt.text(x[i], sale[i]+1, f"{sale[i]:.2f}", ha='center', va='bottom', fontsize=8, color='#0EA5E9', fontweight='bold')
+            # For achev and plan, print if they are significant and separate from sale to avoid overlapping
+            if achev[i] > 0 and abs(achev[i] - sale[i]) > 5:
+                plt.text(x[i], achev[i]+1, f"{achev[i]:.2f}", ha='center', va='bottom', fontsize=8, color='#84CC16', fontweight='bold')
+            
+        plt.xticks(x, labels)
+        plt.legend(loc='upper center', bbox_to_anchor=(0.5, 1.15), ncol=3, frameon=False)
+        plt.gca().spines['top'].set_visible(False)
+        plt.gca().spines['right'].set_visible(False)
+        plt.grid(axis='y', linestyle='--', alpha=0.3)
+        all_vals = achev + plan + sale
+        if all_vals: plt.ylim(0, max(all_vals) * 1.15)
         plt.tight_layout()
-        plt.savefig(save_path, dpi=150)
+        plt.savefig(img4_path, dpi=150)
         plt.close()
 
-    # Charts 6, 7, 8 (Pie charts)
-    plot_pie_chart(chart_data_6, 'Non Billed Accounts Pct', img6_path)
-    plot_pie_chart(chart_data_7, 'Overdue Pct', img7_path)
-    plot_pie_chart(chart_data_8, 'Exposure Pct', img8_path)
+    # Chart 7: Overdue Pct
+    if chart_data_7:
+        labels7 = []
+        vals7 = []
+        for item in chart_data_7:
+            lbl, nums, strs = extract_label_and_numbers(item)
+            # sometimes lbl might be empty or wrong, but we keep it for legend
+            labels7.append(lbl if lbl != "Unknown" else "")
+            vals7.append(nums[0] if nums else 0)
+        
+        plt.figure(figsize=(6, 5))
+        colors7 = ['#38BDF8', '#A3E635', '#FBBF24']
+        
+        # We don't pass labels to pie() so they don't show outside
+        # We only want autopct outside.
+        wedges, texts, autotexts = plt.pie(vals7, autopct='%1.1f%%', colors=colors7[:len(vals7)], pctdistance=1.15)
+        
+        # Add legend at the top
+        plt.legend(wedges, labels7, loc="upper center", bbox_to_anchor=(0.5, 1.15), ncol=3, frameon=False, fontsize=9)
+        
+        for autotext in autotexts:
+            autotext.set_fontweight('bold')
+            autotext.set_fontsize(9)
+            autotext.set_color('black')
+            
+        plt.tight_layout()
+        plt.savefig(img7_path, dpi=150)
+        plt.close()
+        
+    # Chart 8: Exposure Pct
+    if chart_data_8:
+        labels8 = []
+        vals8 = []
+        for item in chart_data_8:
+            lbl, nums, strs = extract_label_and_numbers(item)
+            labels8.append(lbl)
+            vals8.append(nums[0] if nums else 0)
+        plt.figure(figsize=(10, 4))
+        # Add dashed hatch pattern to background (white background, red diagonal lines)
+        plt.barh(labels8[::-1], [100]*len(labels8), color='white', height=0.4, hatch='///', edgecolor='#FCA5A5')
+        # Solid foreground
+        plt.barh(labels8[::-1], vals8[::-1], color='#DC2626', height=0.4)
+        for i, val in enumerate(vals8[::-1]):
+            plt.text(val + 1, i, f"{val}%", va='center', fontweight='bold', fontsize=9)
+        plt.xlim(0, 110)
+        plt.gca().spines['top'].set_visible(False)
+        plt.gca().spines['right'].set_visible(False)
+        plt.tight_layout()
+        plt.savefig(img8_path, dpi=150)
+        plt.close()
     
+    def draw_pdf_cards(pdf, title, data_list, label_key, value_key, suffix="", col_cnt=3, value_on_top=False, bg_color=(248, 250, 252)):
+        if not data_list: return
+        
+        # Determine unique items or just render all
+        pdf.set_font("Arial", 'B', 12)
+        pdf.set_text_color(30, 41, 59)
+        pdf.cell(0, 10, title, ln=True)
+        pdf.ln(2)
+        
+        start_x = pdf.get_x()
+        start_y = pdf.get_y()
+        
+        col_width = (190 - (col_cnt - 1) * 5) / col_cnt
+        row_height = 25
+        current_y = start_y
+        
+        for i, item in enumerate(data_list):
+            col_idx = i % col_cnt
+            if col_idx == 0 and i > 0:
+                current_y += row_height
+                if current_y > 250:
+                    pdf.add_page()
+                    current_y = pdf.get_y()
+            
+            x = start_x + (col_idx * (col_width + 5))
+            
+            pdf.set_fill_color(*bg_color)
+            pdf.rect(x, current_y, col_width, row_height - 5, 'F')
+            
+            # Robust extraction if label_key is int
+            if isinstance(label_key, int):
+                lbl, nums, strs = extract_label_and_numbers(item)
+                label_text = lbl.upper()
+                val = nums[0] if nums else 0
+                
+                # Check for percentage strings or numbers
+                if len(strs) > 1 and "%" in strs[1]:
+                    if str(val) in strs[1] or (val == 0) or str(int(val)) in strs[1]:
+                        val_text = strs[1]
+                    else:
+                        val_text = f"{val}{suffix} ({strs[1]})"
+                elif len(nums) > 1 and "%" not in suffix:
+                    val_text = f"{val}{suffix} ({nums[1]}%)"
+                else:
+                    val_text = f"{val}{suffix}"
+            else:
+                label_text = str(item.get(label_key, "")).upper()
+                val = item.get(value_key, "")
+                val_text = f"{val}{suffix}"
+            
+            if value_on_top:
+                top_text = val_text
+                bot_text = label_text[:25]
+            else:
+                top_text = label_text[:25]
+                bot_text = val_text
+                
+            # Top text
+            pdf.set_xy(x + 2, current_y + 4)
+            pdf.set_font("Arial", 'B', 11)
+            pdf.set_text_color(15, 23, 42) # Slate-900
+            pdf.cell(col_width - 4, 5, top_text, ln=True, align='C')
+            
+            # Bottom text
+            pdf.set_xy(x + 2, current_y + 11)
+            pdf.set_font("Arial", '', 9)
+            pdf.set_text_color(100, 116, 139) # Slate-500
+            pdf.cell(col_width - 4, 8, bot_text, ln=True, align='C')
+            
+        pdf.set_y(current_y + 30)
+        
     # 3. Create PDF
     pdf = FPDF(orientation='P', unit='mm', format='A4')
     pdf.add_page()
@@ -474,37 +629,42 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
         
     # Insert Chart 4 (Sales Revenue by Zone)
     if os.path.exists(img4_path):
-        draw_data_table(pdf, "Sales Revenue by Zone", chart_data_4, "ZONE", "SALES VALUE")
-        if pdf.get_y() > 200: pdf.add_page()
+        if pdf.get_y() > 180: pdf.add_page()
+        pdf.set_font("Arial", 'B', 12)
+        pdf.set_text_color(30, 41, 59)
+        pdf.cell(0, 10, "SALES REVENUE (CR)", ln=True)
         pdf.image(img4_path, x=10, w=190)
         pdf.ln(5)
 
-    # Insert Chart 5 (Sales by Account Category)
-    if os.path.exists(img5_path):
-        draw_data_table(pdf, "Sales by Account Category", chart_data_5, "CATEGORY", "SALES VALUE")
+    # Insert Chart 5 (Sales by Account Category - CARDS)
+    if chart_data_5_cat or chart_data_5_acc:
         if pdf.get_y() > 200: pdf.add_page()
-        pdf.image(img5_path, x=10, w=190)
-        pdf.ln(5)
+        if chart_data_5_cat:
+            draw_pdf_cards(pdf, "CATEGORY SALES", chart_data_5_cat, 0, 1, " Cr", 4, value_on_top=True, bg_color=(248, 250, 252)) # Light Slate
+        if chart_data_5_acc:
+            draw_pdf_cards(pdf, "ACTUAL SALES BY ACCOUNT CATEGORY (CR)", chart_data_5_acc, 0, 1, "", 3, value_on_top=False, bg_color=(255, 247, 237)) # Light Orange
 
-    # Insert Chart 6 (Non Billed Accounts)
-    if os.path.exists(img6_path):
-        draw_data_table(pdf, "Non Billed Accounts Pct", chart_data_6, "CATEGORY", "PERCENTAGE")
-        if pdf.get_y() > 200: pdf.add_page()
-        pdf.image(img6_path, x=50, w=110)
-        pdf.ln(5)
+    # Insert Chart 6 (Non Billed Accounts - CARDS)
+    if chart_data_6:
+        if pdf.get_y() > 230: pdf.add_page()
+        draw_pdf_cards(pdf, "NON BILLED ACCOUNTS %", chart_data_6, 0, 1, "%", 4, value_on_top=False, bg_color=(240, 253, 244)) # Light Mint
 
     # Insert Chart 7 (Overdue Pct)
     if os.path.exists(img7_path):
-        draw_data_table(pdf, "Overdue Pct", chart_data_7, "CATEGORY", "PERCENTAGE")
         if pdf.get_y() > 200: pdf.add_page()
+        pdf.set_font("Arial", 'B', 12)
+        pdf.set_text_color(30, 41, 59)
+        pdf.cell(0, 10, "OVERDUE %", ln=True)
         pdf.image(img7_path, x=50, w=110)
         pdf.ln(5)
 
     # Insert Chart 8 (Exposure Pct)
     if os.path.exists(img8_path):
-        draw_data_table(pdf, "Exposure Pct", chart_data_8, "CATEGORY", "PERCENTAGE")
         if pdf.get_y() > 200: pdf.add_page()
-        pdf.image(img8_path, x=50, w=110)
+        pdf.set_font("Arial", 'B', 12)
+        pdf.set_text_color(30, 41, 59)
+        pdf.cell(0, 10, "EXPOSURE %", ln=True)
+        pdf.image(img8_path, x=10, w=190)
     
     pdf_path = os.path.join(temp_dir, f"Dashboard_Report_{workspace_name}_{timestamp}.pdf")
     pdf.output(pdf_path)
@@ -515,8 +675,6 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
         os.remove(img2_path)
         os.remove(img3_path)
         os.remove(img4_path)
-        os.remove(img5_path)
-        os.remove(img6_path)
         os.remove(img7_path)
         os.remove(img8_path)
     except:
