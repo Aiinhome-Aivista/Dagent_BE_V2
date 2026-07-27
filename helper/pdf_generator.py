@@ -431,8 +431,18 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
         vals7 = []
         for item in chart_data_7:
             lbl, nums, strs = extract_label_and_numbers(item)
-            # sometimes lbl might be empty or wrong, but we keep it for legend
-            labels7.append(lbl if lbl != "Unknown" else "")
+            true_lbl = item.get("name", "")
+            if not true_lbl:
+                for s in strs:
+                    s_str = str(s).strip()
+                    if s_str.startswith('#') or s_str.endswith('%'):
+                        continue
+                    true_lbl = s_str
+                    break
+            if not true_lbl: 
+                true_lbl = lbl
+                
+            labels7.append(true_lbl)
             vals7.append(nums[0] if nums else 0)
         
         plt.figure(figsize=(6, 5))
