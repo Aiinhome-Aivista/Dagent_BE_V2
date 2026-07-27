@@ -71,13 +71,17 @@ def generate_excel_report(report_ids_json, workspace_db):
         p_prev_to = (now.replace(year=now.year-1)).strftime('%Y-%m-%d')
         
         # 2. Call the Stored Procedure
+        print(f"[Excel Generation] Executing SP for DB {workspace_db}...", flush=True)
         cursor.execute("CALL sp_regionwise_sales_values(%s, %s, %s, %s)", (p_from, p_to, p_prev_from, p_prev_to))
         rows = cursor.fetchall()
+        print(f"[Excel Generation] SP finished, returned {len(rows)} rows.", flush=True)
         
         # 3. Load Excel Template
+        print(f"[Excel Generation] Loading Excel template from {template_path}...", flush=True)
         wb = openpyxl.load_workbook(template_path)
         
         # 4. Dynamically fill the first sheet (index 0) starting at Row 2, Column A
+        print(f"[Excel Generation] Filling first sheet with data...", flush=True)
         sheet1 = wb.worksheets[0]
         fill_excel_sheet(sheet1, rows, start_row=2, start_col=1)
         
@@ -87,6 +91,7 @@ def generate_excel_report(report_ids_json, workspace_db):
         # 5. Save temp file
         temp_filename = f"Sales_Summary_{now.strftime('%Y%m%d_%H%M%S')}.xlsx"
         temp_filepath = os.path.join(os.path.dirname(__file__), "..", "templates", temp_filename)
+        print(f"[Excel Generation] Saving temporary Excel file to {temp_filepath}...", flush=True)
         wb.save(temp_filepath)
         
         return temp_filepath
@@ -141,8 +146,8 @@ def build_html_table(report_name, data, recipient_name=""):
     """
     return html
 
-def send_report_email(to_email, attachment_path, recipient_name=""):
-    """Sends the actual email with the PDF attachment."""
+def send_report_email(to_email, attachment_paths, recipient_name=""):
+    """Sends the actual email with attachments."""
     try:
         from_email = MAIL_USERNAME or os.getenv("NOREPLY_EMAIL", "test@test.com")
         password = MAIL_PASSWORD or os.getenv("NOREPLY_PASSWORD", "")
@@ -155,15 +160,15 @@ def send_report_email(to_email, attachment_path, recipient_name=""):
         body = build_html_table(report_name="Dashboard Report", data=[], recipient_name=recipient_name)
         msg.attach(MIMEText(body, "html"))
 
-        # Attach PDF file
-        if attachment_path and os.path.exists(attachment_path):
-            with open(attachment_path, "rb") as f:
-                part = MIMEApplication(f.read(), Name=os.path.basename(attachment_path))
-            part['Content-Disposition'] = f'attachment; filename="{os.path.basename(attachment_path)}"'
-            msg.attach(part)
-        else:
-            print("[Mailer Error] Could not attach file: File not found.")
-            return False
+        # Attach files
+        for attachment_path in attachment_paths:
+            if attachment_path and os.path.exists(attachment_path):
+                with open(attachment_path, "rb") as f:
+                    part = MIMEApplication(f.read(), Name=os.path.basename(attachment_path))
+                part['Content-Disposition'] = f'attachment; filename="{os.path.basename(attachment_path)}"'
+                msg.attach(part)
+            else:
+                print(f"[Mailer Error] Could not attach file: {attachment_path} not found.")
 
         # Send using the dynamic SMTP server from config
         if MAIL_USE_TLS or MAIL_PORT == 587:
@@ -223,6 +228,7 @@ def check_and_send_scheduled_reports():
         print(f"[Mailer] Found {len(due_reports)} report(s) scheduled for {current_day} at {current_time}. Sending...", flush=True)
         
         for schedule in due_reports:
+            print(f"[Mailer] Generating PDF report for {schedule['email']}...", flush=True)
             # 1. Generate PDF Report
             pdf_path = generate_pdf_report(
                 db_conn=conn, 
@@ -232,19 +238,47 @@ def check_and_send_scheduled_reports():
             )
             
             if not pdf_path:
-                print(f"[Mailer] Failed to generate PDF for {schedule['email']}")
+                print(f"[Mailer] Failed to generate PDF for {schedule['email']}", flush=True)
+            else:
+                print(f"[Mailer] PDF generated successfully at {pdf_path}", flush=True)
+                
+            print(f"[Mailer] Generating Excel report for {schedule['email']}...", flush=True)
+            # 1b. Generate Excel Report
+            from controllers.export_report_controller import generate_domestic_sales_excel
+            now = datetime.datetime.now()
+            excel_path = generate_domestic_sales_excel(
+                conn=conn, 
+                session_id=schedule['session_id'],
+                year=now.year,
+                month=now.month,
+                day=now.day
+            )
+            
+            if not excel_path:
+                print(f"[Mailer] Failed to generate Excel for {schedule['email']}", flush=True)
+            else:
+                print(f"[Mailer] Excel generated successfully at {excel_path}", flush=True)
+                
+            attachments = []
+            if pdf_path: attachments.append(pdf_path)
+            if excel_path: attachments.append(excel_path)
+            
+            if not attachments:
+                print(f"[Mailer] No attachments generated for {schedule['email']}, skipping email.", flush=True)
                 continue
 
             # 2. Send the Email
             send_report_email(
                 to_email=schedule['email'],
-                attachment_path=pdf_path,
+                attachment_paths=attachments,
                 recipient_name=schedule['name']
             )
             
-            # 3. Cleanup temp file
-            if os.path.exists(pdf_path):
+            # 3. Cleanup temp files
+            if pdf_path and os.path.exists(pdf_path):
                 os.remove(pdf_path)
+            if excel_path and os.path.exists(excel_path):
+                os.remove(excel_path)
                 
     except Exception as e:
         print(f"[Mailer] Error checking schedule: {e}")
