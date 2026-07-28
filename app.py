@@ -589,11 +589,15 @@ def overdue_pct():
 def exposure_pct():
     return get_exposure_pct_controller(get_db_connection)
 
-from controllers.export_report_controller import export_domestic_sales_report_controller
+from controllers.export_report_controller import export_domestic_sales_report_controller, export_domestic_sales_preview_controller
 
 @app.route("/export-domestic-sales-report", methods=["GET", "POST"])
 def export_domestic_sales_report():
     return export_domestic_sales_report_controller(get_db_connection)
+
+@app.route("/export-domestic-sales-preview", methods=["GET", "POST"])
+def export_domestic_sales_preview():
+    return export_domestic_sales_preview_controller(get_db_connection)
 
 # ==========================================
 # Report Recipients API

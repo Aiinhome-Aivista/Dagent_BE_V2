@@ -3,7 +3,7 @@ import io
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
-def generate_domestic_sales_excel(conn, session_id, year, month, day):
+def generate_domestic_sales_excel(conn, session_id, year, month, day, return_worksheets=False):
     cursor = None
     try:
         try:
@@ -937,7 +937,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day):
             ws3.merge_cells('A1:AC1')
             ws3['A1'].value = f"Sales Summary in No's & Values for {month_abbr}-{curr_year_str}"
             ws3['A1'].font = bold_font
-            ws3['A1'].alignment = Alignment(horizontal='left', vertical='center')
+            ws3['A1'].alignment = Alignment(horizontal='center', vertical='center')
             
             ws3_title_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
             for c in range(1, 30):
@@ -1100,6 +1100,9 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day):
             print(f"Error populating WS3 (Sales Numbers): {e}")
 
         # === MERGE SHEETS VERTICALLY ===
+        if return_worksheets:
+            return [ws, ws1, ws2, ws3]
+            
         import copy
         import traceback
         def copy_sheet_vertically(source_ws, target_ws, start_row_offset):
@@ -1220,3 +1223,149 @@ def export_domestic_sales_report_controller(get_db_connection):
             try:
                 conn.close()
             except: pass
+
+
+def export_domestic_sales_preview_controller(get_db_connection):
+    """Returns JSON preview data for the 4 report sections exactly as generated for Excel."""
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Database connection failed"}), 500
+
+    try:
+        data = request.get_json(silent=True) or {}
+        from datetime import datetime
+        now = datetime.now()
+
+        session_id = data.get("session_id") or request.args.get("session_id")
+        year  = int(data.get("year")  or request.args.get("year",  now.year))
+        month = int(data.get("month") or request.args.get("month", now.month))
+        day   = int(data.get("day")   or request.args.get("day",   now.day))
+
+        import calendar
+        month_abbr    = calendar.month_abbr[month] if 1 <= month <= 12 else str(month)
+        curr_year_str = str(year)[-2:]
+        prev_year_str = str(year - 1)[-2:]
+
+        # Get the worksheets in memory (this doesn't save to disk)
+        worksheets = generate_domestic_sales_excel(conn, session_id, year, month, day, return_worksheets=True)
+        if not worksheets or len(worksheets) < 4:
+            raise Exception("Failed to generate Excel worksheets for preview.")
+
+        def extract_ws_matrix(worksheet):
+            # 1. Identify merged cells
+            merged_map = {}
+            for merged_range in worksheet.merged_cells.ranges:
+                min_col, min_row, max_col, max_row = merged_range.bounds
+                # Mark top-left as root
+                merged_map[(min_row, min_col)] = {
+                    "rowSpan": max_row - min_row + 1,
+                    "colSpan": max_col - min_col + 1
+                }
+                # Mark others as skipped
+                for r in range(min_row, max_row + 1):
+                    for c in range(min_col, max_col + 1):
+                        if r == min_row and c == min_col:
+                            continue
+                        merged_map[(r, c)] = {"skip": True}
+
+            matrix = []
+            max_r = worksheet.max_row
+            max_c = worksheet.max_column
+
+            for r in range(1, max_r + 1):
+                row_data = []
+                for c in range(1, max_c + 1):
+                    merge_info = merged_map.get((r, c))
+                    if merge_info and merge_info.get("skip"):
+                        continue
+                    
+                    cell = worksheet.cell(row=r, column=c)
+                    val = cell.value
+                    
+                    # Formatter logic matching excel styling visually where possible
+                    display_val = ""
+                    if isinstance(val, (int, float)) or type(val).__name__ == 'Decimal':
+                        is_percent = False
+                        if cell.number_format and '%' in cell.number_format:
+                            is_percent = True
+                        elif cell.value is not None and isinstance(cell.value, str) and '%' in cell.value:
+                            is_percent = True
+                            
+                        if is_percent:
+                            # if it's already a string with %, we don't multiply. But val is float here
+                            display_val = f"{int(round(float(val) * 100))}%"
+                        else:
+                            if isinstance(val, float) or type(val).__name__ == 'Decimal':
+                                display_val = f"{float(val):.2f}"
+                            else:
+                                display_val = str(val)
+                    elif val is None:
+                        display_val = ""
+                    else:
+                        display_val = str(val)
+
+                    # Try to extract bgColor
+                    bgColor = None
+                    if cell.fill and cell.fill.start_color and hasattr(cell.fill.start_color, 'index'):
+                        idx = cell.fill.start_color.index
+                        if isinstance(idx, str) and idx not in ("00000000", "FFFFFFFF", "0"):
+                            if len(idx) == 8:
+                                bgColor = "#" + idx[2:]
+                            elif len(idx) == 6:
+                                bgColor = "#" + idx
+
+                    is_bold = bool(cell.font and cell.font.bold)
+                    align = cell.alignment.horizontal if cell.alignment and cell.alignment.horizontal else "left"
+
+                    cell_dict = {
+                        "value": display_val,
+                        "colSpan": merge_info.get("colSpan", 1) if merge_info else 1,
+                        "rowSpan": merge_info.get("rowSpan", 1) if merge_info else 1,
+                        "bgColor": bgColor,
+                        "bold": is_bold,
+                        "align": align
+                    }
+                    row_data.append(cell_dict)
+                matrix.append(row_data)
+
+            # Trim trailing empty rows to keep the payload clean
+            while matrix and all(cell.get("value") == "" for cell in matrix[-1]):
+                matrix.pop()
+            return matrix
+
+        # The sheets are returned as: ws (Sheet 1), ws1 (Sheet 2), ws2 (Sheet 3), ws3 (Sheet 4)
+        m1 = extract_ws_matrix(worksheets[0])
+        m2 = extract_ws_matrix(worksheets[1])
+        m3 = extract_ws_matrix(worksheets[2])
+        m4 = extract_ws_matrix(worksheets[3])
+
+        return jsonify({
+            "status": "success",
+            "meta": {
+                "year": year, "month": month, "day": day,
+                "month_abbr": month_abbr,
+                "curr_year": curr_year_str, "prev_year": prev_year_str
+            },
+            "sections": {
+                "s1": {"title": f"Domestic Sales Value Achievement – {month_abbr}-{curr_year_str}", "matrix": m1},
+                "s2": {"title": f"Sales Number's – {month_abbr}-{curr_year_str}", "matrix": m2},
+                "s3": {"title": f"Sales Report by Values (Cr) – {month_abbr}-{curr_year_str}", "matrix": m3},
+                "s4": {"title": f"Sales Summary in No's & Values – {month_abbr}-{curr_year_str}", "matrix": m4}
+            }
+        })
+
+    except Exception as e:
+        import traceback
+        print(f"[Preview] Error: {traceback.format_exc()}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        try:
+            if conn and conn.is_connected():
+                # Consume any trailing results before closing
+                try: conn.commit()
+                except Exception: pass
+                conn.close()
+        except Exception:
+            try: conn.close()
+            except: pass
+
