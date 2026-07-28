@@ -396,6 +396,16 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
             achev.append(nums[0] if len(nums) > 0 else 0)
             plan.append(nums[1] if len(nums) > 1 else 0)
             sale.append(nums[2] if len(nums) > 2 else 0)
+        zone_map = {
+            "CZ": "Central Zone",
+            "WZ": "West Zone",
+            "NP": "Nepal Zone",
+            "NZ": "North Zone",
+            "TZ": "South Zone 2",
+            "SZ": "South Zone 1",
+            "EZ": "East Zone"
+        }
+        labels = [zone_map.get(lbl.upper(), lbl) for lbl in labels]
         
         x = list(range(len(labels)))
         
@@ -407,14 +417,18 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
         plt.plot(x, plan, marker='o', label='Plan Value', color='#F59E0B', zorder=3, linestyle='-', linewidth=2)
         
         for i in range(len(labels)):
-            # In exact.pdf, text labels only appear above the Sale Value bars
+            # Print Sale Value
             if sale[i] > 0: 
-                plt.text(x[i], sale[i]+1, f"{sale[i]:.2f}", ha='center', va='bottom', fontsize=8, color='#0EA5E9', fontweight='bold')
-            # For achev and plan, print if they are significant and separate from sale to avoid overlapping
+                plt.text(x[i], sale[i] + max(0.5, sale[i]*0.05), f"{sale[i]:.2f}", ha='center', va='bottom', fontsize=8, color='#0EA5E9', fontweight='bold')
+            # Print Achev Value
             if achev[i] > 0 and abs(achev[i] - sale[i]) > 5:
-                plt.text(x[i], achev[i]+1, f"{achev[i]:.2f}", ha='center', va='bottom', fontsize=8, color='#84CC16', fontweight='bold')
+                plt.text(x[i], achev[i] + max(0.5, achev[i]*0.05), f"{achev[i]:.2f}", ha='center', va='bottom', fontsize=8, color='#84CC16', fontweight='bold')
+            # Print Plan Value
+            if plan[i] > 0:
+                plt.text(x[i], plan[i] + max(0.5, plan[i]*0.05), f"{plan[i]:.2f}", ha='center', va='bottom', fontsize=8, color='#F59E0B', fontweight='bold')
             
-        plt.xticks(x, labels)
+        # Optional: rotate x labels if they are long full names
+        plt.xticks(x, labels, rotation=15, ha="right", fontsize=8)
         plt.legend(loc='upper center', bbox_to_anchor=(0.5, 1.15), ncol=3, frameon=False)
         plt.gca().spines['top'].set_visible(False)
         plt.gca().spines['right'].set_visible(False)

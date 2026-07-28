@@ -1005,7 +1005,53 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day):
                 def sv_ws3(val):
                     return val if val is not None and str(val).strip() != '' else ""
 
+                # Process rows_ws3 to add Achv % rows
+                processed_rows_ws3 = []
+                # Group rows by Zone
+                zones = []
                 for r in rows_ws3:
+                    z = r.get('Zone_Name', r.get('Zone', ''))
+                    if z not in zones:
+                        zones.append(z)
+                
+                for z in zones:
+                    zone_rows = [r for r in rows_ws3 if r.get('Zone_Name', r.get('Zone', '')) == z]
+                    actual_r = next((r for r in zone_rows if str(r.get('Row_Type', r.get('Type', ''))).strip().lower() == 'actual'), None)
+                    target_r = next((r for r in zone_rows if str(r.get('Row_Type', r.get('Type', ''))).strip().lower() == 'target'), None)
+                    
+                    # Create blank rows if missing to ensure 3 rows per zone
+                    if not actual_r:
+                        actual_r = {k: 0 for k in headers_ws3}
+                        actual_r['Zone_Name'] = z
+                        actual_r['Row_Type'] = 'Actual'
+                    if not target_r:
+                        target_r = {k: 0 for k in headers_ws3}
+                        target_r['Zone_Name'] = z
+                        target_r['Row_Type'] = 'Target'
+                    
+                    processed_rows_ws3.append(actual_r)
+                    processed_rows_ws3.append(target_r)
+                    
+                    achv_r = {k: '' for k in headers_ws3}
+                    achv_r['Zone_Name'] = z
+                    achv_r['Row_Type'] = 'Achv %'
+                    
+                    for k in headers_ws3:
+                        if k not in ['Zone', 'Zone_Name', 'Type', 'Row_Type']:
+                            a_val = actual_r.get(k, 0)
+                            t_val = target_r.get(k, 0)
+                            try: a_val = float(a_val) if a_val is not None else 0.0
+                            except: a_val = 0.0
+                            try: t_val = float(t_val) if t_val is not None else 0.0
+                            except: t_val = 0.0
+                            
+                            if t_val != 0:
+                                achv_r[k] = f"{int(round((a_val / t_val) * 100))}%"
+                            else:
+                                achv_r[k] = "0%" if a_val == 0 else ""
+                    processed_rows_ws3.append(achv_r)
+
+                for r in processed_rows_ws3:
                     zone_name = r.get('Zone', '') or r.get('Zone_Name', '') or ''
                     row_type = r.get('Type', '') or r.get('Row_Type', '') or ''
                     
@@ -1052,6 +1098,65 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day):
 
         except Exception as e:
             print(f"Error populating WS3 (Sales Numbers): {e}")
+
+        # === MERGE SHEETS VERTICALLY ===
+        import copy
+        import traceback
+        def copy_sheet_vertically(source_ws, target_ws, start_row_offset):
+            for row in source_ws.iter_rows():
+                for cell in row:
+                    if cell.value is None and not cell.has_style:
+                        continue
+                    
+                    try:
+                        col_idx = getattr(cell, 'col_idx', getattr(cell, 'column', 1))
+                        new_cell = target_ws.cell(row=start_row_offset + cell.row - 1, column=col_idx, value=cell.value)
+                        if cell.has_style:
+                            if cell.font: new_cell.font = copy.copy(cell.font)
+                            if cell.border: new_cell.border = copy.copy(cell.border)
+                            if cell.fill: new_cell.fill = copy.copy(cell.fill)
+                            if cell.alignment: new_cell.alignment = copy.copy(cell.alignment)
+                            if cell.number_format: new_cell.number_format = cell.number_format
+                    except Exception as e:
+                        with open("error_log.txt", "a") as f:
+                            f.write(f"Cell copy error: {e}\n")
+            
+            for merged_cell_range in source_ws.merged_cells.ranges:
+                try:
+                    min_col, min_row, max_col, max_row = merged_cell_range.bounds
+                    target_ws.merge_cells(
+                        start_row=min_row + start_row_offset - 1,
+                        start_column=min_col,
+                        end_row=max_row + start_row_offset - 1,
+                        end_column=max_col
+                    )
+                except Exception as e:
+                    with open("error_log.txt", "a") as f:
+                        f.write(f"Merge error: {e}\n")
+
+        try:
+            current_max_row = ws.max_row
+            
+            current_max_row += 2
+            copy_sheet_vertically(ws1, ws, current_max_row)
+            current_max_row = ws.max_row
+            
+            current_max_row += 2
+            copy_sheet_vertically(ws2, ws, current_max_row)
+            current_max_row = ws.max_row
+            
+            current_max_row += 2
+            copy_sheet_vertically(ws3, ws, current_max_row)
+            
+            # Remove old sheets
+            wb.remove(ws1)
+            wb.remove(ws2)
+            wb.remove(ws3)
+            
+            ws.title = "Summary Revised"
+        except Exception as e:
+            with open("error_log.txt", "w") as f:
+                f.write(f"Error merging sheets: {traceback.format_exc()}\n")
 
         import os
         file_name = f"Summary Revised_{year}_{month}_{day}.xlsx"
