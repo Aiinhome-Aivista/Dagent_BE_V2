@@ -43,7 +43,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                     FROM information_schema.routines 
                     WHERE ROUTINE_TYPE='PROCEDURE' 
                       AND ROUTINE_SCHEMA=%s 
-                      AND ROUTINE_NAME='sp_domestic_sales_report'
+                      AND ROUTINE_NAME='sp_domestic_sales_value_achivements'
                 """, (new_user_db,))
                 
                 routine_rows = cursor.fetchall()
@@ -52,20 +52,20 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                     db_to_use = external_database
                     
                 # Explicitly call the SP using the correct fully qualified DB name
-                print(f"[Excel Export] Executing {db_to_use}.sp_domestic_sales_report...", flush=True)
+                print(f"[Excel Export] Executing {db_to_use}.sp_domestic_sales_value_achivements...", flush=True)
                 cursor.execute(
-                    f"CALL `{db_to_use}`.sp_domestic_sales_report(%s, %s, %s)",
+                    f"CALL `{db_to_use}`.sp_domestic_sales_value_achivements(%s, %s, %s)",
                     (year, month, day)
                 )
-                print(f"[Excel Export] sp_domestic_sales_report finished.", flush=True)
+                print(f"[Excel Export] sp_domestic_sales_value_achivements finished.", flush=True)
             else:
                 # Fallback if no session found (uses default DB)
-                cursor.execute("CALL sp_domestic_sales_report(%s, %s, %s)", (year, month, day))
+                cursor.execute("CALL sp_domestic_sales_value_achivements(%s, %s, %s)", (year, month, day))
         else:
             # Fallback if no session_id provided
-            print(f"[Excel Export] Executing sp_domestic_sales_report (fallback)...", flush=True)
-            cursor.execute("CALL sp_domestic_sales_report(%s, %s, %s)", (year, month, day))
-            print(f"[Excel Export] sp_domestic_sales_report finished.", flush=True)
+            print(f"[Excel Export] Executing sp_domestic_sales_value_achivements (fallback)...", flush=True)
+            cursor.execute("CALL sp_domestic_sales_value_achivements(%s, %s, %s)", (year, month, day))
+            print(f"[Excel Export] sp_domestic_sales_value_achivements finished.", flush=True)
         
         print(f"[Excel Export] Fetching results...", flush=True)
         rows = []
@@ -95,7 +95,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                     if cursor.description is not None: cursor.fetchall()
                 except Exception: break
         
-        print(f"[Excel Export] sp_domestic_sales_report returned {len(rows)} rows.", flush=True)
+        print(f"[Excel Export] sp_domestic_sales_value_achivements returned {len(rows)} rows.", flush=True)
         if len(rows) > 0:
             print(f"[Excel Export] First row sample: {rows[0]}", flush=True)
             
@@ -148,10 +148,10 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         # Headers Group 1 (Row 2)
         ws.merge_cells('A2:A3')
         ws['A2'].value = "Market Segment"
-        ws.merge_cells('B2:D2')
+        ws.merge_cells('B2:C2')
         ws['B2'].value = f"{month_abbr}-{prev_year_str} Actual"
-        ws.merge_cells('E2:H2')
-        ws['E2'].value = f"Actual Sale for {month_abbr}-{curr_year_str}"
+        ws.merge_cells('D2:H2')
+        ws['D2'].value = f"Actual Sale for {month_abbr}-{curr_year_str}"
         
         for c in range(1, 9):
             ws.cell(row=2, column=c).border = border
@@ -174,123 +174,42 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         
         row_num = 4
         
-        # Calculate totals while avoiding double-counting known DB subtotals
-        totals = { "Month": 0, "MTD": 0, "Target": 0, "Actual": 0, "Sale_For_Day": 0 }
-        
-        repl_totals = { "Month": 0, "MTD": 0, "Target": 0, "Actual": 0, "Sale_For_Day": 0 }
-        four_whlr_totals = { "Month": 0, "MTD": 0, "Target": 0, "Actual": 0, "Sale_For_Day": 0 }
-        two_three_whlr_totals = { "Month": 0, "MTD": 0, "Target": 0, "Actual": 0, "Sale_For_Day": 0 }
-        
-        has_4_whlrs_splits = False
-        has_23_whlrs_splits = False
-        
-        # Pre-process rows to insert totals
-        processed_rows = []
-        insert_repl_idx = -1
-        
-        for idx, row in enumerate(rows):
+        for row in rows:
             label = row.get('report_name') or row.get('market_segment', 'Unknown')
-            processed_rows.append(row)
             
-            # Identify components for totals
-            if "4 Wheeler" in label or "4 Whlr" in label:
-                if label not in ["4 Wheelers", "4 Whlrs Total"]:
-                    has_4_whlrs_splits = True
-                for key in four_whlr_totals:
-                    val = row.get(key)
-                    if val is not None:
-                        try: four_whlr_totals[key] += float(val)
-                        except: pass
-                        
-            elif "2/3 Wheeler" in label or "2/3 Whlr" in label:
-                if label not in ["2/3 Wheelers", "2/3 Whlrs Total"]:
-                    has_23_whlrs_splits = True
-                for key in two_three_whlr_totals:
-                    val = row.get(key)
-                    if val is not None:
-                        try: two_three_whlr_totals[key] += float(val)
-                        except: pass
-            
-            # Find the best index to insert Repl
-            if "2/3 Wheeler" in label or ("2/3 Whlrs" in label and "Total" in label) or ("2/3" in label and not has_23_whlrs_splits):
-                insert_repl_idx = len(processed_rows) # insert right after this row
-            elif "Treel" in label and insert_repl_idx != -1:
-                insert_repl_idx = len(processed_rows) # move insertion after Treel
-
-        # Combine totals for Repl
-        for key in repl_totals:
-            repl_totals[key] = four_whlr_totals[key] + two_three_whlr_totals[key]
-
-        # Insert 4 Whlrs Total
-        if True:
-            achv = f"{round((four_whlr_totals['Actual'] / four_whlr_totals['Target'] * 100))}%" if four_whlr_totals['Target'] else "0%"
-            grth = f"{round(((four_whlr_totals['Actual'] - four_whlr_totals['MTD']) / four_whlr_totals['MTD']) * 100)}%" if four_whlr_totals['MTD'] else "0%"
-            total_4_row = {
-                'market_segment': '4 Whlrs Total', 'Month': four_whlr_totals['Month'], 'MTD': four_whlr_totals['MTD'],
-                'Target': four_whlr_totals['Target'], 'Actual': four_whlr_totals['Actual'], 'Achievement': achv,
-                'Sale_For_Day': four_whlr_totals['Sale_For_Day'], 'Growth_Over_LYSMTD': grth, '_is_purple': True
-            }
-            # Find where to insert (after the last 4 Whlr row)
-            idx_4 = max((i for i, r in enumerate(processed_rows) if "4 Wheeler" in (r.get('report_name') or r.get('market_segment', '')) or "4 Whlr" in (r.get('report_name') or r.get('market_segment', ''))), default=-1)
-            if idx_4 != -1:
-                processed_rows.insert(idx_4 + 1, total_4_row)
-                if insert_repl_idx > idx_4: insert_repl_idx += 1
-
-        # Insert 2/3 Whlrs Total
-        if True:
-            achv = f"{round((two_three_whlr_totals['Actual'] / two_three_whlr_totals['Target'] * 100))}%" if two_three_whlr_totals['Target'] else "0%"
-            grth = f"{round(((two_three_whlr_totals['Actual'] - two_three_whlr_totals['MTD']) / two_three_whlr_totals['MTD']) * 100)}%" if two_three_whlr_totals['MTD'] else "0%"
-            total_23_row = {
-                'market_segment': '2/3 Whlrs Total', 'Month': two_three_whlr_totals['Month'], 'MTD': two_three_whlr_totals['MTD'],
-                'Target': two_three_whlr_totals['Target'], 'Actual': two_three_whlr_totals['Actual'], 'Achievement': achv,
-                'Sale_For_Day': two_three_whlr_totals['Sale_For_Day'], 'Growth_Over_LYSMTD': grth, '_is_purple': True
-            }
-            idx_23 = max((i for i, r in enumerate(processed_rows) if "2/3 Wheeler" in (r.get('report_name') or r.get('market_segment', '')) or "2/3 Whlr" in (r.get('report_name') or r.get('market_segment', ''))), default=-1)
-            if idx_23 != -1:
-                processed_rows.insert(idx_23 + 1, total_23_row)
-                if insert_repl_idx > idx_23: insert_repl_idx += 1
-
-        if insert_repl_idx != -1:
-            achv = f"{round((repl_totals['Actual'] / repl_totals['Target'] * 100))}%" if repl_totals['Target'] else "0%"
-            grth = f"{round(((repl_totals['Actual'] - repl_totals['MTD']) / repl_totals['MTD']) * 100)}%" if repl_totals['MTD'] else "0%"
-            
-            repl_row = {
-                'market_segment': 'Repl (4 & 2/3 Whlrs)',
-                'Month': repl_totals['Month'],
-                'MTD': repl_totals['MTD'],
-                'Target': repl_totals['Target'],
-                'Actual': repl_totals['Actual'],
-                'Achievement': achv,
-                'Sale_For_Day': repl_totals['Sale_For_Day'],
-                'Growth_Over_LYSMTD': grth,
-                '_is_yellow': True
-            }
-            processed_rows.insert(insert_repl_idx, repl_row)
-        
-        for row in processed_rows:
-            label = row.get('report_name') or row.get('market_segment', 'Unknown')
+            # Use '0%' or '%' based on image
+            achv = row.get('Achievement', '0%')
+            grth = row.get('Growth_Over_LYSMTD', '0%')
+            if achv is None: achv = '0%'
+            if grth is None: grth = '0%'
+            # Sometimes values are raw floats from the DB, if so, we format it.
+            # But the SP might already be returning strings with '%'.
             
             c1 = ws.cell(row=row_num, column=1, value=label)
             c2 = ws.cell(row=row_num, column=2, value=row.get('Month', 0))
             c3 = ws.cell(row=row_num, column=3, value=row.get('MTD', 0))
             c4 = ws.cell(row=row_num, column=4, value=row.get('Target', 0))
             c5 = ws.cell(row=row_num, column=5, value=row.get('Actual', 0))
-            c6 = ws.cell(row=row_num, column=6, value=row.get('Achievement', '0%'))
+            c6 = ws.cell(row=row_num, column=6, value=achv)
             c7 = ws.cell(row=row_num, column=7, value=row.get('Sale_For_Day', 0) if row.get('Sale_For_Day') is not None else 0)
-            c8 = ws.cell(row=row_num, column=8, value=row.get('Growth_Over_LYSMTD', '0%'))
+            c8 = ws.cell(row=row_num, column=8, value=grth)
             
             # Apply formatting
             is_subtotal = "OEM+STU+DEF" in label or "Repl" in label or "Total" in label
+            is_purple = "Total" in label and ("4" in label or "2/3" in label)
+            is_grand_total = label.lower() == "domestic"
             
             fill_color = None
-            if row.get('_is_purple') or "Total" in label:
+            if is_grand_total:
+                fill_color = fill_blue
+            elif is_purple:
                 fill_color = fill_pink
-            elif row.get('_is_yellow') or is_subtotal:
+            elif is_subtotal:
                 fill_color = fill_yellow
             
             for c in [c1, c2, c3, c4, c5, c6, c7, c8]:
                 c.border = border
-                if is_subtotal or fill_color:
+                if is_subtotal or is_grand_total or fill_color:
                     c.font = bold_font
                 if fill_color:
                     c.fill = fill_color
@@ -298,54 +217,8 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
             c6.alignment = center_aligned_text
             c8.alignment = center_aligned_text
             
-            # Add to totals (Skip adding known subtotals to avoid double counting)
-            if not is_subtotal:
-                for key in totals:
-                    val = row.get(key)
-                    if val is not None:
-                        try:
-                            totals[key] += float(val)
-                        except ValueError:
-                            pass
-            
             row_num += 1
 
-        # Add Grand Total Row (Domestic)
-        ws.cell(row=row_num, column=1, value="Domestic").font = bold_font
-        ws.cell(row=row_num, column=1).fill = fill_blue
-        ws.cell(row=row_num, column=1).border = border
-        
-        ws.cell(row=row_num, column=2, value=totals["Month"]).font = bold_font
-        ws.cell(row=row_num, column=2).fill = fill_blue
-        ws.cell(row=row_num, column=2).border = border
-        
-        ws.cell(row=row_num, column=3, value=totals["MTD"]).font = bold_font
-        ws.cell(row=row_num, column=3).fill = fill_blue
-        ws.cell(row=row_num, column=3).border = border
-        
-        ws.cell(row=row_num, column=4, value=totals["Target"]).font = bold_font
-        ws.cell(row=row_num, column=4).fill = fill_blue
-        ws.cell(row=row_num, column=4).border = border
-        
-        ws.cell(row=row_num, column=5, value=totals["Actual"]).font = bold_font
-        ws.cell(row=row_num, column=5).fill = fill_blue
-        ws.cell(row=row_num, column=5).border = border
-        
-        achv = f"{round((totals['Actual'] / totals['Target'] * 100))}%" if totals['Target'] else "0%"
-        ws.cell(row=row_num, column=6, value=achv).font = bold_font
-        ws.cell(row=row_num, column=6).fill = fill_blue
-        ws.cell(row=row_num, column=6).border = border
-        ws.cell(row=row_num, column=6).alignment = center_aligned_text
-        
-        ws.cell(row=row_num, column=7, value=totals["Sale_For_Day"]).font = bold_font
-        ws.cell(row=row_num, column=7).fill = fill_blue
-        ws.cell(row=row_num, column=7).border = border
-        
-        grth = f"{round(((totals['Actual'] - totals['MTD']) / totals['MTD']) * 100)}%" if totals['MTD'] else "0%"
-        ws.cell(row=row_num, column=8, value=grth).font = bold_font
-        ws.cell(row=row_num, column=8).fill = fill_blue
-        ws.cell(row=row_num, column=8).border = border
-        ws.cell(row=row_num, column=8).alignment = center_aligned_text
 
         # Adjust column widths for WS
         from openpyxl.utils import get_column_letter
@@ -365,12 +238,13 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         # POPULATE WS1 (Sales Summary)
         # ==========================================
         try:
-            print(f"[Excel Export] Executing sp_summary_sales_numbers_V2 for WS1...", flush=True)
+            # Update SP call for WS1
+            print(f"[Excel Export] Executing sp_sales_numbers for WS1...", flush=True)
             if session_id and sync_row:
-                cursor.execute(f"CALL `{db_to_use}`.sp_summary_sales_numbers_V2(%s, %s, %s)", (year, month, day))
+                cursor.execute(f"CALL `{db_to_use}`.sp_sales_numbers(%s, %s, %s)", (year, month, day))
             else:
-                cursor.execute("CALL sp_summary_sales_numbers_V2(%s, %s, %s)", (year, month, day))
-            print(f"[Excel Export] sp_summary_sales_numbers_V2 finished.", flush=True)
+                cursor.execute("CALL sp_sales_numbers(%s, %s, %s)", (year, month, day))
+            print(f"[Excel Export] sp_sales_numbers finished.", flush=True)
                 
             rows_ws1 = []
             if is_mysql_connector:
@@ -398,7 +272,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                         if cursor.description is not None: cursor.fetchall()
                     except Exception: break
                         
-            print(f"[Excel Export] sp_summary_sales_numbers returned {len(rows_ws1)} rows.", flush=True)
+            print(f"[Excel Export] sp_sales_numbers returned {len(rows_ws1)} rows.", flush=True)
             if len(rows_ws1) > 0:
                 print(f"[Excel Export] First row sample: {rows_ws1[0]}", flush=True)
                 
@@ -479,60 +353,6 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
             ws1.cell(row=3, column=1).border = border
             ws1.cell(row=4, column=1).border = border
                 
-            # Aggregate duplicates by category
-            aggregated = {}
-            for r in rows_ws1:
-                cat = r.get('category', '')
-                if cat not in aggregated:
-                    aggregated[cat] = dict(r)
-                else:
-                    for k in r:
-                        if k not in ('row_no', 'category', 'tyre_type_name', 'construction_description', 'achievement', 'domestic_achievement'):
-                            val1 = aggregated[cat].get(k) or 0
-                            val2 = r.get(k) or 0
-                            aggregated[cat][k] = float(val1) + float(val2)
-            
-            # Recalculate percentages
-            for cat, r in aggregated.items():
-                target = float(r.get('target') or 0)
-                total = float(r.get('total') or 0)
-                r['achievement'] = round((total / target * 100), 2) if target > 0 else 0
-                
-                dom_target = float(r.get('domestic_target') or 0)
-                dom_actual = float(r.get('domestic_actual') or 0)
-                r['domestic_achievement'] = round((dom_actual / dom_target * 100), 2) if dom_target > 0 else 0
-                
-            # Compute Grand Total
-            grand_total = {
-                'category': 'Total',
-                'row_no': 99999,  # Ensure it appears at the absolute bottom
-                'achievement': 0,
-                'domestic_achievement': 0
-            }
-            for cat, r in aggregated.items():
-                if cat in ("Pack Tube", "Treel", "Total"):
-                    continue
-                for k, v in r.items():
-                    if k not in ('row_no', 'category', 'tyre_type_name', 'construction_description', 'achievement', 'domestic_achievement'):
-                        grand_total[k] = grand_total.get(k, 0) + float(v or 0)
-            
-            target = float(grand_total.get('target') or 0)
-            total = float(grand_total.get('total') or 0)
-            grand_total['achievement'] = round((total / target * 100), 2) if target > 0 else 0
-            
-            dom_target = float(grand_total.get('domestic_target') or 0)
-            dom_actual = float(grand_total.get('domestic_actual') or 0)
-            grand_total['domestic_achievement'] = round((dom_actual / dom_target * 100), 2) if dom_target > 0 else 0
-            
-            aggregated['Total'] = grand_total
-            
-            # Ensure Pack Tube and Treel are at the very bottom
-            if "Pack Tube" in aggregated:
-                aggregated["Pack Tube"]['row_no'] = 9998
-            if "Treel" in aggregated:
-                aggregated["Treel"]['row_no'] = 9999
-            
-            final_rows = sorted(aggregated.values(), key=lambda x: float(x.get('row_no') or 9999))
             # Data rows
             r_idx = 5
             data_row_counter = 0
@@ -547,18 +367,24 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                     pass
                 return val
                 
-            for r in final_rows:
+            for r in rows_ws1:
                 cat = r.get('category', '')
                 
-                achv1 = r.get('achievement')
-                achv1_str = f"{achv1}%" if achv1 is not None else "0%"
-                if achv1_str == "0%" and not r.get('achievement'):
-                    achv1_str = "%" # match image for empty
-                achv2 = r.get('domestic_achievement')
-                achv2_str = f"{achv2}%" if achv2 is not None else "0%"
-                if achv2_str == "0%" and not r.get('domestic_achievement'):
-                    achv2_str = "%"
+                # Compute % Achv row-by-row since SP doesn't provide them
+                tgt = float(r.get('target') or 0)
+                tot = float(r.get('total') or 0)
+                achv1 = round((tot / tgt * 100), 2) if tgt > 0 else 0
                 
+                dom_tgt = float(r.get('domestic_target') or 0)
+                dom_act = float(r.get('domestic_actual') or 0)
+                achv2 = round((dom_act / dom_tgt * 100), 2) if dom_tgt > 0 else 0
+                
+                achv1_str = f"{achv1}%" if tgt > 0 else "%"
+                achv2_str = f"{achv2}%" if dom_tgt > 0 else "%"
+                
+                # Note: 'mobility_grn', 'fm_actual', 'fleet_total', 'institution', 'government' 
+                # are NOT in the new SP. We map SP 'fleet' to fleet_total (col 11) or fleet (col 9).
+                # Binding to match columns as closely as possible.
                 c_cells = [
                     ws1.cell(row=r_idx, column=1, value=cat),
                     ws1.cell(row=r_idx, column=2, value=sv(r.get('jul_act'))),
@@ -568,11 +394,11 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                     ws1.cell(row=r_idx, column=6, value=sv(r.get('today'))),
                     ws1.cell(row=r_idx, column=7, value=sv(r.get('dealer'))),
                     ws1.cell(row=r_idx, column=8, value=sv(r.get('distributor'))),
-                    ws1.cell(row=r_idx, column=9, value=sv(r.get('mobility_grn'))),
-                    ws1.cell(row=r_idx, column=10, value=sv(r.get('fm_actual'))),
-                    ws1.cell(row=r_idx, column=11, value=sv(r.get('fleet_total'))),
-                    ws1.cell(row=r_idx, column=12, value=sv(r.get('institution'))),
-                    ws1.cell(row=r_idx, column=13, value=sv(r.get('government'))),
+                    ws1.cell(row=r_idx, column=9, value=""), # mobility_grn missing from SP
+                    ws1.cell(row=r_idx, column=10, value=""), # fm_actual missing from SP
+                    ws1.cell(row=r_idx, column=11, value=sv(r.get('fleet'))), # SP fleet -> total fleet
+                    ws1.cell(row=r_idx, column=12, value=""), # institution missing
+                    ws1.cell(row=r_idx, column=13, value=""), # govt missing
                     ws1.cell(row=r_idx, column=14, value=sv(r.get('others'))),
                     ws1.cell(row=r_idx, column=15, value=sv(r.get('oem_target'))),
                     ws1.cell(row=r_idx, column=16, value=sv(r.get('oem_actual'))),
@@ -585,7 +411,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                     ws1.cell(row=r_idx, column=23, value=achv2_str),
                 ]
                 
-                is_subtotal = "Total" in cat or "Total" in str(cat)
+                is_subtotal = "Total" in str(cat)
                 
                 f_color = None
                 if is_subtotal:
@@ -626,17 +452,16 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                 
         except Exception as e:
             print(f"Error populating WS1 (Sales Summary): {e}")
-
         # ==========================================
         # POPULATE WS2 (Sales Report by Values)
         # ==========================================
         try:
-            print(f"[Excel Export] Executing sp_zone_sales_report for WS2...", flush=True)
+            print(f"[Excel Export] Executing sp_sales_report_by_values for WS2...", flush=True)
             if session_id and sync_row:
-                cursor.execute(f"CALL `{db_to_use}`.sp_zone_sales_report(%s, %s, %s)", (year, month, day))
+                cursor.execute(f"CALL `{db_to_use}`.sp_sales_report_by_values(%s, %s, %s)", (year, month, day))
             else:
-                cursor.execute("CALL sp_zone_sales_report(%s, %s, %s)", (year, month, day))
-            print(f"[Excel Export] sp_zone_sales_report finished.", flush=True)
+                cursor.execute("CALL sp_sales_report_by_values(%s, %s, %s)", (year, month, day))
+            print(f"[Excel Export] sp_sales_report_by_values finished.", flush=True)
                 
             rows_ws2 = []
             if is_mysql_connector:
@@ -664,9 +489,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                         if cursor.description is not None: cursor.fetchall()
                     except Exception: break
                         
-            print(f"[Excel Export] sp_zone_sales_report returned {len(rows_ws2)} rows.", flush=True)
-
-            # Row 1 is intentionally left entirely blank and unstyled
+            print(f"[Excel Export] sp_sales_report_by_values returned {len(rows_ws2)} rows.", flush=True)
 
             fill_greyish = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
 
@@ -727,154 +550,96 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                     else:
                         cell.fill = fill_header
 
-            # Data rows
+            # ---- Data rows: fully bound from SP, no Python calculation ----
             r_idx = 5
-            totals_ws2 = {
-                "LY_4W": 0, "LY_23W": 0, "LY_TOTAL": 0,
-                "TARGET_4W": 0, "TARGET_23W": 0, "TARGET_TOTAL": 0,
-                "ACTUAL_4W": 0, "ACTUAL_23W": 0, "ACTUAL_TOTAL": 0,
-                "SALE_FOR_DAY": 0
-            }
-            
-            for r in rows_ws2:
-                # Add data
-                c1 = ws2.cell(row=r_idx, column=1, value=r.get('Zone', ''))
-                c2 = ws2.cell(row=r_idx, column=2, value=r.get('LY_4W', 0))
-                c3 = ws2.cell(row=r_idx, column=3, value=r.get('LY_23W', 0))
-                c4 = ws2.cell(row=r_idx, column=4, value=r.get('LY_TOTAL', 0))
-                c5 = ws2.cell(row=r_idx, column=5, value=r.get('TARGET_4W', 0))
-                c6 = ws2.cell(row=r_idx, column=6, value=r.get('TARGET_23W', 0))
-                c7 = ws2.cell(row=r_idx, column=7, value=r.get('TARGET_TOTAL', 0))
-                c8 = ws2.cell(row=r_idx, column=8, value=r.get('ACTUAL_4W', 0))
-                c9 = ws2.cell(row=r_idx, column=9, value=r.get('ACTUAL_23W', 0))
-                c10 = ws2.cell(row=r_idx, column=10, value=r.get('ACTUAL_TOTAL', 0))
-                
-                achv = r.get('ACHIEVEMENT', 0)
-                achv_val = achv if achv is not None else 0
-                c11 = ws2.cell(row=r_idx, column=11, value=f"{int(round(float(achv_val)))}%" if achv_val else "0%")
-                
-                c12 = ws2.cell(row=r_idx, column=12, value=r.get('SALE_FOR_DAY', 0))
-                c13 = ws2.cell(row=r_idx, column=13, value="") # Asking Rate (Blank)
-                
-                achv_4w = r.get('ACHV_4W', 0)
-                achv_4w_val = achv_4w if achv_4w is not None else 0
-                c14 = ws2.cell(row=r_idx, column=14, value=f"{int(round(float(achv_4w_val)))}%" if achv_4w_val else "0%")
-                
-                achv_23w = r.get('ACHV_23W', 0)
-                achv_23w_val = achv_23w if achv_23w is not None else 0
-                c15 = ws2.cell(row=r_idx, column=15, value=f"{int(round(float(achv_23w_val)))}%" if achv_23w_val else "0%")
-                
-                achv_tot = r.get('ACHV_TOTAL', 0)
-                achv_tot_val = achv_tot if achv_tot is not None else 0
-                c16 = ws2.cell(row=r_idx, column=16, value=f"{int(round(float(achv_tot_val)))}%" if achv_tot_val else "0%")
-                
-                for c in range(1, 17):
-                    cell = ws2.cell(row=r_idx, column=c)
-                    cell.border = border
-                    cell.font = bold_font
-                    if c in [11, 14, 15, 16]:
-                        cell.alignment = center_aligned_text
-                    
-                # Update totals
-                for k in totals_ws2:
-                    val = r.get(k)
-                    if val is not None:
-                        try: totals_ws2[k] += float(val)
-                        except: pass
-                        
-                r_idx += 1
-                
-            # Total row
-            ws2.cell(row=r_idx, column=1, value="Total").font = bold_font
-            ws2.cell(row=r_idx, column=1).fill = fill_yellow
-            ws2.cell(row=r_idx, column=1).border = border
-            
-            t_ly_4w = round(totals_ws2.get("LY_4W", 0), 2)
-            t_ly_23w = round(totals_ws2.get("LY_23W", 0), 2)
-            t_ly_tot = round(totals_ws2.get("LY_TOTAL", 0), 2)
-            t_tgt_4w = round(totals_ws2.get("TARGET_4W", 0), 2)
-            t_tgt_23w = round(totals_ws2.get("TARGET_23W", 0), 2)
-            t_tgt_tot = round(totals_ws2.get("TARGET_TOTAL", 0), 2)
-            t_act_4w = round(totals_ws2.get("ACTUAL_4W", 0), 2)
-            t_act_23w = round(totals_ws2.get("ACTUAL_23W", 0), 2)
-            t_act_tot = round(totals_ws2.get("ACTUAL_TOTAL", 0), 2)
-            t_sale = round(totals_ws2.get("SALE_FOR_DAY", 0), 2)
-            
-            t_achv_4w = round((t_act_4w / t_tgt_4w * 100)) if t_tgt_4w else 0
-            t_achv_23w = round((t_act_23w / t_tgt_23w * 100)) if t_tgt_23w else 0
-            t_achv_tot = round((t_act_tot / t_tgt_tot * 100)) if t_tgt_tot else 0
-            
-            # Fill the Total row values (columns 2 to 16)
-            ws2.cell(row=r_idx, column=2, value=t_ly_4w).fill = fill_yellow
-            ws2.cell(row=r_idx, column=3, value=t_ly_23w).fill = fill_yellow
-            ws2.cell(row=r_idx, column=4, value=t_ly_tot).fill = fill_yellow
-            ws2.cell(row=r_idx, column=5, value=t_tgt_4w).fill = fill_yellow
-            ws2.cell(row=r_idx, column=6, value=t_tgt_23w).fill = fill_yellow
-            ws2.cell(row=r_idx, column=7, value=t_tgt_tot).fill = fill_yellow
-            ws2.cell(row=r_idx, column=8, value=t_act_4w).fill = fill_yellow
-            ws2.cell(row=r_idx, column=9, value=t_act_23w).fill = fill_yellow
-            ws2.cell(row=r_idx, column=10, value=t_act_tot).fill = fill_yellow
-            ws2.cell(row=r_idx, column=11, value=f"{t_achv_tot}%").fill = fill_yellow
-            ws2.cell(row=r_idx, column=12, value=t_sale).fill = fill_yellow
-            ws2.cell(row=r_idx, column=13, value="").fill = fill_yellow # Asking Rate Blank
-            ws2.cell(row=r_idx, column=14, value=f"{t_achv_4w}%").fill = fill_yellow
-            ws2.cell(row=r_idx, column=15, value=f"{t_achv_23w}%").fill = fill_yellow
-            ws2.cell(row=r_idx, column=16, value=f"{t_achv_tot}%").fill = fill_yellow
-            
-            for c in range(2, 17):
-                cell = ws2.cell(row=r_idx, column=c)
-                cell.border = border
-                cell.font = bold_font
-                if c in [11, 14, 15, 16]:
-                    cell.alignment = center_aligned_text
-
-            # Percentage Contribution Row
-            r_idx += 1
             fill_magenta = PatternFill(start_color="FFCCFF", end_color="FFCCFF", fill_type="solid")
             fill_light_pink = PatternFill(start_color="FFF0F5", end_color="FFF0F5", fill_type="solid")
-            ws2.cell(row=r_idx, column=1, value="% Contribution").font = bold_font
-            ws2.cell(row=r_idx, column=1).alignment = center_aligned_text
-            
-            # Merge columns 1 to 4 for % Contribution
-            ws2.merge_cells(start_row=r_idx, start_column=1, end_row=r_idx, end_column=4)
-            
-            # Apply fill and border to all merged cells (columns 1 to 4)
-            for c in range(1, 5):
-                ws2.cell(row=r_idx, column=c).fill = fill_magenta
-                ws2.cell(row=r_idx, column=c).border = border
+            fill_green = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
 
-            # Target percentage contribution placeholders
-            ws2.cell(row=r_idx, column=5, value="%").fill = fill_light_pink
-            ws2.cell(row=r_idx, column=5).font = bold_font
-            ws2.cell(row=r_idx, column=5).border = border
-            ws2.cell(row=r_idx, column=5).alignment = center_aligned_text
-            
-            ws2.cell(row=r_idx, column=6, value="%").fill = fill_light_pink
-            ws2.cell(row=r_idx, column=6).font = bold_font
-            ws2.cell(row=r_idx, column=6).border = border
-            ws2.cell(row=r_idx, column=6).alignment = center_aligned_text
-            
-            ws2.cell(row=r_idx, column=7, value="").fill = fill_yellow
-            ws2.cell(row=r_idx, column=7).border = border
-            ws2.cell(row=r_idx, column=7).alignment = center_aligned_text
-            
-            # Actual sales contribution
-            ws2.cell(row=r_idx, column=8, value="100%").fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
-            ws2.cell(row=r_idx, column=8).font = bold_font
-            ws2.cell(row=r_idx, column=8).border = border
-            ws2.cell(row=r_idx, column=8).alignment = center_aligned_text
-            
-            ws2.cell(row=r_idx, column=9, value="%").fill = fill_light_pink
-            ws2.cell(row=r_idx, column=9).font = bold_font
-            ws2.cell(row=r_idx, column=9).border = border
-            ws2.cell(row=r_idx, column=9).alignment = center_aligned_text
+            def _fmt_pct(val):
+                """Return as percent string; preserve if already has %, else convert float."""
+                if val is None:
+                    return "0%"
+                s = str(val).strip()
+                if s.endswith('%'):
+                    return s
+                try:
+                    f = float(s)
+                    return f"{int(round(f))}%" if f else "0%"
+                except (ValueError, TypeError):
+                    return s if s else "0%"
 
-            # Actual total contribution and rest of the columns
-            for c in range(10, 17):
-                ws2.cell(row=r_idx, column=c).fill = fill_yellow
-                ws2.cell(row=r_idx, column=c).border = border
-                ws2.cell(row=r_idx, column=c).alignment = center_aligned_text
-                
+            for r in rows_ws2:
+                # SP returns 16 columns in fixed positional order — use list(values()) for dynamic column names
+                vals = list(r.values())   # [Zone, LY_4W, LY_23W, LY_Tot, Tgt_4W, Tgt_23W, Tgt_Tot, Act_4W, Act_23W, Act_Tot, %Achvd, SaleDay, AskRate, %4W, %23W, %Tot]
+                zone = str(vals[0]).strip() if vals[0] is not None else ''
+                is_total = zone.lower() == 'total'
+                is_contribution = zone.lower().startswith('%')
+
+                def _v(idx):
+                    """Safely get value by position, return '' if out of range or None."""
+                    return vals[idx] if idx < len(vals) and vals[idx] is not None else ''
+
+                if is_contribution:
+                    # % Contribution row — merge col 1-4, bind cols 5-16 from SP positionally
+                    ws2.merge_cells(start_row=r_idx, start_column=1, end_row=r_idx, end_column=4)
+                    ws2.cell(row=r_idx, column=1, value=zone).font = bold_font
+                    ws2.cell(row=r_idx, column=1).alignment = center_aligned_text
+                    for c in range(1, 5):
+                        ws2.cell(row=r_idx, column=c).fill = fill_magenta
+                        ws2.cell(row=r_idx, column=c).border = border
+
+                    # Cols 5-16 → SP positions 4-15
+                    contrib_fills = [
+                        fill_light_pink, fill_light_pink, fill_yellow,   # Target 4W, 23W, Total
+                        fill_green,      fill_light_pink, fill_yellow,   # Actual 4W, 23W, Total
+                        fill_yellow,     fill_yellow,     fill_yellow,   # %Achvd, SaleDay, AskRate
+                        fill_yellow,     fill_yellow,     fill_yellow    # %4W, %23W, %Tot
+                    ]
+                    for i in range(12):
+                        col_num = 5 + i
+                        raw = _v(4 + i)
+                        val = raw if raw != '' else ''
+                        cell = ws2.cell(row=r_idx, column=col_num, value=val)
+                        cell.font = bold_font
+                        cell.fill = contrib_fills[i]
+                        cell.border = border
+                        cell.alignment = center_aligned_text
+                    r_idx += 1
+                    continue
+
+                # Normal zone row or Total row — bind all 16 columns by position
+                row_fill = fill_yellow if is_total else None
+
+                cells_data = [
+                    (1,  zone),
+                    (2,  _v(1)),   # LY 4 Whlrs
+                    (3,  _v(2)),   # LY 2/3 Whlrs
+                    (4,  _v(3)),   # LY Total
+                    (5,  _v(4)),   # Target 4 Whlrs
+                    (6,  _v(5)),   # Target 2/3 Whlrs
+                    (7,  _v(6)),   # Target Total
+                    (8,  _v(7)),   # Actual 4 Whlrs
+                    (9,  _v(8)),   # Actual 2/3 Whlrs
+                    (10, _v(9)),   # Actual Total
+                    (11, _v(10)),  # % Achvd
+                    (12, _v(11)),  # Sale for the Day
+                    (13, _v(12)),  # Asking Rate
+                    (14, _v(13)),  # % Achvt 4 Whlrs
+                    (15, _v(14)),  # % Achvt 2/3 Whlrs
+                    (16, _v(15)),  # % Achvt Total
+                ]
+                for col_num, val in cells_data:
+                    cell = ws2.cell(row=r_idx, column=col_num, value=val)
+                    cell.border = border
+                    cell.font = bold_font
+                    if row_fill:
+                        cell.fill = row_fill
+                    if col_num in [11, 13, 14, 15, 16]:
+                        cell.alignment = center_aligned_text
+
+                r_idx += 1
+
 
             from openpyxl.utils import get_column_letter
             for idx, col in enumerate(ws2.columns, start=1):
@@ -897,12 +662,12 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         # POPULATE WS3 (Sales Numbers)
         # ==========================================
         try:
-            print(f"[Excel Export] Executing sp_zone_sales_numbers_values for WS3...", flush=True)
+            print(f"[Excel Export] Executing sp_sales_summary_in_no_and_values_for_month for WS3...", flush=True)
             if session_id and sync_row:
-                cursor.execute(f"CALL `{db_to_use}`.sp_zone_sales_numbers_values(%s, %s, %s)", (year, month, day))
+                cursor.execute(f"CALL `{db_to_use}`.sp_sales_summary_in_no_and_values_for_month(%s, %s, %s)", (year, month, day))
             else:
-                cursor.execute("CALL sp_zone_sales_numbers_values(%s, %s, %s)", (year, month, day))
-            print(f"[Excel Export] sp_zone_sales_numbers_values finished.", flush=True)
+                cursor.execute("CALL sp_sales_summary_in_no_and_values_for_month(%s, %s, %s)", (year, month, day))
+            print(f"[Excel Export] sp_sales_summary_in_no_and_values_for_month finished.", flush=True)
                 
             rows_ws3 = []
             if is_mysql_connector:
@@ -930,17 +695,15 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                         if cursor.description is not None: cursor.fetchall()
                     except Exception: break
 
-            print(f"[Excel Export] sp_zone_sales_numbers_values returned {len(rows_ws3)} rows.", flush=True)
+            print(f"[Excel Export] sp_sales_summary_in_no_and_values_for_month returned {len(rows_ws3)} rows.", flush=True)
 
-            # Row 1 is intentionally left entirely blank and unstyled
-
-            ws3.merge_cells('A1:AC1')
+            ws3.merge_cells('A1:V1') # 22 columns (A to V)
             ws3['A1'].value = f"Sales Summary in No's & Values for {month_abbr}-{curr_year_str}"
             ws3['A1'].font = bold_font
             ws3['A1'].alignment = Alignment(horizontal='center', vertical='center')
             
             ws3_title_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
-            for c in range(1, 30):
+            for c in range(1, 23):
                 ws3.cell(row=1, column=c).border = border
                 ws3.cell(row=1, column=c).fill = ws3_title_fill
 
@@ -952,25 +715,23 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                 ws3['A2'].value = "Zone"
                 ws3.merge_cells('B2:B3')
                 ws3['B2'].value = "Type"
+                
                 ws3.merge_cells('C2:E2')
                 ws3['C2'].value = "Sales Values in( In Crores )"
-                ws3.merge_cells('F2:H2')
-                ws3['F2'].value = "TBB"
-                ws3.merge_cells('I2:K2')
-                ws3['I2'].value = "TBR"
                 
                 single_headers = {
-                    12: "LCV\nBias", 13: "LCV\nRdl", 14: "SCV\nBias", 15: "SCV\nRdl",
-                    16: "Car\nBias", 17: "Car\nRadial", 18: "Jeep\nBias", 19: "Jeep\nRadial",
-                    20: "Tr. Fro", 21: "Tr. Rear", 22: "Trail", 23: "ADV", 24: "3 Whlrs",
-                    25: "Scooter", 26: "Motor", 27: "Pack\nTube", 28: "Treel", 29: "Smart Tyre"
+                    6: "TBB\nTotal", 7: "TBR\nTotal",
+                    8: "LCV\nBias", 9: "LCV\nRdl", 10: "SCV\nBias", 11: "SCV\nRdl",
+                    12: "Car\nBias", 13: "Car\nRadial", 14: "Jeep\nBias", 15: "Jeep\nRadial",
+                    16: "Tr. Fro", 17: "Tr. Rear", 18: "Trail", 19: "ADV", 20: "3 Whlrs",
+                    21: "Scooter", 22: "Motor"
                 }
                 
                 for col, val in single_headers.items():
                     ws3.merge_cells(start_row=2, start_column=col, end_row=3, end_column=col)
                     ws3.cell(row=2, column=col).value = val
 
-                for c in range(1, 30):
+                for c in range(1, 23):
                     cell = ws3.cell(row=2, column=c)
                     cell.font = bold_font
                     cell.alignment = center_aligned_text
@@ -979,9 +740,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
 
                 # Row 3: Sub Headers
                 sub_h = {
-                    3: "4 Whlrs.", 4: "Whlrs", 5: "Total",
-                    6: "JK", 7: "Vikrant", 8: "Total",
-                    9: "JK", 10: "Vikrant", 11: "Total"
+                    3: "4 Whlrs.", 4: "2/3 Whlrs", 5: "Total"
                 }
                 for col, val in sub_h.items():
                     cell = ws3.cell(row=3, column=col, value=val)
@@ -990,98 +749,63 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                     cell.fill = fill_ws3_header
                     cell.border = border
                 
-                # Apply borders to Row 3 merged cells (which are single_headers and Zone, Type)
+                # Apply borders to Row 3 merged cells
                 for c in [1, 2] + list(single_headers.keys()):
                     ws3.cell(row=3, column=c).border = border
                     ws3.cell(row=3, column=c).fill = fill_ws3_header
                     
                 # Data rows start at 4
                 r_idx = 4
-                headers_ws3 = list(rows_ws3[0].keys())
                 
                 fill_achv = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid") # Light green
-                fill_grand_total = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid") # Light green for Grand Total
 
-                def sv_ws3(val):
-                    return val if val is not None and str(val).strip() != '' else ""
-
-                # Process rows_ws3 to add Achv % rows
-                processed_rows_ws3 = []
-                # Group rows by Zone
-                zones = []
+                # Bind directly from SP, which already has Actual, Target, Achv % and Grand Total rows
                 for r in rows_ws3:
-                    z = r.get('Zone_Name', r.get('Zone', ''))
-                    if z not in zones:
-                        zones.append(z)
-                
-                for z in zones:
-                    zone_rows = [r for r in rows_ws3 if r.get('Zone_Name', r.get('Zone', '')) == z]
-                    actual_r = next((r for r in zone_rows if str(r.get('Row_Type', r.get('Type', ''))).strip().lower() == 'actual'), None)
-                    target_r = next((r for r in zone_rows if str(r.get('Row_Type', r.get('Type', ''))).strip().lower() == 'target'), None)
+                    vals = list(r.values()) # 22 columns
+                    zone_name = str(vals[0]).strip() if vals[0] is not None else ''
+                    row_type = str(vals[1]).strip() if len(vals) > 1 and vals[1] is not None else ''
                     
-                    # Create blank rows if missing to ensure 3 rows per zone
-                    if not actual_r:
-                        actual_r = {k: 0 for k in headers_ws3}
-                        actual_r['Zone_Name'] = z
-                        actual_r['Row_Type'] = 'Actual'
-                    if not target_r:
-                        target_r = {k: 0 for k in headers_ws3}
-                        target_r['Zone_Name'] = z
-                        target_r['Row_Type'] = 'Target'
+                    is_grand_total = "Grand Total" in zone_name
+                    is_target = "rget" in row_type.lower()
                     
-                    processed_rows_ws3.append(actual_r)
-                    processed_rows_ws3.append(target_r)
-                    
-                    achv_r = {k: '' for k in headers_ws3}
-                    achv_r['Zone_Name'] = z
-                    achv_r['Row_Type'] = 'Achv %'
-                    
-                    for k in headers_ws3:
-                        if k not in ['Zone', 'Zone_Name', 'Type', 'Row_Type']:
-                            a_val = actual_r.get(k, 0)
-                            t_val = target_r.get(k, 0)
-                            try: a_val = float(a_val) if a_val is not None else 0.0
-                            except: a_val = 0.0
-                            try: t_val = float(t_val) if t_val is not None else 0.0
-                            except: t_val = 0.0
+                    for c_idx in range(1, 23):
+                        val = vals[c_idx - 1] if c_idx - 1 < len(vals) else ''
+                        if val is None:
+                            val = ''
                             
-                            if t_val != 0:
-                                achv_r[k] = f"{int(round((a_val / t_val) * 100))}%"
-                            else:
-                                achv_r[k] = "0%" if a_val == 0 else ""
-                    processed_rows_ws3.append(achv_r)
-
-                for r in processed_rows_ws3:
-                    zone_name = r.get('Zone', '') or r.get('Zone_Name', '') or ''
-                    row_type = r.get('Type', '') or r.get('Row_Type', '') or ''
-                    
-                    is_grand_total = "Grand Total" in str(zone_name)
-                    is_achv = "chv" in str(row_type)
-                    
-                    for c_idx, header in enumerate(headers_ws3, start=1):
-                        val = r[header]
-                        # Don't apply sv to Zone and Type if they are empty for some reason, though they shouldn't be
-                        cell = ws3.cell(row=r_idx, column=c_idx, value=sv_ws3(val) if c_idx > 2 else val)
+                        cell = ws3.cell(row=r_idx, column=c_idx, value=val)
                         cell.border = border
                         
-                        # Apply green background for Target rows or ALL rows in Grand Total
-                        is_target = "rget" in str(row_type).lower()
                         if is_grand_total or is_target:
                             cell.fill = fill_achv
                             
                         if is_grand_total:
                             cell.font = bold_font
                             
+                        if c_idx > 2:
+                            cell.alignment = Alignment(horizontal='right')
+                        else:
+                            cell.alignment = center_aligned_text
+                            
                     r_idx += 1
                 
-                # Merge Zone cells vertically (every 3 rows)
+                # Merge Zone cells vertically (every 3 rows, stopping before Grand Total)
                 start_r = 4
                 while start_r < r_idx:
-                    ws3.merge_cells(start_row=start_r, start_column=1, end_row=start_r+2, end_column=1)
-                    cell = ws3.cell(row=start_r, column=1)
-                    cell.alignment = Alignment(horizontal='center', vertical='center')
-                    cell.font = bold_font
-                    # The other cells in the merge range already have borders from the loop
+                    cell_val = ws3.cell(row=start_r, column=1).value
+                    if cell_val and "Grand Total" in str(cell_val):
+                        # Merge Grand total's Zone cell spanning 3 rows
+                        if start_r + 2 < r_idx:
+                            ws3.merge_cells(start_row=start_r, start_column=1, end_row=start_r+2, end_column=1)
+                            cell = ws3.cell(row=start_r, column=1)
+                            cell.alignment = Alignment(horizontal='center', vertical='center')
+                        break
+                    
+                    if start_r + 2 < r_idx:
+                        ws3.merge_cells(start_row=start_r, start_column=1, end_row=start_r+2, end_column=1)
+                        cell = ws3.cell(row=start_r, column=1)
+                        cell.alignment = Alignment(horizontal='center', vertical='center')
+                        cell.font = bold_font
                     start_r += 3
                     
                 from openpyxl.utils import get_column_letter

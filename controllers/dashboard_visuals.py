@@ -1949,6 +1949,7 @@ def default_dashboard_metrics_controller(get_db_connection):
                 or "invoice_value_inr" in cols
                 or "taxable_value" in cols
                 or "taxable_value_inr" in cols
+                or "ndp_inr" in cols
             ):
                 sales_table = tbl
                 break
@@ -1970,6 +1971,9 @@ def default_dashboard_metrics_controller(get_db_connection):
             has_revenue = True
         elif "taxable_value_inr" in sales_cols:
             real_revenue_col = sales_cols["taxable_value_inr"]
+            has_revenue = True
+        elif "ndp_inr" in sales_cols:
+            real_revenue_col = sales_cols["ndp_inr"]
             has_revenue = True
         else:
             has_revenue = False
@@ -2122,6 +2126,8 @@ def default_dashboard_metrics_controller(get_db_connection):
             real_date_col = sales_cols["invoice_date"]
         elif "billing__doc_date" in sales_cols:
             real_date_col = sales_cols["billing__doc_date"]
+        elif "billing_doc_date" in sales_cols:
+            real_date_col = sales_cols["billing_doc_date"]
         elif "date" in sales_cols:
             real_date_col = sales_cols["date"]
 
@@ -2136,7 +2142,7 @@ def default_dashboard_metrics_controller(get_db_connection):
                     year_expr = f"YEAR(`{real_date_col}`)"
                     date_filter = f"`{real_date_col}` IS NOT NULL"
                 else:
-                    year_expr = f"YEAR(STR_TO_DATE(`{real_date_col}`, '%d-%m-%Y'))"
+                    year_expr = f"YEAR(COALESCE(STR_TO_DATE(`{real_date_col}`, '%Y-%m-%d'), STR_TO_DATE(`{real_date_col}`, '%d-%m-%Y'), STR_TO_DATE(`{real_date_col}`, '%d/%m/%Y')))"
                     date_filter = f"`{real_date_col}` IS NOT NULL AND `{real_date_col}` != ''"
 
                 # Current Year Revenue
