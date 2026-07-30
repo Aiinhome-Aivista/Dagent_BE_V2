@@ -34,30 +34,38 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                 new_user_db = sync_row['new_user_db']
                 external_database = sync_row['external_database']
                 
-                db_to_use = new_user_db
-                print(f"[Excel Export] Selected DB: {db_to_use} (Fallback: {external_database})", flush=True)
+                # Helper to check if SP exists
+                def sp_exists(db_name, sp_name):
+                    if not db_name: return False
+                    cursor.execute("""
+                        SELECT ROUTINE_NAME 
+                        FROM information_schema.routines 
+                        WHERE ROUTINE_TYPE='PROCEDURE' 
+                          AND ROUTINE_SCHEMA=%s 
+                          AND ROUTINE_NAME=%s
+                    """, (db_name, sp_name))
+                    return bool(cursor.fetchall())
                 
-                # Check if SP exists in new_user_db
-                cursor.execute("""
-                    SELECT ROUTINE_NAME 
-                    FROM information_schema.routines 
-                    WHERE ROUTINE_TYPE='PROCEDURE' 
-                      AND ROUTINE_SCHEMA=%s 
-                      AND ROUTINE_NAME='sp_domestic_sales_value_achivements'
-                """, (new_user_db,))
-                
-                routine_rows = cursor.fetchall()
-                if not routine_rows and external_database:
-                    # Fallback to external_database
+                db_to_use = None
+                if sp_exists(new_user_db, 'sp_domestic_sales_value_achivements'):
+                    db_to_use = new_user_db
+                elif sp_exists(external_database, 'sp_domestic_sales_value_achivements'):
                     db_to_use = external_database
                     
-                # Explicitly call the SP using the correct fully qualified DB name
-                print(f"[Excel Export] Executing {db_to_use}.sp_domestic_sales_value_achivements...", flush=True)
-                cursor.execute(
-                    f"CALL `{db_to_use}`.sp_domestic_sales_value_achivements(%s, %s, %s)",
-                    (year, month, day)
-                )
-                print(f"[Excel Export] sp_domestic_sales_value_achivements finished.", flush=True)
+                print(f"[Excel Export] Selected DB: {db_to_use} (Fallback: {external_database})", flush=True)
+                
+                if db_to_use:
+                    # Explicitly call the SP using the correct fully qualified DB name
+                    print(f"[Excel Export] Executing {db_to_use}.sp_domestic_sales_value_achivements...", flush=True)
+                    cursor.execute(
+                        f"CALL `{db_to_use}`.sp_domestic_sales_value_achivements(%s, %s, %s)",
+                        (year, month, day)
+                    )
+                    print(f"[Excel Export] sp_domestic_sales_value_achivements finished.", flush=True)
+                else:
+                    print(f"[Excel Export] SP not found in assigned DBs, executing fallback...", flush=True)
+                    cursor.execute("CALL sp_domestic_sales_value_achivements(%s, %s, %s)", (year, month, day))
+                    print(f"[Excel Export] sp_domestic_sales_value_achivements finished.", flush=True)
             else:
                 # Fallback if no session found (uses default DB)
                 cursor.execute("CALL sp_domestic_sales_value_achivements(%s, %s, %s)", (year, month, day))
@@ -240,7 +248,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         try:
             # Update SP call for WS1
             print(f"[Excel Export] Executing sp_sales_numbers for WS1...", flush=True)
-            if session_id and sync_row:
+            if session_id and sync_row and db_to_use:
                 cursor.execute(f"CALL `{db_to_use}`.sp_sales_numbers(%s, %s, %s)", (year, month, day))
             else:
                 cursor.execute("CALL sp_sales_numbers(%s, %s, %s)", (year, month, day))
@@ -457,7 +465,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         # ==========================================
         try:
             print(f"[Excel Export] Executing sp_sales_report_by_values for WS2...", flush=True)
-            if session_id and sync_row:
+            if session_id and sync_row and db_to_use:
                 cursor.execute(f"CALL `{db_to_use}`.sp_sales_report_by_values(%s, %s, %s)", (year, month, day))
             else:
                 cursor.execute("CALL sp_sales_report_by_values(%s, %s, %s)", (year, month, day))
@@ -663,7 +671,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         # ==========================================
         try:
             print(f"[Excel Export] Executing sp_sales_summary_in_no_and_values_for_month for WS3...", flush=True)
-            if session_id and sync_row:
+            if session_id and sync_row and db_to_use:
                 cursor.execute(f"CALL `{db_to_use}`.sp_sales_summary_in_no_and_values_for_month(%s, %s, %s)", (year, month, day))
             else:
                 cursor.execute("CALL sp_sales_summary_in_no_and_values_for_month(%s, %s, %s)", (year, month, day))
