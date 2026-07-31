@@ -1240,8 +1240,9 @@ def _column_ref_correction(violations, col_to_tables):
 # only need to keep the column/measure names correct.
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
-FACT_TABLE_HINTS = ["invoice"]          # name substring(s) of the fact table
-MEASURE_COLUMN   = "Invoice_Value"      # the Sales measure column on the fact table
+FACT_TABLE_HINTS = ["sales_data", "invoice"]          # name substring(s) of the fact table
+MEASURE_COLUMN   = "Invoice_Value_INR"      # the Sales measure column on the fact table
+DATE_COLUMN      = "billing__doc_date"      # the Date column on the fact table used for year/month filtering
 
 # Dimensions: each is auto-located as the (non-fact) table that contains its
 # `dim_key` AND the most of its `owns` columns. `fact_key` is the column on the
@@ -1249,29 +1250,35 @@ MEASURE_COLUMN   = "Invoice_Value"      # the Sales measure column on the fact t
 DIMENSIONS = [
     {
         "label":    "product",
-        "fact_key": "Material",
-        "dim_key":  "Material",
-        "owns":     ["CATEGORY", "CONSTRUCTION", "vehicle type", "OLD CODE"],
+        "fact_key": "material",
+        "dim_key":  "MATNR",
+        "owns":     ["category", "tyre_type", "construction", "MAKTX", "PROD_TITLE"],
     },
     {
         "label":    "customer",
-        "fact_key": "Customer",
-        "dim_key":  "Customer",
-        "owns":     ["CUSTOMER_CATEGORY", "Region", "Zone", "Account group"],
+        "fact_key": "customer",
+        "dim_key":  "KUNNR",
+        "owns":     ["Cname", "acc_grp", "class", "region", "zone", "territory", "sales_office"],
     },
 ]
 
 # Product hierarchy ROOT → LEAF (column names; matched case/space/underscore-insensitively)
-PRODUCT_HIERARCHY = ["CATEGORY", "CONSTRUCTION", "vehicle type"]
+PRODUCT_HIERARCHY = ["category", "tyre_type", "construction", "MAKTX"]
 
 # Natural-language phrase → exact column name. Longest phrase wins.
 COLUMN_SYNONYMS = {
-    "product category": "CATEGORY", "category": "CATEGORY", "categories": "CATEGORY",
-    "construction": "CONSTRUCTION", "tyre type": "CONSTRUCTION", "tire type": "CONSTRUCTION",
-    "vehicle category": "vehicle type", "vehicle type": "vehicle type",
-    "vehicle": "vehicle type", "by vehicle": "vehicle type",
-    "region": "Region", "zone": "Zone",
-    "dealer": "Customer", "customer": "Customer",
+    "product category": "category", "category": "category", "categories": "category",
+    "construction": "construction", "tyre type": "tyre_type", "tire type": "tyre_type",
+    "vehicle": "category", "by vehicle": "category",
+    "region": "region", "zone": "zone",
+    "customer": "Cname",
+}
+
+# Explicit definitions for complex business entities that require specific joins, filters, and grouping.
+ENTITY_DEFINITIONS = {
+    "dealer": "If the user asks for 'dealer(s)', you MUST JOIN `customer_master` and `account_group_master` (ON `customer_master`.`acc_grp` = `account_group_master`.`KTOKD`), FILTER BY `account_group_master`.`account_group_name` = 'Dealer', and GROUP BY `customer_master`.`KUNNR`, `customer_master`.`Cname`.",
+    "distributor": "If the user asks for 'distributor(s)', you MUST JOIN `customer_master` and `class_master` (ON `customer_master`.`class` = `class_master`.`class_code`), FILTER BY `class_master`.`class_name` = 'Distributor', and GROUP BY `customer_master`.`KUNNR`, `customer_master`.`Cname`. Do NOT use `distribution_mapping` for distributors.",
+    "fleet": "If the user asks for 'fleet(s)', you MUST JOIN `customer_master` and FILTER BY `customer_master`.`acc_grp` = 'Z009', and GROUP BY `customer_master`.`KUNNR`, `customer_master`.`Cname`.",
 }
 # ── END CONFIG ───────────────────────────────────────────────────────────────
 
@@ -1391,16 +1398,26 @@ def _build_business_map(table_cols):
             loc = (t, oc)
         elif fact and nc in norm_tables.get(fact, set()):
             loc = (fact, _orig_col(table_cols, fact, colname))
+            
+        if not loc:
+            for tbl, cols in norm_tables.items():
+                if nc in cols:
+                    loc = (tbl, _orig_col(table_cols, tbl, colname))
+                    break
+
         if loc:
             for variant in _plurals(phrase.lower()):
                 syn_resolved.setdefault(variant, loc)
 
     measure = _orig_col(table_cols, fact, MEASURE_COLUMN) if fact else None
 
+    date_col = _orig_col(table_cols, fact, DATE_COLUMN) if fact else None
+
     return {
-        "fact": fact, "measure": measure or MEASURE_COLUMN,
+        "fact": fact, "measure": measure or MEASURE_COLUMN, "date_column": date_col or DATE_COLUMN,
         "dims": dim_resolved, "attr_source": attr_source,
         "synonyms": syn_resolved, "levels": levels,
+        "entity_definitions": ENTITY_DEFINITIONS,
     }
 
 
@@ -1412,7 +1429,8 @@ def _business_prompt(biz):
     fact = biz["fact"]
     out = [f"AUTHORITATIVE SCHEMA MAP (follow EXACTLY — overrides any guess):",
            f"- Fact table: `{fact}`. Sales / performance / revenue = "
-           f"SUM(`{fact}`.`{biz['measure']}`)."]
+           f"SUM(`{fact}`.`{biz['measure']}`).",
+           f"- Date filtering: If the user mentions a year (e.g., '2026') or date, you MUST apply a WHERE clause using `{fact}`.`{biz['date_column']}` (e.g. YEAR({fact}.{biz['date_column']}) = 2026). Do NOT use STR_TO_DATE; assume the column is already a proper DATE type."]
     forbid = []
     for d in biz["dims"]:
         if not d["owns"]:
@@ -1439,6 +1457,12 @@ def _business_prompt(biz):
     out.append("FAN-OUT GUARD: every dimension JOIN must be on the key above so "
                "each fact row matches at most one dimension row. If a column name "
                "exists on more than one table, use the table named in this map.")
+    
+    if biz.get("entity_definitions"):
+        out.append("\nBUSINESS ENTITY DEFINITIONS (Strictly follow these rules if the user mentions these entities):")
+        for entity, rule in biz["entity_definitions"].items():
+            out.append(f"- {rule}")
+            
     return "\n".join(out)
 
 
