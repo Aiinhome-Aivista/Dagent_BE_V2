@@ -287,13 +287,13 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
             # Row 1 is intentionally left entirely blank and unstyled
 
             # Merge cells for title
-            ws1.merge_cells('A1:W1')
+            ws1.merge_cells('A1:S1')
             ws1['A1'].value = "Sales Number's"
             ws1['A1'].font = bold_font
             ws1['A1'].alignment = center_aligned_text
             ws1['A1'].fill = fill_title
             
-            for c in range(2, 24):
+            for c in range(2, 20):
                 ws1.cell(row=1, column=c).border = border
                 ws1.cell(row=1, column=c).fill = fill_title
             
@@ -308,23 +308,23 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
             ws1.merge_cells('A2:A4')
             ws1['A2'].value = "Category"
             ws1['A2'].fill = fill_cat
-            ws1.merge_cells('B2:N2')
+            ws1.merge_cells('B2:J2')
             ws1['B2'].value = "Replacement"
             ws1['B2'].fill = fill_rep
+            ws1.merge_cells('K2:L2')
+            ws1['K2'].value = "OEM"
+            ws1['K2'].fill = fill_oem
+            ws1.merge_cells('M2:N2')
+            ws1['M2'].value = "STU"
+            ws1['M2'].fill = fill_stu
             ws1.merge_cells('O2:P2')
-            ws1['O2'].value = "OEM"
-            ws1['O2'].fill = fill_oem
-            ws1.merge_cells('Q2:R2')
-            ws1['Q2'].value = "STU"
-            ws1['Q2'].fill = fill_stu
-            ws1.merge_cells('S2:T2')
-            ws1['S2'].value = "DEF"
-            ws1['S2'].fill = fill_def
-            ws1.merge_cells('U2:W2')
-            ws1['U2'].value = "Domestic"
-            ws1['U2'].fill = fill_dom
+            ws1['O2'].value = "DEF"
+            ws1['O2'].fill = fill_def
+            ws1.merge_cells('Q2:S2')
+            ws1['Q2'].value = "Domestic"
+            ws1['Q2'].fill = fill_dom
             
-            for c in range(1, 24):
+            for c in range(1, 20):
                 ws1.cell(row=2, column=c).border = border
                 ws1.cell(row=2, column=c).font = bold_font
                 ws1.cell(row=2, column=c).alignment = center_aligned_text
@@ -332,27 +332,18 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
             # Headers Group 2 (Row 3 and Row 4)
             h3_headers = {
                 2: f"{month_abbr}-{prev_year_str} Act", 3: "Target", 4: "Total", 5: "% Achv", 6: "Today", 
-                7: "Dealer", 8: "Dist.", 9: "Fleet", 12: "Inst.", 13: "Govt", 14: "Others", 
-                15: "Target", 16: "Actual", 17: "Target", 18: "Actual", 19: "Target", 20: "Actual", 
-                21: "Target", 22: "Actual", 23: "% Achv."
+                7: "Dealer", 8: "Dist.", 9: "Fleet", 10: "Others", 
+                11: "Target", 12: "Actual", 13: "Target", 14: "Actual", 15: "Target", 16: "Actual", 
+                17: "Target", 18: "Actual", 19: "% Achv."
             }
             
             for col, val in h3_headers.items():
-                if col == 9: # Fleet spans 3 columns
-                    ws1.merge_cells(start_row=3, start_column=9, end_row=3, end_column=11)
-                    ws1.cell(row=3, column=9).value = val
-                else: # Others span 2 rows (3 and 4)
-                    ws1.merge_cells(start_row=3, start_column=col, end_row=4, end_column=col)
-                    ws1.cell(row=3, column=col).value = val
-
-            # Row 4 Subheaders under Fleet
-            ws1.cell(row=4, column=9).value = "Mobilty-GR"
-            ws1.cell(row=4, column=10).value = "FM-Actual"
-            ws1.cell(row=4, column=11).value = "Total"
+                ws1.merge_cells(start_row=3, start_column=col, end_row=4, end_column=col)
+                ws1.cell(row=3, column=col).value = val
 
             # Apply borders and formatting for rows 3 and 4 (No background fill)
             for r in [3, 4]:
-                for c in range(2, 24):
+                for c in range(2, 20):
                     cell = ws1.cell(row=r, column=c)
                     cell.border = border
                     cell.font = bold_font
@@ -402,21 +393,17 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                     ws1.cell(row=r_idx, column=6, value=sv(r.get('today'))),
                     ws1.cell(row=r_idx, column=7, value=sv(r.get('dealer'))),
                     ws1.cell(row=r_idx, column=8, value=sv(r.get('distributor'))),
-                    ws1.cell(row=r_idx, column=9, value=""), # mobility_grn missing from SP
-                    ws1.cell(row=r_idx, column=10, value=""), # fm_actual missing from SP
-                    ws1.cell(row=r_idx, column=11, value=sv(r.get('fleet'))), # SP fleet -> total fleet
-                    ws1.cell(row=r_idx, column=12, value=""), # institution missing
-                    ws1.cell(row=r_idx, column=13, value=""), # govt missing
-                    ws1.cell(row=r_idx, column=14, value=sv(r.get('others'))),
-                    ws1.cell(row=r_idx, column=15, value=sv(r.get('oem_target'))),
-                    ws1.cell(row=r_idx, column=16, value=sv(r.get('oem_actual'))),
-                    ws1.cell(row=r_idx, column=17, value=sv(r.get('stu_target'))),
-                    ws1.cell(row=r_idx, column=18, value=sv(r.get('stu_actual'))),
-                    ws1.cell(row=r_idx, column=19, value=sv(r.get('def_target'))),
-                    ws1.cell(row=r_idx, column=20, value=sv(r.get('def_actual'))),
-                    ws1.cell(row=r_idx, column=21, value=sv(r.get('domestic_target'))),
-                    ws1.cell(row=r_idx, column=22, value=sv(r.get('domestic_actual'))),
-                    ws1.cell(row=r_idx, column=23, value=achv2_str),
+                    ws1.cell(row=r_idx, column=9, value=sv(r.get('fleet'))),
+                    ws1.cell(row=r_idx, column=10, value=sv(r.get('others'))),
+                    ws1.cell(row=r_idx, column=11, value=sv(r.get('oem_target'))),
+                    ws1.cell(row=r_idx, column=12, value=sv(r.get('oem_actual'))),
+                    ws1.cell(row=r_idx, column=13, value=sv(r.get('stu_target'))),
+                    ws1.cell(row=r_idx, column=14, value=sv(r.get('stu_actual'))),
+                    ws1.cell(row=r_idx, column=15, value=sv(r.get('def_target'))),
+                    ws1.cell(row=r_idx, column=16, value=sv(r.get('def_actual'))),
+                    ws1.cell(row=r_idx, column=17, value=sv(r.get('domestic_target'))),
+                    ws1.cell(row=r_idx, column=18, value=sv(r.get('domestic_actual'))),
+                    ws1.cell(row=r_idx, column=19, value=achv2_str),
                 ]
                 
                 is_subtotal = "Total" in str(cat)
