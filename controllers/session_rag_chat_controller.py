@@ -1572,6 +1572,7 @@ def session_rag_chat_controller(get_connection_func):
     history    = data.get("chat_history", [])
     user_id    = data.get("user_id")
     visit_number = data.get("visit_number")
+    sql_query = None
 
     if not session_id:
         return jsonify({"status":"failed","statusCode":400,
@@ -1689,7 +1690,8 @@ CRITICAL INSTRUCTIONS FOR VISUALIZATIONS:
             "answer":              res.get("answer", ""),
             "suggested_questions": res.get("suggested_questions",[]),
             "visualizations":      visualizations,
-            "visit_number":        visit_number
+            "visit_number":        visit_number,
+            "sql_query":           sql_query
         }), 200
 
     # Understand + Retrieve
@@ -2308,7 +2310,8 @@ Return ONLY valid JSON in this format:
             "answer": res.get("answer", "Here is the visualization for your request."),
             "follow_up_questions": fuq,
             "visualizations": visualizations,
-            "visit_number": visit_number
+            "visit_number": visit_number,
+            "sql_query": sql_query
         }), 200
 
 
@@ -2350,7 +2353,8 @@ Return ONLY:
                 "key_findings": res.get("key_findings",[])
             },
             "follow_up_questions": fuq,
-            "visit_number": visit_number
+            "visit_number": visit_number,
+            "sql_query": sql_query
         }), 200
 
     # Answer
@@ -2591,5 +2595,6 @@ Return ONLY valid JSON (answer must be a plain text string):
         "answer": clean_answer,
         "follow_up_questions": fuq,
         "visualizations": visualizations,
-        "visit_number": visit_number
+        "visit_number": visit_number,
+        "sql_query": sql_query
     }), 200
