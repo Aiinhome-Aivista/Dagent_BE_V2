@@ -517,9 +517,10 @@ Requirements for each query:
 4. The remaining queries should use INNER JOIN or LEFT JOIN to connect fact tables with master tables to find BOTH Top and Bottom drivers. You must include queries for:
    - Top Selling Products & Lowest Selling Products (ORDER BY DESC and ASC)
    - Top Customers & Lowest Customers
-   - Top Territories & Lowest Territories (e.g., Nepal, Tezpur)
+   - Top and Lowest Territories, Regions, and Zones (You must query the territory_master, region_master etc. to find Top Zone, Top Region, Top Territory, and Lowest Territory)
    - Total Discounts, Claims & Returns summary
    - Distribution Channel mapping
+   - Target vs Actual Performance (Join sales_target with actual sales to find Target, Actual, Achievement %, and Gap)
 5. For the breakdown queries, you MUST include GROUP BY and ORDER BY, and you MUST include LIMIT 5.
 6. Do NOT write simple SELECT *. Every query must aggregate or join data.
 Respond ONLY with a valid JSON array of strings containing the SQL queries."""
