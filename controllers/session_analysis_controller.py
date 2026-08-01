@@ -507,22 +507,15 @@ def _fetch_agentic_insights(cursor, tables_info: list, db_type: str) -> list:
     schema_str = "\n".join(schema_desc)
     
     system_prompt = f"""You are an expert Data Analyst and {db_type.upper()} DBA.
-Your task is to write EXACTLY 12 to 15 advanced SQL queries that will extract the most critical business metrics from the provided schema.
-The goal is to generate a comprehensive Executive Summary for a business dashboard.
-You MUST deduce the logical relationships between tables (e.g. SAP naming conventions like KUNNR maps to customer, MATNR maps to material).
-Requirements for each query:
+Your task is to write EXACTLY 5 to 8 advanced SQL queries that will extract the most critical business metrics from the provided schema.
+CRITICAL INSTRUCTIONS:
 1. Must be valid {db_type.upper()} SELECT statements.
-2. Query 1 MUST be a Grand Total summary (e.g., Total Revenue, Total Quantity, Total Transactions, Total Customers across the entire dataset without any LIMIT or GROUP BY).
+2. Query 1 MUST be a Grand Total query returning overall sums and counts (e.g., Total Revenue, Total Quantity, Total Transactions, Total Customers across the entire dataset without any LIMIT or GROUP BY).
 3. Query 2 MUST group by Month/Year to find the HIGHEST and LOWEST sales months.
-4. The remaining queries should use INNER JOIN or LEFT JOIN to connect fact tables with master tables to find BOTH Top and Bottom drivers. You must include queries for:
-   - Top Selling Products & Lowest Selling Products (ORDER BY DESC and ASC)
-   - Top Customers & Lowest Customers
-   - Top and Lowest Territories, Regions, and Zones (You must query the territory_master, region_master etc. to find Top Zone, Top Region, Top Territory, and Lowest Territory)
-   - Total Discounts, Claims & Returns summary
-   - Distribution Channel mapping
-   - Target vs Actual Performance (Join sales_target with actual sales to find Target, Actual, Achievement %, and Gap)
-5. For the breakdown queries, you MUST include GROUP BY and ORDER BY, and you MUST include LIMIT 5.
-6. Do NOT write simple SELECT *. Every query must aggregate or join data.
+4. The remaining queries MUST use INNER JOIN or LEFT JOIN to connect the fact tables with the master tables to find the Top AND Bottom Drivers (e.g., Top 5 & Bottom 5 Products by Revenue, Top & Bottom Customers, Top & Bottom Territories/Regions).
+5. If a sales_target table exists, include a query joining it with actual sales to find Target vs Actual Performance.
+6. You MUST include GROUP BY and ORDER BY, and you MUST include LIMIT 5 for breakdowns.
+7. Do NOT write simple SELECT *. Every query must aggregate or join data.
 Respond ONLY with a valid JSON array of strings containing the SQL queries."""
 
     user_prompt = f"Schema:\n{schema_str}\nGenerate the JSON array of queries."
