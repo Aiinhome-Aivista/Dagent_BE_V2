@@ -1,7 +1,6 @@
 import hashlib
 import re
 import json
-import requests
 # pyrefly: ignore [missing-import]
 import mysql.connector
 try:
@@ -21,7 +20,6 @@ from helper.dynamic_profiler import get_table_aggregates
 from pyvis.network import Network
 import os
 import uuid
-import re
 # pyrefly: ignore [missing-import]
 from arango import ArangoClient
 from database.config import (
@@ -118,13 +116,24 @@ def detect_cross_source_relationships(table_columns: dict, web_data: list, db_da
     """
     Ask Mistral to dynamically generate a business-focused Knowledge Graph.
     """
+    # db_summary = {}
+    # for db in db_data:
+    #     for tbl in db["tables"]:
+    #         entry = {}
+    #         for col, stats in tbl.get("column_stats", {}).items():
+    #             entry[col] = stats.get("sample", [])[:10]
+    #         db_summary[tbl["table_name"]] = entry
     db_summary = {}
     for db in db_data:
         for tbl in db["tables"]:
-            entry = {}
-            for col, stats in tbl.get("column_stats", {}).items():
-                entry[col] = stats.get("sample", [])[:10]
-            db_summary[tbl["table_name"]] = entry
+            # tables never carry "column_stats" — real per-column sample/frequency
+            # data lives in "business_aggregates" (populated by get_table_aggregates).
+            # Feed that in instead, so the LLM has actual values to work from
+            # rather than inventing SKU/customer codes.
+            db_summary[tbl["table_name"]] = {
+                "columns": tbl.get("columns", []),
+                "business_aggregates": tbl.get("business_aggregates", [])
+            }
 
     web_summary = []
     for w in web_data:
@@ -511,22 +520,32 @@ Your task is to write EXACTLY 8 to 12 advanced SQL queries that will extract the
 
 BUSINESS KPI CALCULATION LOGIC
 
-Always use the following joins:
+Always use the following joins. Several join keys have MISMATCHED COLUMN TYPES between tables
+(one side bigint/int, the other text) — always wrap the text side in CAST(... AS UNSIGNED) or
+the numeric side in CAST(... AS CHAR) so the join is explicit and doesn't rely on implicit coercion:
+
 sales_data.customer = customer_master.KUNNR
 customer_master.acc_grp = account_group_master.KTOKD
 customer_master.class = class_master.class_code
-customer_master.territory = territory_master.territory_code
-territory_master.region_code = region_master.region
+customer_master.territory = CAST(territory_master.territory_code AS UNSIGNED)          -- type mismatch: bigint vs text
+CAST(territory_master.region_code AS UNSIGNED) = region_master.region                    -- type mismatch: text vs bigint
+region_master.zone                                                                       -- ZONE lives here — always surface it, see RULE below
 
 sales_data.material = sku_master.MATNR
 sku_master.category = category_master.category_code
-sku_master.construction = construction_master.construction_code
+sku_master.construction = CAST(construction_master.construction_code AS UNSIGNED)       -- type mismatch: bigint vs text
 sku_master.tyre_type = tyre_type_master.tyre_type_code
 
 sales_data.distribution__Channel = distribution_mapping.distribution_code
 sales_target.MATNR = sku_master.MATNR
+sales_target.Terr_Code = territory_master.territory_code                                 -- NEW: both text, direct match — wire this up for Target-by-Territory/Region/Zone
+DATE_FORMAT(sales_data.billing__doc_date, '%Y%m') = CAST(sales_target.Month AS CHAR)      -- NEW: required to compare Target vs Actual by month; sales_target.Month is bigint in YYYYMM form
 
 Never display IDs or codes. Always return descriptive names from the master tables.
+
+OPTIONAL: `report_business_mapping` (report_row, brand, tyre_type, construction, distribution,
+account_group, remarks) is available for canonical report-row/brand rollups. Only join to it
+when a query specifically needs a standardized report_row grouping — don't force it into every query.
 
 =====================================================
 1. Overall Performance
@@ -539,13 +558,15 @@ Average Transaction Value = SUM(Invoice_Value_INR) / COUNT(*)
 =====================================================
 2. Revenue Trend
 =====================================================
-Highest Sales Month = GROUP BY YEAR, MONTH, Return the month having highest SUM(Invoice_Value_INR).
-Lowest Sales Month = Month having lowest SUM(Invoice_Value_INR).
+GROUP BY DATE_FORMAT(billing__doc_date, '%Y-%m')
+Highest Sales Month = month with highest SUM(Invoice_Value_INR)
+Lowest Sales Month  = month with lowest SUM(Invoice_Value_INR)
 
 =====================================================
 3. Product Performance
 =====================================================
 Join sales_data -> sku_master -> category_master -> construction_master -> tyre_type_master
+(remember the construction CAST above)
 Top Category = Category having highest SUM(Invoice_Value_INR)
 Top Construction = Construction having highest SUM(Invoice_Value_INR)
 Top Tyre Type = Tyre Type having highest SUM(Invoice_Value_INR)
@@ -557,11 +578,15 @@ Bottom 5 Products = ORDER BY Revenue ASC LIMIT 5
 =====================================================
 Join sales_data -> customer_master -> account_group_master
 Top Customers = Customers ranked by SUM(Invoice_Value_INR) LIMIT 5
+NOTE: If sales_data.customer has no matching row in customer_master, do NOT silently drop it
+via INNER JOIN — use LEFT JOIN and label it "Unmapped Account (<code>)" so concentration
+metrics aren't understated by excluding unmapped high-revenue codes.
 
 =====================================================
 5. Geography
 =====================================================
-Join customer_master -> territory_master -> region_master
+Join customer_master -> territory_master -> region_master (remember the CASTs above)
+Top Zone = Zone (region_master.zone) having highest Revenue        -- ALWAYS include a zone-level query, this was previously missing
 Top Region = Region having highest Revenue
 Top Territory = Territory having highest Revenue
 
@@ -583,18 +608,24 @@ Return Quantity = SUM(Return_Qty)
 =====================================================
 8. Target Performance
 =====================================================
-Join sales_target -> sku_master
-Target = SUM(Target Quantity or Target Value)
-Actual = SUM(Invoice_Value_INR)
+Join sales_target -> sku_master (MATNR), sales_target -> territory_master (Terr_Code),
+and correlate sales_target.Month against DATE_FORMAT(sales_data.billing__doc_date,'%Y%m')
+as shown above.
+Target = SUM(sales_target.Value) [and/or SUM(sales_target.Qty) for volume target]
+Actual = SUM(sales_data.Invoice_Value_INR) for the matching MATNR + month (+ territory if scoping by geography)
+Achievement % = Actual / Target * 100
+Gap = Actual - Target
 
 =====================================================
 GENERAL RULES
 =====================================================
 • Always use Invoice_Value_INR for revenue calculations.
 • Always use Sales_Qty for quantity calculations.
-• Always use billing__doc_date for all date filtering.
+• Always use billing__doc_date for all date filtering (already a DATE column — no parsing needed).
 • Always return names from master tables instead of IDs.
-• Use COALESCE() for NULL handling.
+• Use LEFT JOIN (not INNER JOIN) when resolving names, and use COALESCE() to label unmatched
+  codes explicitly (e.g. "Unmapped Account") rather than dropping those rows.
+• Cast mismatched join key types explicitly (see CASTs above) — do not rely on implicit coercion.
 • Generate optimized MySQL 8+ queries.
 
 Respond ONLY with a valid JSON array of strings containing the SQL queries."""
@@ -613,13 +644,42 @@ Respond ONLY with a valid JSON array of strings containing the SQL queries."""
         if not isinstance(queries, list):
             return insights
             
+    #     for i, query in enumerate(queries, 1):
+    #         query = query.strip()
+    #         if not query.lower().startswith("select"):
+    #             continue
+    #         try:
+    #             cursor.execute(query)
+    #             rows = cursor.fetchall()
+    #             if rows:
+    #                 insights.append(f"--- Insight Query {i} ---")
+    #                 insights.append(f"Query: {query}")
+    #                 for row in rows:
+    #                     row_str = " | ".join(f"{k}: {v}" for k, v in row.items())
+    #                     insights.append(f"  {row_str}")
+    #         except Exception as e:
+    #             print(f"[Agentic Helper] Query failed: {query}. Error: {e}")
+                
+    # except Exception as e:
+    #     print(f"[Agentic Helper] LLM call failed: {e}")
+        BLOCKED_KEYWORDS = ("into outfile", "into dumpfile", "load_file", "load data")
+
         for i, query in enumerate(queries, 1):
-            query = query.strip()
-            if not query.lower().startswith("select"):
+            query = query.strip().rstrip(";")
+            q_lower = query.lower()
+
+            if not q_lower.startswith("select"):
                 continue
+            if ";" in query:                          # reject any embedded multi-statement
+                print(f"[Agentic Helper] Rejected multi-statement query: {query}")
+                continue
+            if any(kw in q_lower for kw in BLOCKED_KEYWORDS):
+                print(f"[Agentic Helper] Rejected unsafe query: {query}")
+                continue
+
             try:
                 cursor.execute(query)
-                rows = cursor.fetchall()
+                rows = cursor.fetchall()[:MAX_ROWS]   # cap rows fed into context
                 if rows:
                     insights.append(f"--- Insight Query {i} ---")
                     insights.append(f"Query: {query}")
@@ -783,74 +843,84 @@ def _fetch_db_data(session_id: str, databases: list, conn) -> list:
 
             print(f"[Analysis] Connecting PostgreSQL: {pg_host}:{pg_port}/{pg_database} schema={pg_schema or 'ALL'}")
 
-            pg_conn = psycopg2.connect(
-                host=pg_host, port=pg_port,
-                user=pg_user, password=pg_password,
-                dbname=pg_database,
-                connect_timeout=10
-            )
-            pg_cur = pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            pg_conn = None
+            pg_cur = None
+            try:
+                pg_conn = psycopg2.connect(
+                    host=pg_host, port=pg_port,
+                    user=pg_user, password=pg_password,
+                    dbname=pg_database,
+                    connect_timeout=10
+                )
+                pg_cur = pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-            db_result = {
-                "source_type":       "database",
-                "external_database": pg_database,
-                "new_user_db":       pg_database,
-                "tables":            []
-            }
+                db_result = {
+                    "source_type":       "database",
+                    "external_database": pg_database,
+                    "new_user_db":       pg_database,
+                    "tables":            []
+                }
 
-            # Determine schemas
-            if pg_schema and pg_schema.strip():
-                schemas_to_fetch = [pg_schema.strip()]
-            else:
-                pg_cur.execute("""
-                    SELECT schema_name
-                    FROM information_schema.schemata
-                    WHERE schema_name NOT IN ('pg_catalog', 'information_schema',
-                                              'pg_toast', 'pg_temp_1', 'pg_toast_temp_1')
-                      AND schema_name NOT LIKE 'pg_temp_%'
-                      AND schema_name NOT LIKE 'pg_toast_temp_%'
-                    ORDER BY schema_name
-                """)
-                schemas_to_fetch = [r["schema_name"] for r in pg_cur.fetchall()]
-                print(f"[Analysis] PG schemas: {schemas_to_fetch}")
+                # Determine schemas
+                if pg_schema and pg_schema.strip():
+                    schemas_to_fetch = [pg_schema.strip()]
+                else:
+                    pg_cur.execute("""
+                        SELECT schema_name
+                        FROM information_schema.schemata
+                        WHERE schema_name NOT IN ('pg_catalog', 'information_schema',
+                                                  'pg_toast', 'pg_temp_1', 'pg_toast_temp_1')
+                          AND schema_name NOT LIKE 'pg_temp_%'
+                          AND schema_name NOT LIKE 'pg_toast_temp_%'
+                        ORDER BY schema_name
+                    """)
+                    schemas_to_fetch = [r["schema_name"] for r in pg_cur.fetchall()]
+                    print(f"[Analysis] PG schemas: {schemas_to_fetch}")
 
-            for schema in schemas_to_fetch:
-                pg_cur.execute("""
-                    SELECT table_name
-                    FROM information_schema.tables
-                    WHERE table_schema = %s AND table_type = 'BASE TABLE'
-                    ORDER BY table_name
-                """, (schema,))
-                tables = [r["table_name"] for r in pg_cur.fetchall()]
-                print(f"[Analysis] PG schema '{schema}' tables: {tables}")
+                for schema in schemas_to_fetch:
+                    pg_cur.execute("""
+                        SELECT table_name
+                        FROM information_schema.tables
+                        WHERE table_schema = %s AND table_type = 'BASE TABLE'
+                        ORDER BY table_name
+                    """, (schema,))
+                    tables = [r["table_name"] for r in pg_cur.fetchall()]
+                    print(f"[Analysis] PG schema '{schema}' tables: {tables}")
 
-                for t in tables:
-                    qualified = f"{schema}.{t}"
-                    try:
-                        pg_cur.execute(f'SELECT * FROM "{schema}"."{t}" LIMIT 0')
-                        pg_cur.fetchall()
-                        cols = [desc.name for desc in pg_cur.description]
+                    for t in tables:
+                        qualified = f"{schema}.{t}"
+                        try:
+                            pg_cur.execute(f'SELECT * FROM "{schema}"."{t}" LIMIT 0')
+                            pg_cur.fetchall()
+                            cols = [desc.name for desc in pg_cur.description]
 
-                        db_result["tables"].append({
-                            "table_name":   qualified,
-                            "columns":      cols,
-                            "business_aggregates": get_table_aggregates(pg_cur, qualified)
-                        })
-                        print(f"[Analysis] PG {pg_database}.{qualified}: schema loaded")
+                            db_result["tables"].append({
+                                "table_name":   qualified,
+                                "columns":      cols,
+                                "business_aggregates": get_table_aggregates(pg_cur, qualified)
+                            })
+                            print(f"[Analysis] PG {pg_database}.{qualified}: schema loaded")
 
-                    except Exception as te:
-                        print(f"[Analysis] PG skip {qualified}: {te}")
-                        pg_conn.rollback()
+                        except Exception as te:
+                            print(f"[Analysis] PG skip {qualified}: {te}")
+                            pg_conn.rollback()
 
-            # [NEW] Execute Agentic Workflow
-            db_result["executed_insights"] = _fetch_agentic_insights(pg_cur, db_result["tables"], "postgresql")
+                # [NEW] Execute Agentic Workflow
+                db_result["executed_insights"] = _fetch_agentic_insights(pg_cur, db_result["tables"], "postgresql")
 
-            pg_cur.close()
-            pg_conn.close()
-            results.append(db_result)
+                results.append(db_result)
 
-        except Exception as e:
-            print(f"[Analysis] PostgreSQL connect error: {e}")
+            except Exception as e:
+                print(f"[Analysis] PostgreSQL connect error: {e}")
+            finally:
+                if pg_cur:
+                    try: pg_cur.close()
+                    except: pass
+                if pg_conn:
+                    try: pg_conn.close()
+                    except: pass
+        except Exception as outer_e:
+            print(f"[Analysis] Outer PostgreSQL block error: {outer_e}")
 
     return results
 
@@ -904,7 +974,8 @@ def _call_mistral(context: str, topics: list, databases: list) -> dict:
     if topics:    source_desc.append(f"web topics: {', '.join(topics)}")
     if databases: source_desc.append(f"databases: {', '.join(databases)}")
 
-    system = """ IQ200 You are an expert business analyst and strategist.
+    # system = """ IQ200 You are an expert business analyst and strategist.
+    system = """You are an expert business analyst and strategist.
 Your task is to analyze the provided sales data of different types of tyres, tubes, Ret read Belt, Vul Solutions, flap  and extract purely business-focused insights and context.
 CRITICAL INSTRUCTIONS:
 1. Do NOT include ANY technical details (e.g., table names, column names, row counts, distinct values, data types, schema info, missing values, database structure).
@@ -1051,6 +1122,16 @@ def session_analysis_controller(get_connection_func):
                 "graph_url":  cached["graph_url"],
             }), 200
 
+        # # 5. Cache MISS or STALE — generate fresh
+        # analysis  = _call_mistral(context, topics, databases)
+        # graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db)
+
+        # if not analysis:
+        #     return jsonify({
+        #         "status":     "partial",
+        #         "statusCode": 200,
+        #         "message":    "LLM analysis failed.",
+        #     }), 200
         # 5. Cache MISS or STALE — generate fresh
         analysis  = _call_mistral(context, topics, databases)
         graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db)
@@ -1060,6 +1141,7 @@ def session_analysis_controller(get_connection_func):
                 "status":     "partial",
                 "statusCode": 200,
                 "message":    "LLM analysis failed.",
+                "graph_url":  graph_url,
             }), 200
 
         report = analysis.get("report", "")
