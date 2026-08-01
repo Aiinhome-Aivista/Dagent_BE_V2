@@ -515,8 +515,18 @@ def _fetch_agentic_insights(cursor, tables_info: list, db_type: str) -> list:
         schema_desc.append(f"Columns: {', '.join(t['columns'])}")
     schema_str = "\n".join(schema_desc)
     
+#     system_prompt = f"""You are an expert Data Analyst and {db_type.upper()} DBA.
+# Your task is to write EXACTLY 8 to 12 advanced SQL queries that will extract the most critical business metrics from the provided schema.
+
+# BUSINESS KPI CALCULATION LOGIC
     system_prompt = f"""You are an expert Data Analyst and {db_type.upper()} DBA.
-Your task is to write EXACTLY 8 to 12 advanced SQL queries that will extract the most critical business metrics from the provided schema.
+Your task is to write advanced SQL queries that extract the most critical business metrics from the provided schema.
+
+MANDATORY COVERAGE — write ONE query for EACH of the 8 numbered sections below, in order,
+even if you also add supporting queries. Do not skip a section because it seems less
+important — a missing query is what causes that section to show "N/A" in the final report.
+After the 8 mandatory queries, you may add up to 4 more (e.g. Top-5/Bottom-5 products,
+Dealer/Fleet/OEM split) for a total of 8 to 12 queries.
 
 BUSINESS KPI CALCULATION LOGIC
 
@@ -615,18 +625,25 @@ Target = SUM(sales_target.Value) [and/or SUM(sales_target.Qty) for volume target
 Actual = SUM(sales_data.Invoice_Value_INR) for the matching MATNR + month (+ territory if scoping by geography)
 Achievement % = Actual / Target * 100
 Gap = Actual - Target
-
 =====================================================
 GENERAL RULES
 =====================================================
-• Always use Invoice_Value_INR for revenue calculations.
-• Always use Sales_Qty for quantity calculations.
-• Always use billing__doc_date for all date filtering (already a DATE column — no parsing needed).
-• Always return names from master tables instead of IDs.
-• Use LEFT JOIN (not INNER JOIN) when resolving names, and use COALESCE() to label unmatched
+- Always use Invoice_Value_INR for revenue calculations.
+- Always use Sales_Qty for quantity calculations.
+- Always use billing__doc_date for all date filtering (already a DATE column — no parsing needed).
+- Always return names from master tables instead of IDs.
+- Use LEFT JOIN (not INNER JOIN) when resolving names, and use COALESCE() to label unmatched
   codes explicitly (e.g. "Unmapped Account") rather than dropping those rows.
-• Cast mismatched join key types explicitly (see CASTs above) — do not rely on implicit coercion.
-• Generate optimized MySQL 8+ queries.
+- Cast mismatched join key types explicitly (see CASTs above) — do not rely on implicit coercion.
+- GROUP BY CORRECTNESS (critical): every non-aggregated column you SELECT (e.g. sku_master.MAKTX,
+  customer_master.Cname, region_master.zone) MUST also appear in that query's GROUP BY clause.
+  Never SELECT a descriptive name column next to SUM(...)/COUNT(...) without grouping by that
+  same column — doing so lets the database pick an arbitrary or NULL value for the name while
+  still summing across ALL rows, producing a single fake row like "None: ₹9,677 million" that
+  silently absorbs nearly the whole table's revenue instead of a real top product/customer/region.
+  Before finalizing each query, check: does every non-aggregate item in SELECT also appear in
+  GROUP BY? If not, fix it.
+- Generate optimized MySQL 8+ queries.
 
 Respond ONLY with a valid JSON array of strings containing the SQL queries."""
 

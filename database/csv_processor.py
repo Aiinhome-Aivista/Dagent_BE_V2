@@ -199,18 +199,18 @@ def _apply_schema(chunk: pd.DataFrame, schema: dict) -> pd.DataFrame:
             #     format=spec['fmt'], errors='coerce'
             # ).dt.date
             
-            if spec["fmt"]:
+            if spec.get("fmt"):
                 chunk[col] = pd.to_datetime(
                     chunk[col].astype(str).str.strip(),
                     format=spec["fmt"],
                     errors="coerce"
-                ).dt.date
+                ).dt.strftime('%Y-%m-%d')
             else:
                 chunk[col] = pd.to_datetime(
                     chunk[col].astype(str).str.strip(),
                     errors="coerce",
                     dayfirst=True
-                ).dt.date
+                ).dt.strftime('%Y-%m-%d')
     return chunk
 
 
