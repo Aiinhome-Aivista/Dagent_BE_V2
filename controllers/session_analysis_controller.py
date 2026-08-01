@@ -654,8 +654,8 @@ def _compute_core_kpis(cursor) -> dict:
             COALESCE(cat.category_name, 'Unmapped Category') AS category_name,
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
-        LEFT JOIN sku_master sk ON sd.material = sk.MATNR
-        LEFT JOIN category_master cat ON sk.category = cat.category_code
+        JOIN sku_master sk ON sd.material = sk.MATNR
+        JOIN category_master cat ON sk.category = cat.category_code
         GROUP BY category_name
         ORDER BY Revenue DESC
         LIMIT 1
@@ -666,8 +666,8 @@ def _compute_core_kpis(cursor) -> dict:
             COALESCE(cat.category_name, 'Unmapped Category') AS category_name,
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
-        LEFT JOIN sku_master sk ON sd.material = sk.MATNR
-        LEFT JOIN category_master cat ON sk.category = cat.category_code
+        JOIN sku_master sk ON sd.material = sk.MATNR
+        JOIN category_master cat ON sk.category = cat.category_code
         GROUP BY category_name
         ORDER BY Revenue ASC
         LIMIT 1
@@ -682,8 +682,8 @@ def _compute_core_kpis(cursor) -> dict:
             COALESCE(cons.construction_description, 'Unmapped Construction') AS construction_description,
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
-        LEFT JOIN sku_master sk ON sd.material = sk.MATNR
-        LEFT JOIN construction_master cons
+        JOIN sku_master sk ON sd.material = sk.MATNR
+        JOIN construction_master cons
             ON CAST(sk.construction AS CHAR) = cons.construction_code
         GROUP BY construction_description
         ORDER BY Revenue DESC
@@ -695,8 +695,8 @@ def _compute_core_kpis(cursor) -> dict:
             COALESCE(tt.tyre_type_name, 'Unmapped Tyre Type') AS tyre_type_name,
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
-        LEFT JOIN sku_master sk ON sd.material = sk.MATNR
-        LEFT JOIN tyre_type_master tt ON sk.tyre_type = tt.tyre_type_code
+        JOIN sku_master sk ON sd.material = sk.MATNR
+        JOIN tyre_type_master tt ON sk.tyre_type = tt.tyre_type_code
         GROUP BY tyre_type_name
         ORDER BY Revenue DESC
         LIMIT 1
@@ -707,7 +707,7 @@ def _compute_core_kpis(cursor) -> dict:
             COALESCE(sk.MAKTX, 'Unmapped Product') AS product_name,
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
-        LEFT JOIN sku_master sk ON sd.material = sk.MATNR
+        JOIN sku_master sk ON sd.material = sk.MATNR
         GROUP BY product_name
         ORDER BY Revenue DESC
         LIMIT 5
@@ -716,7 +716,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("bottom_5_products", """
         SELECT sk.MAKTX AS product_name, ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
-        LEFT JOIN sku_master sk ON sd.material = sk.MATNR
+        JOIN sku_master sk ON sd.material = sk.MATNR
         WHERE sk.MAKTX IS NOT NULL
         GROUP BY sk.MAKTX
         ORDER BY Revenue ASC
@@ -729,7 +729,7 @@ def _compute_core_kpis(cursor) -> dict:
             COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Customer_Name,
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
-        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        JOIN customer_master cm ON sd.customer = cm.KUNNR
         GROUP BY Customer_Name
         ORDER BY Revenue DESC
         LIMIT 1
@@ -740,7 +740,7 @@ def _compute_core_kpis(cursor) -> dict:
             COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Customer_Name,
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
-        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        JOIN customer_master cm ON sd.customer = cm.KUNNR
         GROUP BY Customer_Name
         ORDER BY Revenue DESC
         LIMIT 5
@@ -751,8 +751,8 @@ def _compute_core_kpis(cursor) -> dict:
             COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Dealer_Name,
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
-        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
+        JOIN customer_master cm ON sd.customer = cm.KUNNR
+        JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
         WHERE ag.account_group_name = 'Dealer'
         GROUP BY Dealer_Name
         ORDER BY Revenue DESC
@@ -762,24 +762,24 @@ def _compute_core_kpis(cursor) -> dict:
     run("dealer_contribution_pct", """
         SELECT ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Dealer_Contribution_Percentage
         FROM sales_data sd
-        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
+        JOIN customer_master cm ON sd.customer = cm.KUNNR
+        JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
         WHERE ag.account_group_name = 'Dealer'
     """, required_tables=["sales_data", "customer_master", "account_group_master"])
 
     run("fleet_contribution_pct", """
         SELECT ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Fleet_Contribution_Percentage
         FROM sales_data sd
-        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
+        JOIN customer_master cm ON sd.customer = cm.KUNNR
+        JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
         WHERE ag.account_group_name = 'Fleet'
     """, required_tables=["sales_data", "customer_master", "account_group_master"])
 
     run("oem_contribution_pct", """
         SELECT ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS OEM_Contribution_Percentage
         FROM sales_data sd
-        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
+        JOIN customer_master cm ON sd.customer = cm.KUNNR
+        JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
         WHERE ag.account_group_name = 'OEM'
     """, required_tables=["sales_data", "customer_master", "account_group_master"])
 
@@ -789,7 +789,7 @@ def _compute_core_kpis(cursor) -> dict:
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
             ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Contribution_Percentage
         FROM sales_data sd
-        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        JOIN customer_master cm ON sd.customer = cm.KUNNR
         GROUP BY Customer_Name
         ORDER BY Contribution_Percentage DESC
         LIMIT 5
@@ -806,9 +806,9 @@ def _compute_core_kpis(cursor) -> dict:
             END AS Zone,
             ROUND(SUM(sd.Invoice_Value_INR), 2) AS Revenue
         FROM sales_data sd
-        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
-        LEFT JOIN region_master rm ON tm.region_code = CAST(rm.region AS CHAR)
+        JOIN customer_master cm ON sd.customer = cm.KUNNR
+        JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
+        JOIN region_master rm ON tm.region_code = CAST(rm.region AS CHAR)
         GROUP BY rm.zone
         ORDER BY Revenue DESC
         LIMIT 1
@@ -819,9 +819,9 @@ def _compute_core_kpis(cursor) -> dict:
             COALESCE(rm.region_name, 'Unmapped Region') AS region_name,
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
-        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
-        LEFT JOIN region_master rm ON tm.region_code = CAST(rm.region AS CHAR)
+        JOIN customer_master cm ON sd.customer = cm.KUNNR
+        JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
+        JOIN region_master rm ON tm.region_code = CAST(rm.region AS CHAR)
         GROUP BY region_name
         ORDER BY Revenue DESC
         LIMIT 1
@@ -832,8 +832,8 @@ def _compute_core_kpis(cursor) -> dict:
             COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name,
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
-        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
+        JOIN customer_master cm ON sd.customer = cm.KUNNR
+        JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
         GROUP BY territory_name
         ORDER BY Revenue DESC
         LIMIT 1
@@ -844,8 +844,8 @@ def _compute_core_kpis(cursor) -> dict:
             COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name,
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
-        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
+        JOIN customer_master cm ON sd.customer = cm.KUNNR
+        JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
         WHERE tm.territory_name IS NOT NULL
         GROUP BY territory_name
         ORDER BY Revenue ASC
@@ -858,9 +858,9 @@ def _compute_core_kpis(cursor) -> dict:
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
             ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Contribution_Percentage
         FROM sales_data sd
-        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
-        LEFT JOIN region_master rm ON tm.region_code = CAST(rm.region AS CHAR)
+        JOIN customer_master cm ON sd.customer = cm.KUNNR
+        JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
+        JOIN region_master rm ON tm.region_code = CAST(rm.region AS CHAR)
         GROUP BY region_name
         ORDER BY Revenue DESC
         LIMIT 5
@@ -877,7 +877,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("distribution_revenue", """
         SELECT COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name, ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
-        LEFT JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
+        JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
         GROUP BY distribution_name
         ORDER BY Revenue DESC
     """, required_tables=["sales_data", "distribution_mapping"])
@@ -885,7 +885,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("distribution_quantity", """
         SELECT COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name, ROUND(SUM(sd.Sales_Qty),2) AS Quantity
         FROM sales_data sd
-        LEFT JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
+        JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
         GROUP BY distribution_name
         ORDER BY Quantity DESC
     """, required_tables=["sales_data", "distribution_mapping"])
@@ -896,40 +896,40 @@ def _compute_core_kpis(cursor) -> dict:
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
             ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Contribution_Percentage
         FROM sales_data sd
-        LEFT JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
+        JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
         GROUP BY distribution_name
         ORDER BY Revenue DESC
     """, required_tables=["sales_data", "distribution_mapping"])
 
-    # ---------- 7. Pricing Analysis ----------
-    run("pricing", """
-        SELECT
-            SUM(Claim_Qty)                   AS claims_quantity,
-            ROUND(SUM(NDP_CLAIM_INR),2)       AS claims_amount,
-            SUM(Return_Qty)                  AS returns_quantity,
-            ROUND(SUM(NDP_RETURN_INR),2)      AS returns_amount,
-            ROUND(SUM(Total_Discount_INR),2)  AS discount_amount,
-            ROUND(
-                ABS(SUM(Total_Discount_INR)) * 100 /
-                NULLIF((SELECT SUM(Invoice_Value_INR) FROM sales_data), 0)
-            , 2) AS discount_percentage
-        FROM sales_data
-    """, required_tables=["sales_data"])
+    # # ---------- 7. Pricing Analysis ----------
+    # run("pricing", """
+    #     SELECT
+    #         SUM(Claim_Qty)                   AS claims_quantity,
+    #         ROUND(SUM(NDP_CLAIM_INR),2)       AS claims_amount,
+    #         SUM(Return_Qty)                  AS returns_quantity,
+    #         ROUND(SUM(NDP_RETURN_INR),2)      AS returns_amount,
+    #         ROUND(SUM(Total_Discount_INR),2)  AS discount_amount,
+    #         ROUND(
+    #             ABS(SUM(Total_Discount_INR)) * 100 /
+    #             NULLIF((SELECT SUM(Invoice_Value_INR) FROM sales_data), 0)
+    #         , 2) AS discount_percentage
+    #     FROM sales_data
+    # """, required_tables=["sales_data"])
 
-    # ---------- 8. Target Performance ----------
-    run("target_vs_actual", """
-        SELECT
-            st.Month AS Target_Month,
-            ROUND(SUM(st.Value),2) AS Target_Value,
-            (
-                SELECT ROUND(SUM(sd.Invoice_Value_INR),2)
-                FROM sales_data sd
-                WHERE DATE_FORMAT(sd.billing__doc_date, '%Y%m') = CAST(st.Month AS CHAR)
-            ) AS Actual_Value
-        FROM sales_target st
-        GROUP BY st.Month
-        ORDER BY st.Month
-    """, required_tables=["sales_data", "sales_target"])
+    # # ---------- 8. Target Performance ----------
+    # run("target_vs_actual", """
+    #     SELECT
+    #         st.Month AS Target_Month,
+    #         ROUND(SUM(st.Value),2) AS Target_Value,
+    #         (
+    #             SELECT ROUND(SUM(sd.Invoice_Value_INR),2)
+    #             FROM sales_data sd
+    #             WHERE DATE_FORMAT(sd.billing__doc_date, '%Y%m') = CAST(st.Month AS CHAR)
+    #         ) AS Actual_Value
+    #     FROM sales_target st
+    #     GROUP BY st.Month
+    #     ORDER BY st.Month
+    # """, required_tables=["sales_data", "sales_target"])
 
     # ---------- 9. Business Risks ----------
     run("high_customer_dependency", """
@@ -947,8 +947,8 @@ def _compute_core_kpis(cursor) -> dict:
         SELECT
             CASE WHEN (
                 SELECT SUM(sd.Invoice_Value_INR) FROM sales_data sd
-                LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-                LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
+                JOIN customer_master cm ON sd.customer = cm.KUNNR
+                JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
                 WHERE ag.account_group_name = 'Dealer'
             ) > (SELECT SUM(Invoice_Value_INR)*0.60 FROM sales_data)
             THEN 'High Dealer Dependency' ELSE 'Normal' END AS Risk_Status
@@ -957,8 +957,8 @@ def _compute_core_kpis(cursor) -> dict:
     run("weak_territory", """
         SELECT COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name, ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
-        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
+        JOIN customer_master cm ON sd.customer = cm.KUNNR
+        JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
         WHERE tm.territory_name IS NOT NULL
         GROUP BY territory_name
         ORDER BY Revenue ASC
@@ -1034,7 +1034,7 @@ GENERAL RULES:
 - Always use Sales_Qty for quantity calculations.
 - Always use billing__doc_date for all date filtering (already a DATE column — no parsing needed).
 - Always return names from master tables instead of IDs.
-- Use LEFT JOIN (not INNER JOIN) when resolving names, and use COALESCE() to label unmatched
+- Use JOIN (not INNER JOIN) when resolving names, and use COALESCE() to label unmatched
   codes explicitly (e.g. "Unmapped Account") rather than dropping those rows.
 - Cast mismatched join key types explicitly (see CASTs above) — do not rely on implicit coercion.
 - GROUP BY CORRECTNESS (critical): every non-aggregated column you SELECT (e.g. sku_master.MAKTX,
@@ -1422,7 +1422,7 @@ ALSO, generate a category-wise trend report as a "line_chart" visualization extr
 
 Return ONLY this JSON:
 {{
-  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance, key trends, and main takeaways based purely on the data.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue**: <Value>\\n- **Total Quantity**: <Value>\\n- **Total Invoices**: <Value>\\n- **Average Invoice Value**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Sales Month**: <Value>\\n- **Lowest Sales Month**: <Value>\\n- **Monthly Growth**: <Value>\\n\\n**3. Product Performance**\\n- **Top Category**: <Value>\\n- **Top Construction**: <Value>\\n- **Top Tyre Type**: <Value>\\n- **Top Product**: <Value>\\n- **Lowest Selling Product**: <Value>\\n\\n**4. Customer Performance**\\n- **Top Customers**: <Value>\\n- **Dealer Contribution**: <Value>\\n- **Fleet Contribution**: <Value>\\n- **OEM Contribution**: <Value>\\n- **Customer Concentration**: <Value>\\n\\n**5. Geography**\\n- **Top Zone**: <Value>\\n- **Top Region**: <Value>\\n- **Top Territory**: <Value>\\n- **Lowest Territory**: <Value>\\n\\n**6. Distribution**\\n- **Replacement**: <Value>\\n- **OEM**: <Value>\\n- **STU**: <Value>\\n- **DEF**: <Value>\\n- **Contribution %**: <Value>\\n\\n**7. Pricing**\\n- **Average Selling Price**: <Value>\\n- **Discount %**: <Value>\\n- **Claims**: <Value>\\n- **Returns**: <Value>\\n\\n**8. Target Performance (if available)**\\n- **Target**: <Value>\\n- **Actual**: <Value>\\n- **Achievement %**: <Value>\\n- **Gap**: <Value>\\n- **MTD / YTD / YOY**: <Value>\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>\\n\\n### Strategic Conclusion\\n<A final strategic conclusion summarizing the path forward for the business.>",
+  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance, key trends, and main takeaways based purely on the data.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue**: <Value>\\n- **Total Quantity**: <Value>\\n- **Total Invoices**: <Value>\\n- **Average Invoice Value**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Sales Month**: <Value>\\n- **Lowest Sales Month**: <Value>\\n- **Monthly Growth**: <Value>\\n\\n**3. Product Performance**\\n- **Top Category**: <Value>\\n- **Top Construction**: <Value>\\n- **Top Tyre Type**: <Value>\\n- **Top Product**: <Value>\\n- **Lowest Selling Product**: <Value>\\n\\n**4. Customer Performance**\\n- **Top Customers**: <Value>\\n- **Dealer Contribution**: <Value>\\n- **Fleet Contribution**: <Value>\\n- **OEM Contribution**: <Value>\\n- **Customer Concentration**: <Value>\\n\\n**5. Geography**\\n- **Top Zone**: <Value>\\n- **Top Region**: <Value>\\n- **Top Territory**: <Value>\\n- **Lowest Territory**: <Value>\\n\\n**6. Distribution**\\n- **Replacement**: <Value>\\n- **OEM**: <Value>\\n- **STU**: <Value>\\n- **DEF**: <Value>\\n- **Contribution %**: <Value>\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>\\n\\n### Strategic Conclusion\\n<A final strategic conclusion summarizing the path forward for the business.>",
   "follow_up_questions": ["What ...?", "What ...?", "What ...?", "What ...?", "What ...?"],
   "visualizations": [
     {{
