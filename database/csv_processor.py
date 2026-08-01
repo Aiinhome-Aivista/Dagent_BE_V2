@@ -78,21 +78,24 @@ def _clean_numeric(series: pd.Series) -> pd.Series:
                    'None': np.nan, '-': np.nan, 'null': np.nan, 'NULL': np.nan})
     return pd.to_numeric(x, errors='coerce')
 
-
 def _best_date_format(series: pd.Series):
     """Return (format, parse_ratio) for the best-matching date format, or (None, 0)."""
     nonblank = series.dropna().astype(str).str.strip()
     nonblank = nonblank[(nonblank != '') & (nonblank.str.lower() != 'nan')]
     if nonblank.empty:
         return None, 0.0
-    sample = nonblank.head(2000)
+    # Sample from UNIQUE values, not raw row order — a chronologically
+    # sorted, dense file (many rows per day) can otherwise never surface
+    # day-of-month values >12 in the first N raw rows, hiding the exact
+    # signal needed to tell day-first from month-first formats apart.
+    unique_vals = pd.Series(nonblank.unique())
+    sample = unique_vals.head(2000)
     best_fmt, best_ratio = None, 0.0
     for fmt in DATE_FORMATS:
         ratio = pd.to_datetime(sample, format=fmt, errors='coerce').notna().mean()
         if ratio > best_ratio:
             best_fmt, best_ratio = fmt, float(ratio)
     return best_fmt, best_ratio
-
 
 def _infer_schema(sample: pd.DataFrame) -> dict:
     """Map each (already-sanitized) column name -> dict(kind, fmt)."""
@@ -108,9 +111,13 @@ def _infer_schema(sample: pd.DataFrame) -> dict:
                 # --------------------------------------------------
         # BUSINESS COLUMN OVERRIDES (HIGHEST PRIORITY)
         # --------------------------------------------------
-
         if "date" in col_lower:
-            schema[col] = {"kind": "date", "fmt": None}
+            fmt, date_ratio = _best_date_format(nonblank)
+            if date_ratio < DATE_THRESHOLD:
+                fmt = None   # low confidence — fall back to the lenient
+                             # generic dayfirst parser in _apply_schema
+                             # instead of forcing a barely-matching format
+            schema[col] = {"kind": "date", "fmt": fmt}
             continue
 
         INT_COLUMNS = {

@@ -116,13 +116,6 @@ def detect_cross_source_relationships(table_columns: dict, web_data: list, db_da
     """
     Ask Mistral to dynamically generate a business-focused Knowledge Graph.
     """
-    # db_summary = {}
-    # for db in db_data:
-    #     for tbl in db["tables"]:
-    #         entry = {}
-    #         for col, stats in tbl.get("column_stats", {}).items():
-    #             entry[col] = stats.get("sample", [])[:10]
-    #         db_summary[tbl["table_name"]] = entry
     db_summary = {}
     for db in db_data:
         for tbl in db["tables"]:
@@ -499,12 +492,479 @@ def _fetch_web_data(session_id: str, topics: list, conn) -> list:
     return results
 
 
+# ══════════════════════════════════════════════════════
+# HARDCODED CORE KPIs — deterministic, no LLM involved
+# ══════════════════════════════════════════════════════
+
+def _compute_core_kpis(cursor) -> dict:
+    """
+    Runs the fixed set of core business KPIs directly — same query every
+    time, using the validated LEFT JOIN + CAST + COALESCE logic. No LLM
+    writes these queries, so these numbers can't drift, hallucinate, or
+    vary run-to-run. Returns a dict of {kpi_name: rows}. Any query that
+    fails (e.g. a table/column genuinely missing) is caught individually
+    so one failure doesn't take down the rest.
+    """
+    kpis = {}
+
+    def run(label, sql):
+        try:
+            cursor.execute(sql)
+            kpis[label] = cursor.fetchall()
+        except Exception as e:
+            print(f"[CoreKPI] '{label}' failed: {e}")
+            kpis[label] = None
+
+    # ---------- 1. Overall Performance ----------
+    run("total_revenue", """
+        SELECT ROUND(SUM(sd.Invoice_Value_INR),2) AS Total_Revenue
+        FROM sales_data sd
+    """)
+
+    run("total_quantity", """
+        SELECT ROUND(SUM(sd.Sales_Qty),2) AS Total_Quantity
+        FROM sales_data sd
+    """)
+
+    run("total_transactions", """
+        SELECT COUNT(*) AS Total_Transactions
+        FROM sales_data sd
+    """)
+
+    run("avg_transaction_value", """
+        SELECT ROUND(SUM(sd.Invoice_Value_INR)/COUNT(*),2) AS Average_Transaction_Value
+        FROM sales_data sd
+    """)
+
+    run("avg_selling_price", """
+        SELECT ROUND(SUM(sd.Invoice_Value_INR)/NULLIF(SUM(sd.Sales_Qty),0),2) AS Average_Selling_Price
+        FROM sales_data sd
+    """)
+
+    # ---------- 2. Revenue Trend ----------
+    run("highest_sales_month", """
+        SELECT
+            YEAR(sd.billing__doc_date) AS Sales_Year,
+            MONTHNAME(sd.billing__doc_date) AS Month_Name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        WHERE sd.billing__doc_date IS NOT NULL
+        GROUP BY
+            YEAR(sd.billing__doc_date),
+            MONTH(sd.billing__doc_date),
+            MONTHNAME(sd.billing__doc_date)
+        ORDER BY Revenue DESC
+        LIMIT 1
+    """)
+
+    run("lowest_sales_month", """
+        SELECT
+            YEAR(sd.billing__doc_date) AS Sales_Year,
+            MONTHNAME(sd.billing__doc_date) AS Month_Name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        WHERE sd.billing__doc_date IS NOT NULL
+        GROUP BY
+            YEAR(sd.billing__doc_date),
+            MONTH(sd.billing__doc_date),
+            MONTHNAME(sd.billing__doc_date)
+        ORDER BY Revenue ASC
+        LIMIT 1
+    """)
+
+    run("mom_growth", """
+        WITH MonthlyRevenue AS (
+            SELECT
+                YEAR(sd.billing__doc_date) AS Sales_Year,
+                MONTH(sd.billing__doc_date) AS Sales_Month,
+                MONTHNAME(sd.billing__doc_date) AS Month_Name,
+                SUM(sd.Invoice_Value_INR) AS Revenue
+            FROM sales_data sd
+            WHERE sd.billing__doc_date IS NOT NULL
+            GROUP BY
+                YEAR(sd.billing__doc_date),
+                MONTH(sd.billing__doc_date),
+                MONTHNAME(sd.billing__doc_date)
+        )
+        SELECT
+            Sales_Year,
+            Month_Name,
+            ROUND(Revenue,2) AS Current_Revenue,
+            ROUND(LAG(Revenue) OVER(ORDER BY Sales_Year, Sales_Month),2) AS Previous_Revenue,
+            ROUND(
+                (Revenue - LAG(Revenue) OVER(ORDER BY Sales_Year, Sales_Month))
+                / NULLIF(LAG(Revenue) OVER(ORDER BY Sales_Year, Sales_Month),0) * 100
+            ,2) AS MoM_Growth_Percentage
+        FROM MonthlyRevenue
+        ORDER BY Sales_Year, Sales_Month
+    """)
+
+    # ---------- 3. Product Performance ----------
+    # LEFT JOIN throughout — ~1.4% of materials have no sku_master match;
+    # don't silently drop that revenue. CAST added on construction join —
+    # construction_master has mixed numeric/alpha codes.
+    run("top_category", """
+        SELECT
+            COALESCE(cat.category_name, 'Unmapped Category') AS category_name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        LEFT JOIN sku_master sk ON sd.material = sk.MATNR
+        LEFT JOIN category_master cat ON sk.category = cat.category_code
+        GROUP BY category_name
+        ORDER BY Revenue DESC
+        LIMIT 1
+    """)
+
+    run("lowest_category", """
+        SELECT
+            COALESCE(cat.category_name, 'Unmapped Category') AS category_name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        LEFT JOIN sku_master sk ON sd.material = sk.MATNR
+        LEFT JOIN category_master cat ON sk.category = cat.category_code
+        GROUP BY category_name
+        ORDER BY Revenue ASC
+        LIMIT 1
+    """)
+
+    run("top_construction", """
+        SELECT
+            COALESCE(cons.construction_description, 'Unmapped Construction') AS construction_description,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        LEFT JOIN sku_master sk ON sd.material = sk.MATNR
+        LEFT JOIN construction_master cons
+            ON sk.construction = CAST(cons.construction_code AS UNSIGNED)
+        GROUP BY construction_description
+        ORDER BY Revenue DESC
+        LIMIT 1
+    """)
+
+    run("top_tyre_type", """
+        SELECT
+            COALESCE(tt.tyre_type_name, 'Unmapped Tyre Type') AS tyre_type_name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        LEFT JOIN sku_master sk ON sd.material = sk.MATNR
+        LEFT JOIN tyre_type_master tt ON sk.tyre_type = tt.tyre_type_code
+        GROUP BY tyre_type_name
+        ORDER BY Revenue DESC
+        LIMIT 1
+    """)
+
+    run("top_5_products", """
+        SELECT
+            COALESCE(sk.MAKTX, 'Unmapped Product') AS product_name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        LEFT JOIN sku_master sk ON sd.material = sk.MATNR
+        GROUP BY product_name
+        ORDER BY Revenue DESC
+        LIMIT 5
+    """)
+
+    run("bottom_5_products", """
+        SELECT
+            sk.MAKTX AS product_name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        LEFT JOIN sku_master sk ON sd.material = sk.MATNR
+        WHERE sk.MAKTX IS NOT NULL
+        GROUP BY sk.MAKTX
+        ORDER BY Revenue ASC
+        LIMIT 5
+    """)
+
+    # ---------- 4. Customer Performance ----------
+    # LEFT JOIN — confirmed top revenue customer codes (~18% of total
+    # revenue) have NO row in customer_master. INNER JOIN silently drops them.
+    run("top_customer", """
+        SELECT
+            COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Customer_Name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        GROUP BY Customer_Name
+        ORDER BY Revenue DESC
+        LIMIT 1
+    """)
+
+    run("top_5_customers", """
+        SELECT
+            COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Customer_Name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        GROUP BY Customer_Name
+        ORDER BY Revenue DESC
+        LIMIT 5
+    """)
+
+    run("top_dealers", """
+        SELECT
+            COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Dealer_Name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
+        WHERE ag.account_group_name = 'Dealer'
+        GROUP BY Dealer_Name
+        ORDER BY Revenue DESC
+    """)
+
+    run("dealer_contribution_pct", """
+        SELECT
+            ROUND(
+                SUM(sd.Invoice_Value_INR) * 100 /
+                (SELECT SUM(Invoice_Value_INR) FROM sales_data),
+            2) AS Dealer_Contribution_Percentage
+        FROM sales_data sd
+        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
+        WHERE ag.account_group_name = 'Dealer'
+    """)
+
+    run("customer_concentration", """
+        SELECT
+            COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Customer_Name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
+            ROUND(
+                SUM(sd.Invoice_Value_INR) * 100 /
+                (SELECT SUM(Invoice_Value_INR) FROM sales_data),
+            2) AS Contribution_Percentage
+        FROM sales_data sd
+        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        GROUP BY Customer_Name
+        ORDER BY Contribution_Percentage DESC
+        LIMIT 10
+    """)
+
+    # ---------- 5. Geography ----------
+    # LEFT JOIN + CAST throughout — customer_master.territory is bigint vs
+    # territory_master.territory_code text; territory_master.region_code is
+    # text vs region_master.region bigint.
+    run("top_zone", """
+        SELECT
+            CASE COALESCE(rm.zone, 'UNMAPPED')
+                WHEN 'EZ' THEN 'East Zone'
+                WHEN 'WZ' THEN 'West Zone'
+                WHEN 'NZ' THEN 'North Zone'
+                WHEN 'SZ' THEN 'South Zone I'
+                WHEN 'TZ' THEN 'South Zone II'
+                WHEN 'CZ' THEN 'Central Zone'
+                WHEN 'NP' THEN 'Nepal'
+                ELSE 'Unmapped Zone'
+            END AS Zone,
+            ROUND(SUM(sd.Invoice_Value_INR), 2) AS Revenue
+        FROM sales_data sd
+        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
+        LEFT JOIN region_master rm ON CAST(tm.region_code AS UNSIGNED) = rm.region
+        GROUP BY rm.zone
+        ORDER BY Revenue DESC
+        LIMIT 1
+    """)
+
+    run("top_region", """
+        SELECT
+            COALESCE(rm.region_name, 'Unmapped Region') AS region_name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
+        LEFT JOIN region_master rm ON CAST(tm.region_code AS UNSIGNED) = rm.region
+        GROUP BY region_name
+        ORDER BY Revenue DESC
+        LIMIT 1
+    """)
+
+    run("top_territory", """
+        SELECT
+            COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
+        GROUP BY territory_name
+        ORDER BY Revenue DESC
+        LIMIT 1
+    """)
+
+    run("lowest_territory", """
+        SELECT
+            COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
+        WHERE tm.territory_name IS NOT NULL
+        GROUP BY territory_name
+        ORDER BY Revenue ASC
+        LIMIT 1
+    """)
+
+    run("revenue_by_region", """
+        SELECT
+            COALESCE(rm.region_name, 'Unmapped Region') AS region_name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
+            ROUND(SUM(sd.Sales_Qty),2) AS Quantity
+        FROM sales_data sd
+        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
+        LEFT JOIN region_master rm ON CAST(tm.region_code AS UNSIGNED) = rm.region
+        GROUP BY region_name
+        ORDER BY Revenue DESC
+    """)
+
+    run("revenue_by_territory", """
+        SELECT
+            COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
+            ROUND(SUM(sd.Sales_Qty),2) AS Quantity
+        FROM sales_data sd
+        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
+        GROUP BY territory_name
+        ORDER BY Revenue DESC
+    """)
+
+    run("region_contribution_pct", """
+        SELECT
+            COALESCE(rm.region_name, 'Unmapped Region') AS region_name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
+            ROUND(
+                SUM(sd.Invoice_Value_INR) * 100 /
+                (SELECT SUM(Invoice_Value_INR) FROM sales_data),
+            2) AS Contribution_Percentage
+        FROM sales_data sd
+        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
+        LEFT JOIN region_master rm ON CAST(tm.region_code AS UNSIGNED) = rm.region
+        GROUP BY region_name
+        ORDER BY Revenue DESC
+    """)
+
+    # ---------- 6. Distribution Analysis ----------
+    # sales_data.distribution__Channel and distribution_mapping.distribution_code
+    # are already the same type — no CAST needed. LEFT JOIN kept for safety.
+    run("distribution_revenue", """
+        SELECT
+            COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        LEFT JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
+        GROUP BY distribution_name
+        ORDER BY Revenue DESC
+    """)
+
+    run("distribution_quantity", """
+        SELECT
+            COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name,
+            ROUND(SUM(sd.Sales_Qty),2) AS Quantity
+        FROM sales_data sd
+        LEFT JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
+        GROUP BY distribution_name
+        ORDER BY Quantity DESC
+    """)
+
+    run("distribution_contribution_pct", """
+        SELECT
+            COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
+            ROUND(
+                SUM(sd.Invoice_Value_INR) * 100 /
+                (SELECT SUM(Invoice_Value_INR) FROM sales_data),
+            2) AS Contribution_Percentage
+        FROM sales_data sd
+        LEFT JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
+        GROUP BY distribution_name
+        ORDER BY Revenue DESC
+    """)
+
+    # ---------- 7. Pricing Analysis ----------
+    run("pricing", """
+        SELECT
+            SUM(Claim_Qty)          AS Claim_Quantity,
+            ROUND(SUM(NDP_CLAIM_INR),2)     AS Claim_Amount,
+            SUM(Return_Qty)         AS Return_Quantity,
+            ROUND(SUM(NDP_RETURN_INR),2)    AS Return_Amount,
+            ROUND(SUM(Total_Discount_INR),2) AS Total_Discount
+        FROM sales_data
+    """)
+
+    # ---------- 8. Target Performance ----------
+    run("target_vs_actual", """
+        SELECT
+            ROUND(SUM(st.Value),2) AS Target_Value,
+            (
+                SELECT ROUND(SUM(sd.Invoice_Value_INR),2)
+                FROM sales_data sd
+                WHERE DATE_FORMAT(sd.billing__doc_date, '%Y%m') = CAST(st.Month AS CHAR)
+            ) AS Actual_Value
+        FROM sales_target st
+    """)
+
+    # ---------- 9. Business Risks ----------
+    run("high_customer_dependency", """
+        SELECT
+            CASE
+                WHEN (
+                    SELECT SUM(Revenue) FROM (
+                        SELECT SUM(sd.Invoice_Value_INR) AS Revenue
+                        FROM sales_data sd
+                        GROUP BY sd.customer
+                        ORDER BY Revenue DESC
+                        LIMIT 10
+                    ) t
+                ) > (SELECT SUM(Invoice_Value_INR)*0.50 FROM sales_data)
+                THEN 'High Customer Dependency'
+                ELSE 'Normal'
+            END AS Risk_Status
+    """)
+
+    run("high_dealer_dependency", """
+        SELECT
+            CASE
+                WHEN (
+                    SELECT SUM(sd.Invoice_Value_INR)
+                    FROM sales_data sd
+                    LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+                    LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
+                    WHERE ag.account_group_name = 'Dealer'
+                ) > (SELECT SUM(Invoice_Value_INR)*0.60 FROM sales_data)
+                THEN 'High Dealer Dependency'
+                ELSE 'Normal'
+            END AS Risk_Status
+    """)
+
+    run("weak_territory", """
+        SELECT
+            COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name,
+            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        FROM sales_data sd
+        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
+        WHERE tm.territory_name IS NOT NULL
+        GROUP BY territory_name
+        ORDER BY Revenue ASC
+        LIMIT 10
+    """)
+
+    return kpis
+
+
 def _fetch_agentic_insights(cursor, tables_info: list, db_type: str) -> list:
     """
     Agentic Workflow:
     1. Sends schema to LLM and asks for 7-10 comprehensive business SQL queries.
     2. Executes the queries.
     3. Returns the successful results as a list of strings.
+    NOTE: this is now used only for supplementary/exploratory insights —
+    the core numeric backbone (Total Revenue, Top Category/Construction/
+    Zone/Region/Customer, Distribution %, Claims, Returns, Target, etc.)
+    is computed deterministically by _compute_core_kpis instead, so this
+    function no longer needs to (and should not be relied on to) get those
+    fields right on its own.
     """
     if not tables_info:
         return []
@@ -515,31 +975,27 @@ def _fetch_agentic_insights(cursor, tables_info: list, db_type: str) -> list:
         schema_desc.append(f"Columns: {', '.join(t['columns'])}")
     schema_str = "\n".join(schema_desc)
     
-#     system_prompt = f"""You are an expert Data Analyst and {db_type.upper()} DBA.
-# Your task is to write EXACTLY 8 to 12 advanced SQL queries that will extract the most critical business metrics from the provided schema.
-
-# BUSINESS KPI CALCULATION LOGIC
     system_prompt = f"""You are an expert Data Analyst and {db_type.upper()} DBA.
-Your task is to write advanced SQL queries that extract the most critical business metrics from the provided schema.
+Your task is to write advanced SQL queries that extract SUPPLEMENTARY business insights
+beyond the core KPIs, which are already computed separately and provided verbatim
+elsewhere in the context (look for "VERIFIED KPI BLOCK"). Do NOT recompute Total Revenue,
+Total Quantity, Total Transactions, Top Category/Construction/Tyre Type, Top Customer,
+Top Zone/Region/Territory, Distribution %, Claims, Returns, or Target Performance —
+those are already handled. Focus instead on open-ended, exploratory angles: seasonal
+patterns, cross-category comparisons, customer-class breakdowns, SKU-level trends,
+or anything else that adds color beyond the fixed KPI set.
 
-MANDATORY COVERAGE — write ONE query for EACH of the 8 numbered sections below, in order,
-even if you also add supporting queries. Do not skip a section because it seems less
-important — a missing query is what causes that section to show "N/A" in the final report.
-After the 8 mandatory queries, you may add up to 4 more (e.g. Top-5/Bottom-5 products,
-Dealer/Fleet/OEM split) for a total of 8 to 12 queries.
-
-BUSINESS KPI CALCULATION LOGIC
-
-Always use the following joins. Several join keys have MISMATCHED COLUMN TYPES between tables
-(one side bigint/int, the other text) — always wrap the text side in CAST(... AS UNSIGNED) or
-the numeric side in CAST(... AS CHAR) so the join is explicit and doesn't rely on implicit coercion:
+Always use the following joins when you do write queries. Several join keys have
+MISMATCHED COLUMN TYPES between tables (one side bigint/int, the other text) —
+always wrap the text side in CAST(... AS UNSIGNED) or the numeric side in
+CAST(... AS CHAR) so the join is explicit and doesn't rely on implicit coercion:
 
 sales_data.customer = customer_master.KUNNR
 customer_master.acc_grp = account_group_master.KTOKD
 customer_master.class = class_master.class_code
 customer_master.territory = CAST(territory_master.territory_code AS UNSIGNED)          -- type mismatch: bigint vs text
 CAST(territory_master.region_code AS UNSIGNED) = region_master.region                    -- type mismatch: text vs bigint
-region_master.zone                                                                       -- ZONE lives here — always surface it, see RULE below
+region_master.zone
 
 sales_data.material = sku_master.MATNR
 sku_master.category = category_master.category_code
@@ -548,8 +1004,8 @@ sku_master.tyre_type = tyre_type_master.tyre_type_code
 
 sales_data.distribution__Channel = distribution_mapping.distribution_code
 sales_target.MATNR = sku_master.MATNR
-sales_target.Terr_Code = territory_master.territory_code                                 -- NEW: both text, direct match — wire this up for Target-by-Territory/Region/Zone
-DATE_FORMAT(sales_data.billing__doc_date, '%Y%m') = CAST(sales_target.Month AS CHAR)      -- NEW: required to compare Target vs Actual by month; sales_target.Month is bigint in YYYYMM form
+sales_target.Terr_Code = territory_master.territory_code
+DATE_FORMAT(sales_data.billing__doc_date, '%Y%m') = CAST(sales_target.Month AS CHAR)
 
 Never display IDs or codes. Always return descriptive names from the master tables.
 
@@ -557,77 +1013,7 @@ OPTIONAL: `report_business_mapping` (report_row, brand, tyre_type, construction,
 account_group, remarks) is available for canonical report-row/brand rollups. Only join to it
 when a query specifically needs a standardized report_row grouping — don't force it into every query.
 
-=====================================================
-1. Overall Performance
-=====================================================
-Total Revenue = SUM(sales_data.Invoice_Value_INR)
-Total Quantity = SUM(sales_data.Sales_Qty)
-Total Transactions = COUNT(*)
-Average Transaction Value = SUM(Invoice_Value_INR) / COUNT(*)
-
-=====================================================
-2. Revenue Trend
-=====================================================
-GROUP BY DATE_FORMAT(billing__doc_date, '%Y-%m')
-Highest Sales Month = month with highest SUM(Invoice_Value_INR)
-Lowest Sales Month  = month with lowest SUM(Invoice_Value_INR)
-
-=====================================================
-3. Product Performance
-=====================================================
-Join sales_data -> sku_master -> category_master -> construction_master -> tyre_type_master
-(remember the construction CAST above)
-Top Category = Category having highest SUM(Invoice_Value_INR)
-Top Construction = Construction having highest SUM(Invoice_Value_INR)
-Top Tyre Type = Tyre Type having highest SUM(Invoice_Value_INR)
-Top 5 Products = ORDER BY Revenue DESC LIMIT 5
-Bottom 5 Products = ORDER BY Revenue ASC LIMIT 5
-
-=====================================================
-4. Customer Performance
-=====================================================
-Join sales_data -> customer_master -> account_group_master
-Top Customers = Customers ranked by SUM(Invoice_Value_INR) LIMIT 5
-NOTE: If sales_data.customer has no matching row in customer_master, do NOT silently drop it
-via INNER JOIN — use LEFT JOIN and label it "Unmapped Account (<code>)" so concentration
-metrics aren't understated by excluding unmapped high-revenue codes.
-
-=====================================================
-5. Geography
-=====================================================
-Join customer_master -> territory_master -> region_master (remember the CASTs above)
-Top Zone = Zone (region_master.zone) having highest Revenue        -- ALWAYS include a zone-level query, this was previously missing
-Top Region = Region having highest Revenue
-Top Territory = Territory having highest Revenue
-
-=====================================================
-6. Distribution Analysis
-=====================================================
-Join distribution_mapping
-Group By distribution_name
-For each Distribution Channel: Revenue = SUM(Invoice_Value_INR), Quantity = SUM(Sales_Qty)
-
-=====================================================
-7. Pricing Analysis
-=====================================================
-Average Selling Price = SUM(Invoice_Value_INR) / SUM(Sales_Qty)
-Claim Quantity = SUM(Claim_Qty)
-Claim Amount = SUM(NDP_CLAIM_INR)
-Return Quantity = SUM(Return_Qty)
-
-=====================================================
-8. Target Performance
-=====================================================
-Join sales_target -> sku_master (MATNR), sales_target -> territory_master (Terr_Code),
-and correlate sales_target.Month against DATE_FORMAT(sales_data.billing__doc_date,'%Y%m')
-as shown above.
-Target = SUM(sales_target.Value) [and/or SUM(sales_target.Qty) for volume target]
-Actual = SUM(sales_data.Invoice_Value_INR) for the matching MATNR + month (+ territory if scoping by geography)
-Achievement % = Actual / Target * 100
-Gap = Actual - Target
-=====================================================
-GENERAL RULES
-=====================================================
+GENERAL RULES:
 - Always use Invoice_Value_INR for revenue calculations.
 - Always use Sales_Qty for quantity calculations.
 - Always use billing__doc_date for all date filtering (already a DATE column — no parsing needed).
@@ -639,11 +1025,11 @@ GENERAL RULES
   customer_master.Cname, region_master.zone) MUST also appear in that query's GROUP BY clause.
   Never SELECT a descriptive name column next to SUM(...)/COUNT(...) without grouping by that
   same column — doing so lets the database pick an arbitrary or NULL value for the name while
-  still summing across ALL rows, producing a single fake row like "None: ₹9,677 million" that
-  silently absorbs nearly the whole table's revenue instead of a real top product/customer/region.
-  Before finalizing each query, check: does every non-aggregate item in SELECT also appear in
-  GROUP BY? If not, fix it.
+  still summing across ALL rows, producing a single fake row that silently absorbs nearly the
+  whole table's revenue instead of a real answer. Before finalizing each query, check: does
+  every non-aggregate item in SELECT also appear in GROUP BY? If not, fix it.
 - Generate optimized MySQL 8+ queries.
+- Write 4 to 8 queries total (fewer than before, since core KPIs are already covered elsewhere).
 
 Respond ONLY with a valid JSON array of strings containing the SQL queries."""
 
@@ -660,25 +1046,7 @@ Respond ONLY with a valid JSON array of strings containing the SQL queries."""
         queries = json.loads(content_str)
         if not isinstance(queries, list):
             return insights
-            
-    #     for i, query in enumerate(queries, 1):
-    #         query = query.strip()
-    #         if not query.lower().startswith("select"):
-    #             continue
-    #         try:
-    #             cursor.execute(query)
-    #             rows = cursor.fetchall()
-    #             if rows:
-    #                 insights.append(f"--- Insight Query {i} ---")
-    #                 insights.append(f"Query: {query}")
-    #                 for row in rows:
-    #                     row_str = " | ".join(f"{k}: {v}" for k, v in row.items())
-    #                     insights.append(f"  {row_str}")
-    #         except Exception as e:
-    #             print(f"[Agentic Helper] Query failed: {query}. Error: {e}")
-                
-    # except Exception as e:
-    #     print(f"[Agentic Helper] LLM call failed: {e}")
+
         BLOCKED_KEYWORDS = ("into outfile", "into dumpfile", "load_file", "load data")
 
         for i, query in enumerate(queries, 1):
@@ -799,7 +1167,10 @@ def _fetch_db_data(session_id: str, databases: list, conn) -> list:
                 except Exception as table_error:
                     print(f"[Analysis] MySQL table {t} error -> {table_error}")
             
-            # [NEW] Fetch agentic insights
+            # [NEW] Deterministic core KPIs — computed first, always the same
+            db_result["core_kpis"] = _compute_core_kpis(ext_cur)
+
+            # Supplementary/exploratory LLM-generated insights
             db_result["executed_insights"] = _fetch_agentic_insights(ext_cur, db_result["tables"], "mysql")
 
         except Exception as db_error:
@@ -922,7 +1293,11 @@ def _fetch_db_data(session_id: str, databases: list, conn) -> list:
                             print(f"[Analysis] PG skip {qualified}: {te}")
                             pg_conn.rollback()
 
-                # [NEW] Execute Agentic Workflow
+                # NOTE: _compute_core_kpis above is written in MySQL dialect
+                # (DATE_FORMAT, CAST(...AS UNSIGNED), MONTHNAME, backtick-quoted
+                # tables). It is NOT wired in here for PostgreSQL — doing so
+                # would need TO_CHAR/::integer equivalents first. Left as
+                # LLM-generated insights only for the PG path for now.
                 db_result["executed_insights"] = _fetch_agentic_insights(pg_cur, db_result["tables"], "postgresql")
 
                 results.append(db_result)
@@ -949,6 +1324,19 @@ def _fetch_db_data(session_id: str, databases: list, conn) -> list:
 def _build_context(web_data: list, db_data: list) -> str:
     parts = []
 
+    # [NEW] Verified KPI block goes first — deterministic, never truncated
+    # away, and explicitly labeled so the report LLM knows to copy these
+    # numbers rather than recompute or estimate them.
+    for d in db_data:
+        if d.get("core_kpis"):
+            kpi_lines = ["=== VERIFIED KPI BLOCK (exact, pre-computed — copy these numbers, do not recompute) ==="]
+            for name, rows in d["core_kpis"].items():
+                if rows:
+                    kpi_lines.append(f"{name}: {rows}")
+                else:
+                    kpi_lines.append(f"{name}: no data available")
+            parts.append("\n".join(kpi_lines))
+
     for w in web_data:
         lines = [f"=== WEB TOPIC: {w['topic']} ({w['result_count']} results) ==="]
         for item in w["items"]:
@@ -971,7 +1359,7 @@ def _build_context(web_data: list, db_data: list) -> str:
             lines.append(f"  Columns: {', '.join(tbl['columns'])}")
                 
         if d.get("executed_insights"):
-            lines.append("\n=== CRITICAL EXECUTED INSIGHTS ===")
+            lines.append("\n=== SUPPLEMENTARY EXECUTED INSIGHTS (exploratory only — do not use these for core KPIs already in the VERIFIED KPI BLOCK) ===")
             lines.extend(d["executed_insights"])
             
         parts.append("\n".join(lines))
@@ -991,7 +1379,6 @@ def _call_mistral(context: str, topics: list, databases: list) -> dict:
     if topics:    source_desc.append(f"web topics: {', '.join(topics)}")
     if databases: source_desc.append(f"databases: {', '.join(databases)}")
 
-    # system = """ IQ200 You are an expert business analyst and strategist.
     system = """You are an expert business analyst and strategist.
 Your task is to analyze the provided sales data of different types of tyres, tubes, Ret read Belt, Vul Solutions, flap  and extract purely business-focused insights and context.
 CRITICAL INSTRUCTIONS:
@@ -1003,6 +1390,7 @@ CRITICAL INSTRUCTIONS:
 6. Use Descriptive Names: ALWAYS map and use descriptive names instead of raw IDs or codes (e.g., use category_name instead of category_code, customer Cname instead of KUNNR, region_name instead of region_code). Raw IDs make the report difficult to read for business users.
 7. Date Formatting: The 'Month' column or any period formatted as YYYYMM (e.g., 202601, 202512) must be translated into readable month names (e.g., 'January 2026', 'December 2025') in your report.
 8. Respond ONLY in valid JSON with a single key: "report".
+9. If a "VERIFIED KPI BLOCK" appears in the data, those numbers are pre-computed and exact — copy them into the report verbatim. Do NOT recompute, re-derive, estimate, or override them using anything from the "SUPPLEMENTARY EXECUTED INSIGHTS" section. The supplementary insights are for color/context only (e.g. the Executive Summary, Business Risks, Actionable Recommendations) — never for the numeric fields already present in the VERIFIED KPI BLOCK.
 """
 
     user = f"""
@@ -1100,7 +1488,7 @@ def session_analysis_controller(get_connection_func):
             return jsonify({
                 "status":     "no_data",
                 "statusCode": 200,
-                "message":    "আপনার ডাটাবেসে কোনো টেবিল বা ডেটা নেই, দয়া করে আগে ডেটা আপলোড করুন।"
+                "message":    "আপনার ডাটাবেসে কোনো টেবিল বা ডেটা নেই, দয়া করে আগে ডেটা আপলোড করুন।"
             }), 200
 
 
@@ -1139,16 +1527,6 @@ def session_analysis_controller(get_connection_func):
                 "graph_url":  cached["graph_url"],
             }), 200
 
-        # # 5. Cache MISS or STALE — generate fresh
-        # analysis  = _call_mistral(context, topics, databases)
-        # graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db)
-
-        # if not analysis:
-        #     return jsonify({
-        #         "status":     "partial",
-        #         "statusCode": 200,
-        #         "message":    "LLM analysis failed.",
-        #     }), 200
         # 5. Cache MISS or STALE — generate fresh
         analysis  = _call_mistral(context, topics, databases)
         graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db)
