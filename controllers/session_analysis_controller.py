@@ -507,29 +507,96 @@ def _fetch_agentic_insights(cursor, tables_info: list, db_type: str) -> list:
     schema_str = "\n".join(schema_desc)
     
     system_prompt = f"""You are an expert Data Analyst and {db_type.upper()} DBA.
-Your task is to write EXACTLY 6 to 8 advanced SQL queries that will extract the most critical business metrics from the provided schema.
+Your task is to write EXACTLY 8 to 12 advanced SQL queries that will extract the most critical business metrics from the provided schema.
 
-KNOWN SCHEMA RELATIONSHIPS (Use these EXACT foreign keys for JOINs):
-- sales_data.customer = customer_master.KUNNR
-- sales_data.material = sku_master.MATNR
-- sales_data.distribution__Channel = distribution_mapping.distribution_code
-- customer_master.acc_grp = account_group_master.KTOKD
-- customer_master.class = class_master.class_code
-- customer_master.territory = territory_master.territory_code
-- territory_master.region_code = region_master.region
-- sku_master.category = category_master.category_code
-- sku_master.construction = construction_master.construction_code
-- sku_master.tyre_type = tyre_type_master.tyre_type_code
-- sales_target.MATNR = sku_master.MATNR
+BUSINESS KPI CALCULATION LOGIC
 
-CRITICAL INSTRUCTIONS:
-1. Must be valid {db_type.upper()} SELECT statements.
-2. Query 1 MUST be a Grand Total query returning overall sums and counts (e.g., Total Revenue, Total Quantity, Total Transactions, Total Customers across the entire dataset without any LIMIT or GROUP BY).
-3. Query 2 MUST group by Month/Year to find the HIGHEST and LOWEST sales months.
-4. The remaining queries MUST use INNER JOIN or LEFT JOIN to connect the fact tables with the master tables to find the Top 5 Drivers (e.g., Top 5 Products by Revenue, Top 5 Customers, Top 5 Territories/Regions, Top Distribution Channels).
-5. You MUST include a query for Target vs Actual Performance by joining the sales_target table (if it exists).
-6. You MUST include GROUP BY and ORDER BY DESC, and you MUST include LIMIT 5 for the driver queries.
-7. Do NOT write simple SELECT *. Every query must aggregate or join data.
+Always use the following joins:
+sales_data.customer = customer_master.KUNNR
+customer_master.acc_grp = account_group_master.KTOKD
+customer_master.class = class_master.class_code
+customer_master.territory = territory_master.territory_code
+territory_master.region_code = region_master.region
+
+sales_data.material = sku_master.MATNR
+sku_master.category = category_master.category_code
+sku_master.construction = construction_master.construction_code
+sku_master.tyre_type = tyre_type_master.tyre_type_code
+
+sales_data.distribution__Channel = distribution_mapping.distribution_code
+sales_target.MATNR = sku_master.MATNR
+
+Never display IDs or codes. Always return descriptive names from the master tables.
+
+=====================================================
+1. Overall Performance
+=====================================================
+Total Revenue = SUM(sales_data.Invoice_Value_INR)
+Total Quantity = SUM(sales_data.Sales_Qty)
+Total Transactions = COUNT(*)
+Average Transaction Value = SUM(Invoice_Value_INR) / COUNT(*)
+
+=====================================================
+2. Revenue Trend
+=====================================================
+Highest Sales Month = GROUP BY YEAR, MONTH, Return the month having highest SUM(Invoice_Value_INR).
+Lowest Sales Month = Month having lowest SUM(Invoice_Value_INR).
+
+=====================================================
+3. Product Performance
+=====================================================
+Join sales_data -> sku_master -> category_master -> construction_master -> tyre_type_master
+Top Category = Category having highest SUM(Invoice_Value_INR)
+Top Construction = Construction having highest SUM(Invoice_Value_INR)
+Top Tyre Type = Tyre Type having highest SUM(Invoice_Value_INR)
+Top 5 Products = ORDER BY Revenue DESC LIMIT 5
+Bottom 5 Products = ORDER BY Revenue ASC LIMIT 5
+
+=====================================================
+4. Customer Performance
+=====================================================
+Join sales_data -> customer_master -> account_group_master
+Top Customers = Customers ranked by SUM(Invoice_Value_INR) LIMIT 5
+
+=====================================================
+5. Geography
+=====================================================
+Join customer_master -> territory_master -> region_master
+Top Region = Region having highest Revenue
+Top Territory = Territory having highest Revenue
+
+=====================================================
+6. Distribution Analysis
+=====================================================
+Join distribution_mapping
+Group By distribution_name
+For each Distribution Channel: Revenue = SUM(Invoice_Value_INR), Quantity = SUM(Sales_Qty)
+
+=====================================================
+7. Pricing Analysis
+=====================================================
+Average Selling Price = SUM(Invoice_Value_INR) / SUM(Sales_Qty)
+Claim Quantity = SUM(Claim_Qty)
+Claim Amount = SUM(NDP_CLAIM_INR)
+Return Quantity = SUM(Return_Qty)
+
+=====================================================
+8. Target Performance
+=====================================================
+Join sales_target -> sku_master
+Target = SUM(Target Quantity or Target Value)
+Actual = SUM(Invoice_Value_INR)
+
+=====================================================
+GENERAL RULES
+=====================================================
+• Always use Invoice_Value_INR for revenue calculations.
+• Always use Sales_Qty for quantity calculations.
+• Always use billing__doc_date for all date filtering.
+• Always return names from master tables instead of IDs.
+• Use COALESCE() for NULL handling.
+• Generate optimized MySQL 8+ queries.
+
 Respond ONLY with a valid JSON array of strings containing the SQL queries."""
 
     user_prompt = f"Schema:\n{schema_str}\nGenerate the JSON array of queries."
