@@ -495,19 +495,27 @@ def _fetch_web_data(session_id: str, topics: list, conn) -> list:
 # ══════════════════════════════════════════════════════
 # HARDCODED CORE KPIs — deterministic, no LLM involved
 # ══════════════════════════════════════════════════════
-
 def _compute_core_kpis(cursor) -> dict:
     """
     Runs the fixed set of core business KPIs directly — same query every
-    time, using the validated LEFT JOIN + CAST + COALESCE logic. No LLM
-    writes these queries, so these numbers can't drift, hallucinate, or
-    vary run-to-run. Returns a dict of {kpi_name: rows}. Any query that
-    fails (e.g. a table/column genuinely missing) is caught individually
-    so one failure doesn't take down the rest.
+    time. No LLM writes these queries, so they can't drift or hallucinate.
+    Each query group first checks whether its required tables actually
+    exist for this session's database — if not, it's marked distinctly
+    as "missing table" rather than a generic failure, so it's clear at
+    a glance whether a blank field means "no data synced" or "real bug."
     """
     kpis = {}
 
-    def run(label, sql):
+    cursor.execute("SHOW TABLES")
+    existing_tables = {list(row.values())[0].lower() for row in cursor.fetchall()}
+
+    def run(label, sql, required_tables=None):
+        if required_tables:
+            missing = [t for t in required_tables if t.lower() not in existing_tables]
+            if missing:
+                print(f"[CoreKPI] '{label}' skipped — missing table(s): {missing}")
+                kpis[label] = None
+                return
         try:
             cursor.execute(sql)
             kpis[label] = cursor.fetchall()
@@ -519,27 +527,27 @@ def _compute_core_kpis(cursor) -> dict:
     run("total_revenue", """
         SELECT ROUND(SUM(sd.Invoice_Value_INR),2) AS Total_Revenue
         FROM sales_data sd
-    """)
+    """, required_tables=["sales_data"])
 
     run("total_quantity", """
         SELECT ROUND(SUM(sd.Sales_Qty),2) AS Total_Quantity
         FROM sales_data sd
-    """)
+    """, required_tables=["sales_data"])
 
     run("total_transactions", """
         SELECT COUNT(*) AS Total_Transactions
         FROM sales_data sd
-    """)
+    """, required_tables=["sales_data"])
 
     run("avg_transaction_value", """
         SELECT ROUND(SUM(sd.Invoice_Value_INR)/COUNT(*),2) AS Average_Transaction_Value
         FROM sales_data sd
-    """)
+    """, required_tables=["sales_data"])
 
     run("avg_selling_price", """
         SELECT ROUND(SUM(sd.Invoice_Value_INR)/NULLIF(SUM(sd.Sales_Qty),0),2) AS Average_Selling_Price
         FROM sales_data sd
-    """)
+    """, required_tables=["sales_data"])
 
     # ---------- 2. Revenue Trend ----------
     run("highest_sales_month", """
@@ -550,12 +558,10 @@ def _compute_core_kpis(cursor) -> dict:
         FROM sales_data sd
         WHERE sd.billing__doc_date IS NOT NULL
         GROUP BY
-            YEAR(sd.billing__doc_date),
-            MONTH(sd.billing__doc_date),
-            MONTHNAME(sd.billing__doc_date)
+            YEAR(sd.billing__doc_date), MONTH(sd.billing__doc_date), MONTHNAME(sd.billing__doc_date)
         ORDER BY Revenue DESC
         LIMIT 1
-    """)
+    """, required_tables=["sales_data"])
 
     run("lowest_sales_month", """
         SELECT
@@ -565,12 +571,10 @@ def _compute_core_kpis(cursor) -> dict:
         FROM sales_data sd
         WHERE sd.billing__doc_date IS NOT NULL
         GROUP BY
-            YEAR(sd.billing__doc_date),
-            MONTH(sd.billing__doc_date),
-            MONTHNAME(sd.billing__doc_date)
+            YEAR(sd.billing__doc_date), MONTH(sd.billing__doc_date), MONTHNAME(sd.billing__doc_date)
         ORDER BY Revenue ASC
         LIMIT 1
-    """)
+    """, required_tables=["sales_data"])
 
     run("mom_growth", """
         WITH MonthlyRevenue AS (
@@ -582,13 +586,10 @@ def _compute_core_kpis(cursor) -> dict:
             FROM sales_data sd
             WHERE sd.billing__doc_date IS NOT NULL
             GROUP BY
-                YEAR(sd.billing__doc_date),
-                MONTH(sd.billing__doc_date),
-                MONTHNAME(sd.billing__doc_date)
+                YEAR(sd.billing__doc_date), MONTH(sd.billing__doc_date), MONTHNAME(sd.billing__doc_date)
         )
         SELECT
-            Sales_Year,
-            Month_Name,
+            Sales_Year, Month_Name,
             ROUND(Revenue,2) AS Current_Revenue,
             ROUND(LAG(Revenue) OVER(ORDER BY Sales_Year, Sales_Month),2) AS Previous_Revenue,
             ROUND(
@@ -597,12 +598,9 @@ def _compute_core_kpis(cursor) -> dict:
             ,2) AS MoM_Growth_Percentage
         FROM MonthlyRevenue
         ORDER BY Sales_Year, Sales_Month
-    """)
+    """, required_tables=["sales_data"])
 
     # ---------- 3. Product Performance ----------
-    # LEFT JOIN throughout — ~1.4% of materials have no sku_master match;
-    # don't silently drop that revenue. CAST added on construction join —
-    # construction_master has mixed numeric/alpha codes.
     run("top_category", """
         SELECT
             COALESCE(cat.category_name, 'Unmapped Category') AS category_name,
@@ -613,7 +611,7 @@ def _compute_core_kpis(cursor) -> dict:
         GROUP BY category_name
         ORDER BY Revenue DESC
         LIMIT 1
-    """)
+    """, required_tables=["sales_data", "sku_master", "category_master"])
 
     run("lowest_category", """
         SELECT
@@ -625,8 +623,12 @@ def _compute_core_kpis(cursor) -> dict:
         GROUP BY category_name
         ORDER BY Revenue ASC
         LIMIT 1
-    """)
+    """, required_tables=["sales_data", "sku_master", "category_master"])
 
+    # NOTE: CAST direction flipped — casting the bigint side to CHAR is
+    # always safe; casting a text column to UNSIGNED silently coerces any
+    # non-purely-numeric value to 0 and fails to match, worsening unmapped
+    # rates for reasons that aren't a real data gap.
     run("top_construction", """
         SELECT
             COALESCE(cons.construction_description, 'Unmapped Construction') AS construction_description,
@@ -634,11 +636,11 @@ def _compute_core_kpis(cursor) -> dict:
         FROM sales_data sd
         LEFT JOIN sku_master sk ON sd.material = sk.MATNR
         LEFT JOIN construction_master cons
-            ON sk.construction = CAST(cons.construction_code AS UNSIGNED)
+            ON CAST(sk.construction AS CHAR) = cons.construction_code
         GROUP BY construction_description
         ORDER BY Revenue DESC
         LIMIT 1
-    """)
+    """, required_tables=["sales_data", "sku_master", "construction_master"])
 
     run("top_tyre_type", """
         SELECT
@@ -650,7 +652,7 @@ def _compute_core_kpis(cursor) -> dict:
         GROUP BY tyre_type_name
         ORDER BY Revenue DESC
         LIMIT 1
-    """)
+    """, required_tables=["sales_data", "sku_master", "tyre_type_master"])
 
     run("top_5_products", """
         SELECT
@@ -661,23 +663,19 @@ def _compute_core_kpis(cursor) -> dict:
         GROUP BY product_name
         ORDER BY Revenue DESC
         LIMIT 5
-    """)
+    """, required_tables=["sales_data", "sku_master"])
 
     run("bottom_5_products", """
-        SELECT
-            sk.MAKTX AS product_name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        SELECT sk.MAKTX AS product_name, ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
         LEFT JOIN sku_master sk ON sd.material = sk.MATNR
         WHERE sk.MAKTX IS NOT NULL
         GROUP BY sk.MAKTX
         ORDER BY Revenue ASC
         LIMIT 5
-    """)
+    """, required_tables=["sales_data", "sku_master"])
 
     # ---------- 4. Customer Performance ----------
-    # LEFT JOIN — confirmed top revenue customer codes (~18% of total
-    # revenue) have NO row in customer_master. INNER JOIN silently drops them.
     run("top_customer", """
         SELECT
             COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Customer_Name,
@@ -687,7 +685,7 @@ def _compute_core_kpis(cursor) -> dict:
         GROUP BY Customer_Name
         ORDER BY Revenue DESC
         LIMIT 1
-    """)
+    """, required_tables=["sales_data", "customer_master"])
 
     run("top_5_customers", """
         SELECT
@@ -698,7 +696,7 @@ def _compute_core_kpis(cursor) -> dict:
         GROUP BY Customer_Name
         ORDER BY Revenue DESC
         LIMIT 5
-    """)
+    """, required_tables=["sales_data", "customer_master"])
 
     run("top_dealers", """
         SELECT
@@ -710,60 +708,64 @@ def _compute_core_kpis(cursor) -> dict:
         WHERE ag.account_group_name = 'Dealer'
         GROUP BY Dealer_Name
         ORDER BY Revenue DESC
-    """)
+    """, required_tables=["sales_data", "customer_master", "account_group_master"])
 
     run("dealer_contribution_pct", """
-        SELECT
-            ROUND(
-                SUM(sd.Invoice_Value_INR) * 100 /
-                (SELECT SUM(Invoice_Value_INR) FROM sales_data),
-            2) AS Dealer_Contribution_Percentage
+        SELECT ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Dealer_Contribution_Percentage
         FROM sales_data sd
         LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
         LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
         WHERE ag.account_group_name = 'Dealer'
-    """)
+    """, required_tables=["sales_data", "customer_master", "account_group_master"])
+
+    # [NEW] Fleet Contribution % — was entirely missing before
+    run("fleet_contribution_pct", """
+        SELECT ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Fleet_Contribution_Percentage
+        FROM sales_data sd
+        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
+        WHERE ag.account_group_name = 'Fleet'
+    """, required_tables=["sales_data", "customer_master", "account_group_master"])
+
+    # [NEW] OEM Contribution % — was entirely missing before
+    run("oem_contribution_pct", """
+        SELECT ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS OEM_Contribution_Percentage
+        FROM sales_data sd
+        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+        LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
+        WHERE ag.account_group_name = 'OEM'
+    """, required_tables=["sales_data", "customer_master", "account_group_master"])
 
     run("customer_concentration", """
         SELECT
             COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Customer_Name,
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
-            ROUND(
-                SUM(sd.Invoice_Value_INR) * 100 /
-                (SELECT SUM(Invoice_Value_INR) FROM sales_data),
-            2) AS Contribution_Percentage
+            ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Contribution_Percentage
         FROM sales_data sd
         LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
         GROUP BY Customer_Name
         ORDER BY Contribution_Percentage DESC
         LIMIT 10
-    """)
+    """, required_tables=["sales_data", "customer_master"])
 
-    # ---------- 5. Geography ----------
-    # LEFT JOIN + CAST throughout — customer_master.territory is bigint vs
-    # territory_master.territory_code text; territory_master.region_code is
-    # text vs region_master.region bigint.
+    # ---------- 5. Geography (CAST direction flipped, see note above) ----------
     run("top_zone", """
         SELECT
             CASE COALESCE(rm.zone, 'UNMAPPED')
-                WHEN 'EZ' THEN 'East Zone'
-                WHEN 'WZ' THEN 'West Zone'
-                WHEN 'NZ' THEN 'North Zone'
-                WHEN 'SZ' THEN 'South Zone I'
-                WHEN 'TZ' THEN 'South Zone II'
-                WHEN 'CZ' THEN 'Central Zone'
-                WHEN 'NP' THEN 'Nepal'
-                ELSE 'Unmapped Zone'
+                WHEN 'EZ' THEN 'East Zone' WHEN 'WZ' THEN 'West Zone'
+                WHEN 'NZ' THEN 'North Zone' WHEN 'SZ' THEN 'South Zone I'
+                WHEN 'TZ' THEN 'South Zone II' WHEN 'CZ' THEN 'Central Zone'
+                WHEN 'NP' THEN 'Nepal' ELSE 'Unmapped Zone'
             END AS Zone,
             ROUND(SUM(sd.Invoice_Value_INR), 2) AS Revenue
         FROM sales_data sd
         LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
-        LEFT JOIN region_master rm ON CAST(tm.region_code AS UNSIGNED) = rm.region
+        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
+        LEFT JOIN region_master rm ON tm.region_code = CAST(rm.region AS CHAR)
         GROUP BY rm.zone
         ORDER BY Revenue DESC
         LIMIT 1
-    """)
+    """, required_tables=["sales_data", "customer_master", "territory_master", "region_master"])
 
     run("top_region", """
         SELECT
@@ -771,12 +773,12 @@ def _compute_core_kpis(cursor) -> dict:
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
         LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
-        LEFT JOIN region_master rm ON CAST(tm.region_code AS UNSIGNED) = rm.region
+        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
+        LEFT JOIN region_master rm ON tm.region_code = CAST(rm.region AS CHAR)
         GROUP BY region_name
         ORDER BY Revenue DESC
         LIMIT 1
-    """)
+    """, required_tables=["sales_data", "customer_master", "territory_master", "region_master"])
 
     run("top_territory", """
         SELECT
@@ -784,11 +786,11 @@ def _compute_core_kpis(cursor) -> dict:
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
         LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
+        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
         GROUP BY territory_name
         ORDER BY Revenue DESC
         LIMIT 1
-    """)
+    """, required_tables=["sales_data", "customer_master", "territory_master"])
 
     run("lowest_territory", """
         SELECT
@@ -796,12 +798,12 @@ def _compute_core_kpis(cursor) -> dict:
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
         LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
+        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
         WHERE tm.territory_name IS NOT NULL
         GROUP BY territory_name
         ORDER BY Revenue ASC
         LIMIT 1
-    """)
+    """, required_tables=["sales_data", "customer_master", "territory_master"])
 
     run("revenue_by_region", """
         SELECT
@@ -810,11 +812,11 @@ def _compute_core_kpis(cursor) -> dict:
             ROUND(SUM(sd.Sales_Qty),2) AS Quantity
         FROM sales_data sd
         LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
-        LEFT JOIN region_master rm ON CAST(tm.region_code AS UNSIGNED) = rm.region
+        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
+        LEFT JOIN region_master rm ON tm.region_code = CAST(rm.region AS CHAR)
         GROUP BY region_name
         ORDER BY Revenue DESC
-    """)
+    """, required_tables=["sales_data", "customer_master", "territory_master", "region_master"])
 
     run("revenue_by_territory", """
         SELECT
@@ -823,74 +825,66 @@ def _compute_core_kpis(cursor) -> dict:
             ROUND(SUM(sd.Sales_Qty),2) AS Quantity
         FROM sales_data sd
         LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
+        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
         GROUP BY territory_name
         ORDER BY Revenue DESC
-    """)
+    """, required_tables=["sales_data", "customer_master", "territory_master"])
 
     run("region_contribution_pct", """
         SELECT
             COALESCE(rm.region_name, 'Unmapped Region') AS region_name,
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
-            ROUND(
-                SUM(sd.Invoice_Value_INR) * 100 /
-                (SELECT SUM(Invoice_Value_INR) FROM sales_data),
-            2) AS Contribution_Percentage
+            ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Contribution_Percentage
         FROM sales_data sd
         LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
-        LEFT JOIN region_master rm ON CAST(tm.region_code AS UNSIGNED) = rm.region
+        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
+        LEFT JOIN region_master rm ON tm.region_code = CAST(rm.region AS CHAR)
         GROUP BY region_name
         ORDER BY Revenue DESC
-    """)
+    """, required_tables=["sales_data", "customer_master", "territory_master", "region_master"])
 
     # ---------- 6. Distribution Analysis ----------
-    # sales_data.distribution__Channel and distribution_mapping.distribution_code
-    # are already the same type — no CAST needed. LEFT JOIN kept for safety.
     run("distribution_revenue", """
-        SELECT
-            COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        SELECT COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name, ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
         LEFT JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
         GROUP BY distribution_name
         ORDER BY Revenue DESC
-    """)
+    """, required_tables=["sales_data", "distribution_mapping"])
 
     run("distribution_quantity", """
-        SELECT
-            COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name,
-            ROUND(SUM(sd.Sales_Qty),2) AS Quantity
+        SELECT COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name, ROUND(SUM(sd.Sales_Qty),2) AS Quantity
         FROM sales_data sd
         LEFT JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
         GROUP BY distribution_name
         ORDER BY Quantity DESC
-    """)
+    """, required_tables=["sales_data", "distribution_mapping"])
 
     run("distribution_contribution_pct", """
         SELECT
             COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name,
             ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
-            ROUND(
-                SUM(sd.Invoice_Value_INR) * 100 /
-                (SELECT SUM(Invoice_Value_INR) FROM sales_data),
-            2) AS Contribution_Percentage
+            ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Contribution_Percentage
         FROM sales_data sd
         LEFT JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
         GROUP BY distribution_name
         ORDER BY Revenue DESC
-    """)
+    """, required_tables=["sales_data", "distribution_mapping"])
 
     # ---------- 7. Pricing Analysis ----------
     run("pricing", """
         SELECT
-            SUM(Claim_Qty)          AS Claim_Quantity,
-            ROUND(SUM(NDP_CLAIM_INR),2)     AS Claim_Amount,
-            SUM(Return_Qty)         AS Return_Quantity,
-            ROUND(SUM(NDP_RETURN_INR),2)    AS Return_Amount,
-            ROUND(SUM(Total_Discount_INR),2) AS Total_Discount
+            SUM(Claim_Qty)                   AS claims_quantity,
+            ROUND(SUM(NDP_CLAIM_INR),2)       AS claims_amount,
+            SUM(Return_Qty)                  AS returns_quantity,
+            ROUND(SUM(NDP_RETURN_INR),2)      AS returns_amount,
+            ROUND(SUM(Total_Discount_INR),2)  AS discount_amount,
+            ROUND(
+                ABS(SUM(Total_Discount_INR)) * 100 /
+                NULLIF((SELECT SUM(Invoice_Value_INR) FROM sales_data), 0)
+            , 2) AS discount_percentage
         FROM sales_data
-    """)
+    """, required_tables=["sales_data"])
 
     # ---------- 8. Target Performance ----------
     run("target_vs_actual", """
@@ -902,57 +896,43 @@ def _compute_core_kpis(cursor) -> dict:
                 WHERE DATE_FORMAT(sd.billing__doc_date, '%Y%m') = CAST(st.Month AS CHAR)
             ) AS Actual_Value
         FROM sales_target st
-    """)
+    """, required_tables=["sales_data", "sales_target"])
 
     # ---------- 9. Business Risks ----------
     run("high_customer_dependency", """
         SELECT
-            CASE
-                WHEN (
-                    SELECT SUM(Revenue) FROM (
-                        SELECT SUM(sd.Invoice_Value_INR) AS Revenue
-                        FROM sales_data sd
-                        GROUP BY sd.customer
-                        ORDER BY Revenue DESC
-                        LIMIT 10
-                    ) t
-                ) > (SELECT SUM(Invoice_Value_INR)*0.50 FROM sales_data)
-                THEN 'High Customer Dependency'
-                ELSE 'Normal'
-            END AS Risk_Status
-    """)
+            CASE WHEN (
+                SELECT SUM(Revenue) FROM (
+                    SELECT SUM(sd.Invoice_Value_INR) AS Revenue FROM sales_data sd
+                    GROUP BY sd.customer ORDER BY Revenue DESC LIMIT 10
+                ) t
+            ) > (SELECT SUM(Invoice_Value_INR)*0.50 FROM sales_data)
+            THEN 'High Customer Dependency' ELSE 'Normal' END AS Risk_Status
+    """, required_tables=["sales_data"])
 
     run("high_dealer_dependency", """
         SELECT
-            CASE
-                WHEN (
-                    SELECT SUM(sd.Invoice_Value_INR)
-                    FROM sales_data sd
-                    LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-                    LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
-                    WHERE ag.account_group_name = 'Dealer'
-                ) > (SELECT SUM(Invoice_Value_INR)*0.60 FROM sales_data)
-                THEN 'High Dealer Dependency'
-                ELSE 'Normal'
-            END AS Risk_Status
-    """)
+            CASE WHEN (
+                SELECT SUM(sd.Invoice_Value_INR) FROM sales_data sd
+                LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
+                LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
+                WHERE ag.account_group_name = 'Dealer'
+            ) > (SELECT SUM(Invoice_Value_INR)*0.60 FROM sales_data)
+            THEN 'High Dealer Dependency' ELSE 'Normal' END AS Risk_Status
+    """, required_tables=["sales_data", "customer_master", "account_group_master"])
 
     run("weak_territory", """
-        SELECT
-            COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        SELECT COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name, ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
         FROM sales_data sd
         LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON cm.territory = CAST(tm.territory_code AS UNSIGNED)
+        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
         WHERE tm.territory_name IS NOT NULL
         GROUP BY territory_name
         ORDER BY Revenue ASC
         LIMIT 10
-    """)
+    """, required_tables=["sales_data", "customer_master", "territory_master"])
 
     return kpis
-
-
 def _fetch_agentic_insights(cursor, tables_info: list, db_type: str) -> list:
     """
     Agentic Workflow:
@@ -1391,6 +1371,7 @@ CRITICAL INSTRUCTIONS:
 7. Date Formatting: The 'Month' column or any period formatted as YYYYMM (e.g., 202601, 202512) must be translated into readable month names (e.g., 'January 2026', 'December 2025') in your report.
 8. Respond ONLY in valid JSON with a single key: "report".
 9. If a "VERIFIED KPI BLOCK" appears in the data, those numbers are pre-computed and exact — copy them into the report verbatim. Do NOT recompute, re-derive, estimate, or override them using anything from the "SUPPLEMENTARY EXECUTED INSIGHTS" section. The supplementary insights are for color/context only (e.g. the Executive Summary, Business Risks, Actionable Recommendations) — never for the numeric fields already present in the VERIFIED KPI BLOCK.
+10. In the VERIFIED KPI BLOCK, map these field names directly to report labels: claims_amount → "Claims", returns_amount → "Returns", discount_percentage → "Discount %", fleet_contribution_pct → "Fleet Contribution", oem_contribution_pct → "OEM Contribution". These are ready-to-use — copy them, do not compute.
 """
 
     user = f"""
