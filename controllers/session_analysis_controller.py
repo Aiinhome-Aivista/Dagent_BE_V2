@@ -29,7 +29,12 @@ from database.config import (
 
 MISTRAL_URL   = "https://api.mistral.ai/v1/chat/completions"
 MAX_ROWS      = 100
-MAX_CTX_CHARS = 24000
+# [CHANGED] 24000 -> 80000. The deterministic VERIFIED KPI BLOCK is now
+# larger and far more important to protect than the old free-form LLM
+# insights it replaced — truncation here silently drops Geography/
+# Distribution/Pricing/Target sections (they're appended after Overall/
+# Product/Customer in the dict, so they're first to get cut).
+MAX_CTX_CHARS = 80000
 
 
 # ══════════════════════════════════════════════════════
@@ -503,6 +508,12 @@ def _compute_core_kpis(cursor) -> dict:
     exist for this session's database — if not, it's marked distinctly
     as "missing table" rather than a generic failure, so it's clear at
     a glance whether a blank field means "no data synced" or "real bug."
+
+    NOTE on units: every monetary value here is returned as a PLAIN raw
+    rupee figure (e.g. 9950380810.30). The report-writing LLM is instructed
+    (see _call_mistral, rule #11) to display these as-is with commas and a
+    ₹ symbol — NEVER to convert to crore/million/lakh itself, since that
+    conversion is arithmetic the LLM has previously gotten wrong by 10x.
     """
     kpis = {}
 
@@ -576,7 +587,12 @@ def _compute_core_kpis(cursor) -> dict:
         LIMIT 1
     """, required_tables=["sales_data"])
 
-    run("mom_growth", """
+    # [CHANGED] mom_growth used to return one row per month (potentially
+    # 18+ rows) — bloating the context for a field the template only wants
+    # as a single summary line ("Monthly Growth: <Value>"). Replaced with
+    # two single-row queries: the single highest and single lowest growth
+    # month, which is exactly what past reports actually quoted anyway.
+    run("highest_growth_month", """
         WITH MonthlyRevenue AS (
             SELECT
                 YEAR(sd.billing__doc_date) AS Sales_Year,
@@ -587,17 +603,49 @@ def _compute_core_kpis(cursor) -> dict:
             WHERE sd.billing__doc_date IS NOT NULL
             GROUP BY
                 YEAR(sd.billing__doc_date), MONTH(sd.billing__doc_date), MONTHNAME(sd.billing__doc_date)
+        ),
+        Growth AS (
+            SELECT
+                Sales_Year, Month_Name,
+                ROUND(Revenue,2) AS Current_Revenue,
+                ROUND(
+                    (Revenue - LAG(Revenue) OVER(ORDER BY Sales_Year, Sales_Month))
+                    / NULLIF(LAG(Revenue) OVER(ORDER BY Sales_Year, Sales_Month),0) * 100
+                ,2) AS MoM_Growth_Percentage
+            FROM MonthlyRevenue
         )
-        SELECT
-            Sales_Year, Month_Name,
-            ROUND(Revenue,2) AS Current_Revenue,
-            ROUND(LAG(Revenue) OVER(ORDER BY Sales_Year, Sales_Month),2) AS Previous_Revenue,
-            ROUND(
-                (Revenue - LAG(Revenue) OVER(ORDER BY Sales_Year, Sales_Month))
-                / NULLIF(LAG(Revenue) OVER(ORDER BY Sales_Year, Sales_Month),0) * 100
-            ,2) AS MoM_Growth_Percentage
-        FROM MonthlyRevenue
-        ORDER BY Sales_Year, Sales_Month
+        SELECT * FROM Growth
+        WHERE MoM_Growth_Percentage IS NOT NULL
+        ORDER BY MoM_Growth_Percentage DESC
+        LIMIT 1
+    """, required_tables=["sales_data"])
+
+    run("lowest_growth_month", """
+        WITH MonthlyRevenue AS (
+            SELECT
+                YEAR(sd.billing__doc_date) AS Sales_Year,
+                MONTH(sd.billing__doc_date) AS Sales_Month,
+                MONTHNAME(sd.billing__doc_date) AS Month_Name,
+                SUM(sd.Invoice_Value_INR) AS Revenue
+            FROM sales_data sd
+            WHERE sd.billing__doc_date IS NOT NULL
+            GROUP BY
+                YEAR(sd.billing__doc_date), MONTH(sd.billing__doc_date), MONTHNAME(sd.billing__doc_date)
+        ),
+        Growth AS (
+            SELECT
+                Sales_Year, Month_Name,
+                ROUND(Revenue,2) AS Current_Revenue,
+                ROUND(
+                    (Revenue - LAG(Revenue) OVER(ORDER BY Sales_Year, Sales_Month))
+                    / NULLIF(LAG(Revenue) OVER(ORDER BY Sales_Year, Sales_Month),0) * 100
+                ,2) AS MoM_Growth_Percentage
+            FROM MonthlyRevenue
+        )
+        SELECT * FROM Growth
+        WHERE MoM_Growth_Percentage IS NOT NULL
+        ORDER BY MoM_Growth_Percentage ASC
+        LIMIT 1
     """, required_tables=["sales_data"])
 
     # ---------- 3. Product Performance ----------
@@ -708,6 +756,7 @@ def _compute_core_kpis(cursor) -> dict:
         WHERE ag.account_group_name = 'Dealer'
         GROUP BY Dealer_Name
         ORDER BY Revenue DESC
+        LIMIT 5
     """, required_tables=["sales_data", "customer_master", "account_group_master"])
 
     run("dealer_contribution_pct", """
@@ -718,7 +767,6 @@ def _compute_core_kpis(cursor) -> dict:
         WHERE ag.account_group_name = 'Dealer'
     """, required_tables=["sales_data", "customer_master", "account_group_master"])
 
-    # [NEW] Fleet Contribution % — was entirely missing before
     run("fleet_contribution_pct", """
         SELECT ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Fleet_Contribution_Percentage
         FROM sales_data sd
@@ -727,7 +775,6 @@ def _compute_core_kpis(cursor) -> dict:
         WHERE ag.account_group_name = 'Fleet'
     """, required_tables=["sales_data", "customer_master", "account_group_master"])
 
-    # [NEW] OEM Contribution % — was entirely missing before
     run("oem_contribution_pct", """
         SELECT ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS OEM_Contribution_Percentage
         FROM sales_data sd
@@ -745,7 +792,7 @@ def _compute_core_kpis(cursor) -> dict:
         LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
         GROUP BY Customer_Name
         ORDER BY Contribution_Percentage DESC
-        LIMIT 10
+        LIMIT 5
     """, required_tables=["sales_data", "customer_master"])
 
     # ---------- 5. Geography (CAST direction flipped, see note above) ----------
@@ -805,31 +852,6 @@ def _compute_core_kpis(cursor) -> dict:
         LIMIT 1
     """, required_tables=["sales_data", "customer_master", "territory_master"])
 
-    run("revenue_by_region", """
-        SELECT
-            COALESCE(rm.region_name, 'Unmapped Region') AS region_name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
-            ROUND(SUM(sd.Sales_Qty),2) AS Quantity
-        FROM sales_data sd
-        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
-        LEFT JOIN region_master rm ON tm.region_code = CAST(rm.region AS CHAR)
-        GROUP BY region_name
-        ORDER BY Revenue DESC
-    """, required_tables=["sales_data", "customer_master", "territory_master", "region_master"])
-
-    run("revenue_by_territory", """
-        SELECT
-            COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
-            ROUND(SUM(sd.Sales_Qty),2) AS Quantity
-        FROM sales_data sd
-        LEFT JOIN customer_master cm ON sd.customer = cm.KUNNR
-        LEFT JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
-        GROUP BY territory_name
-        ORDER BY Revenue DESC
-    """, required_tables=["sales_data", "customer_master", "territory_master"])
-
     run("region_contribution_pct", """
         SELECT
             COALESCE(rm.region_name, 'Unmapped Region') AS region_name,
@@ -841,7 +863,15 @@ def _compute_core_kpis(cursor) -> dict:
         LEFT JOIN region_master rm ON tm.region_code = CAST(rm.region AS CHAR)
         GROUP BY region_name
         ORDER BY Revenue DESC
+        LIMIT 5
     """, required_tables=["sales_data", "customer_master", "territory_master", "region_master"])
+
+    # [REMOVED] revenue_by_region and revenue_by_territory used to return
+    # every single region/territory row (potentially 30+ rows total) even
+    # though the report template only ever asks for Top/Lowest — pure
+    # context bloat contributing directly to truncation. Region/Territory
+    # coverage beyond Top/Lowest/Contribution% belongs in the supplementary
+    # LLM-generated insights path instead, not the fixed core block.
 
     # ---------- 6. Distribution Analysis ----------
     run("distribution_revenue", """
@@ -888,18 +918,18 @@ def _compute_core_kpis(cursor) -> dict:
 
     # ---------- 8. Target Performance ----------
     run("target_vs_actual", """
-    SELECT
-        st.Month AS Target_Month,
-        ROUND(SUM(st.Value),2) AS Target_Value,
-        (
-            SELECT ROUND(SUM(sd.Invoice_Value_INR),2)
-            FROM sales_data sd
-            WHERE DATE_FORMAT(sd.billing__doc_date, '%Y%m') = CAST(st.Month AS CHAR)
-        ) AS Actual_Value
-    FROM sales_target st
-    GROUP BY st.Month
-    ORDER BY st.Month
-""", required_tables=["sales_data", "sales_target"])
+        SELECT
+            st.Month AS Target_Month,
+            ROUND(SUM(st.Value),2) AS Target_Value,
+            (
+                SELECT ROUND(SUM(sd.Invoice_Value_INR),2)
+                FROM sales_data sd
+                WHERE DATE_FORMAT(sd.billing__doc_date, '%Y%m') = CAST(st.Month AS CHAR)
+            ) AS Actual_Value
+        FROM sales_target st
+        GROUP BY st.Month
+        ORDER BY st.Month
+    """, required_tables=["sales_data", "sales_target"])
 
     # ---------- 9. Business Risks ----------
     run("high_customer_dependency", """
@@ -932,10 +962,12 @@ def _compute_core_kpis(cursor) -> dict:
         WHERE tm.territory_name IS NOT NULL
         GROUP BY territory_name
         ORDER BY Revenue ASC
-        LIMIT 10
+        LIMIT 5
     """, required_tables=["sales_data", "customer_master", "territory_master"])
 
     return kpis
+
+
 def _fetch_agentic_insights(cursor, tables_info: list, db_type: str) -> list:
     """
     Agentic Workflow:
@@ -966,7 +998,8 @@ Total Quantity, Total Transactions, Top Category/Construction/Tyre Type, Top Cus
 Top Zone/Region/Territory, Distribution %, Claims, Returns, or Target Performance —
 those are already handled. Focus instead on open-ended, exploratory angles: seasonal
 patterns, cross-category comparisons, customer-class breakdowns, SKU-level trends,
-or anything else that adds color beyond the fixed KPI set.
+full region/territory breakdowns beyond Top/Lowest, or anything else that adds color
+beyond the fixed KPI set.
 
 Always use the following joins when you do write queries. Several join keys have
 MISMATCHED COLUMN TYPES between tables (one side bigint/int, the other text) —
@@ -1374,7 +1407,8 @@ CRITICAL INSTRUCTIONS:
 7. Date Formatting: The 'Month' column or any period formatted as YYYYMM (e.g., 202601, 202512) must be translated into readable month names (e.g., 'January 2026', 'December 2025') in your report.
 8. Respond ONLY in valid JSON with a single key: "report".
 9. If a "VERIFIED KPI BLOCK" appears in the data, those numbers are pre-computed and exact — copy them into the report verbatim. Do NOT recompute, re-derive, estimate, or override them using anything from the "SUPPLEMENTARY EXECUTED INSIGHTS" section. The supplementary insights are for color/context only (e.g. the Executive Summary, Business Risks, Actionable Recommendations) — never for the numeric fields already present in the VERIFIED KPI BLOCK.
-10. In the VERIFIED KPI BLOCK, map these field names directly to report labels: claims_amount → "Claims", returns_amount → "Returns", discount_percentage → "Discount %", fleet_contribution_pct → "Fleet Contribution", oem_contribution_pct → "OEM Contribution". These are ready-to-use — copy them, do not compute.
+10. In the VERIFIED KPI BLOCK, map these field names directly to report labels: claims_amount → "Claims", returns_amount → "Returns", discount_percentage → "Discount %", fleet_contribution_pct → "Fleet Contribution", oem_contribution_pct → "OEM Contribution".
+11. UNIT RULE (critical — a past report was wrong by 10x on this): every monetary value in the VERIFIED KPI BLOCK is a PLAIN RAW RUPEE FIGURE (e.g. 9950380810.30 means nine billion, nine hundred fifty million rupees). Display it EXACTLY as given, formatted only with a ₹ symbol and comma thousands-separators (e.g. "₹9,950,380,810.30"). Do NOT divide by 1,000, 100,000, 1,000,000, or 10,000,000. Do NOT convert to "crore", "lakh", "million", or "thousand" under any circumstance — that conversion is arithmetic you have gotten wrong before, so it is forbidden here regardless of how natural it seems for Indian currency reporting.
 """
 
     user = f"""
