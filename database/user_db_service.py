@@ -1,5 +1,7 @@
 import pymysql
 from database.config import MYSQL_CONFIG
+from helper.workspace_wise_store_procedures import run_stored_procedures
+
 
 
 def create_user_database(email):
@@ -32,6 +34,11 @@ def create_user_database(email):
 
             # Create database if not exists
             cursor.execute(f"CREATE DATABASE `{db_name}`")
+            
+            try:
+                run_stored_procedures(db_name)
+            except Exception as e:
+                print(f"Failed to create stored procedures for {db_name}: {e}")
 
             return {
                 "status": "created",
@@ -119,6 +126,11 @@ def create_workspace_database(workspace_id, workspace_name):
 
             # Create database if not exists
             cursor.execute(f"CREATE DATABASE `{db_name}`")
+            
+            try:
+                run_stored_procedures(db_name)
+            except Exception as e:
+                print(f"Failed to create stored procedures for {db_name}: {e}")
 
             return {
                 "status": "created",

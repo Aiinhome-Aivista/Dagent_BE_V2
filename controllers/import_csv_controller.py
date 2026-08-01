@@ -269,6 +269,9 @@ def import_csv_data(get_db_connection):
                 
         # Remove duplicates while preserving order
         files = list(dict.fromkeys(all_files))
+        
+        # Sort files alphabetically so base files (e.g. sales_data.csv) are processed BEFORE variants (sales_data_2.csv)
+        files.sort()
 
         if not files:
             return jsonify({"status": "error", "message": "Credentials not found or no files to import"}), 404

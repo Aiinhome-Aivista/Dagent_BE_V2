@@ -109,14 +109,9 @@ def _infer_schema(sample: pd.DataFrame) -> dict:
         # BUSINESS COLUMN OVERRIDES (HIGHEST PRIORITY)
         # --------------------------------------------------
 
-        DATE_COLUMNS = {
-            "invoice_date",
-            "billing_date",
-            "posting_date",
-            "created_date",
-            "updated_date",
-            "date"
-        }
+        if "date" in col_lower:
+            schema[col] = {"kind": "date", "fmt": None}
+            continue
 
         INT_COLUMNS = {
             "qty",
@@ -144,10 +139,6 @@ def _infer_schema(sample: pd.DataFrame) -> dict:
             "round_off",
             "fraight"
         }
-
-        if col_lower in DATE_COLUMNS:
-            schema[col] = {"kind": "date", "fmt": None}
-            continue
 
         if col_lower in INT_COLUMNS:
             schema[col] = {"kind": "int", "fmt": None}
@@ -263,6 +254,10 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
         for t in existing_tables:
             cols_res = conn.execute(text(f"SHOW COLUMNS FROM `{t}`"))
             schema_map[t] = set([row[0] for row in cols_res])
+
+    import os
+    # Sort file_paths by original filename (ignoring UUID prefix) so base files come first
+    file_paths.sort(key=lambda p: os.path.basename(p).split('_', 1)[-1] if '_' in os.path.basename(p) else os.path.basename(p))
 
     for path in file_paths:
         print(f"\n🚀 Starting processing for file: {path}")

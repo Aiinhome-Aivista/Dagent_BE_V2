@@ -9,7 +9,7 @@ SQL_CONTENT = """
 DELIMITER $$
 
 DROP PROCEDURE IF EXISTS sp_domestic_sales_value_achivements $$
-CREATE  PROCEDURE `sp_domestic_sales_value_achivements`(
+CREATE PROCEDURE `sp_domestic_sales_value_achivements`(
     IN p_year INT,
     IN p_month INT,
     IN p_day INT
@@ -160,7 +160,7 @@ DELIMITER ;
 DELIMITER $$
 
 DROP PROCEDURE IF EXISTS sp_sales_numbers $$
-CREATE  PROCEDURE `sp_sales_numbers`(
+CREATE PROCEDURE `sp_sales_numbers`(
     IN p_year  INT,
     IN p_month INT,
     IN p_day   INT
@@ -273,7 +273,7 @@ DELIMITER ;
 DELIMITER $$
 
 DROP PROCEDURE IF EXISTS sp_sales_report_by_values $$
-CREATE  PROCEDURE `sp_sales_report_by_values`(
+CREATE PROCEDURE `sp_sales_report_by_values`(
     IN p_year  INT,
     IN p_month INT,
     IN p_day   INT
@@ -554,7 +554,7 @@ DELIMITER ;
 DELIMITER $$
 
 DROP PROCEDURE IF EXISTS sp_sales_summary_in_no_and_values_for_month $$
-CREATE  PROCEDURE `sp_sales_summary_in_no_and_values_for_month`(
+CREATE PROCEDURE `sp_sales_summary_in_no_and_values_for_month`(
     IN p_year  INT,
     IN p_month INT,
     IN p_day   INT
@@ -834,7 +834,7 @@ DELIMITER ;
 DELIMITER $$
 
 DROP PROCEDURE IF EXISTS sp_get_sales_revenue_by_zone $$
-CREATE  PROCEDURE `sp_get_sales_revenue_by_zone`(IN p_zone VARCHAR(50))
+CREATE PROCEDURE `sp_get_sales_revenue_by_zone`(IN p_zone VARCHAR(50))
 BEGIN
     IF p_zone IS NULL OR p_zone = '' OR p_zone = 'All' THEN
         SELECT 
@@ -910,7 +910,7 @@ DELIMITER ;
 DELIMITER $$
 
 DROP PROCEDURE IF EXISTS sp_get_sales_by_account_category $$
-CREATE  PROCEDURE `sp_get_sales_by_account_category`(IN p_zone VARCHAR(50))
+CREATE PROCEDURE `sp_get_sales_by_account_category`(IN p_zone VARCHAR(50))
 BEGIN
     SELECT 
         CASE 
@@ -937,7 +937,7 @@ DELIMITER ;
 DELIMITER $$
 
 DROP PROCEDURE IF EXISTS sp_get_non_billed_accounts_pct $$
-CREATE  PROCEDURE `sp_get_non_billed_accounts_pct`(IN p_zone VARCHAR(50))
+CREATE PROCEDURE `sp_get_non_billed_accounts_pct`(IN p_zone VARCHAR(50))
 BEGIN
     SELECT 
         CASE 
@@ -964,7 +964,7 @@ DELIMITER ;
 DELIMITER $$
 
 DROP PROCEDURE IF EXISTS sp_get_overdue_pct $$
-CREATE  PROCEDURE `sp_get_overdue_pct`(IN p_zone VARCHAR(50))
+CREATE PROCEDURE `sp_get_overdue_pct`(IN p_zone VARCHAR(50))
 BEGIN
     SELECT '31 - 45' AS name, ROUND((COUNT(*) * 7.5) % 65, 1) AS value, '#38BDF8' AS fill
     FROM sales_data sd
@@ -996,7 +996,7 @@ DELIMITER ;
 DELIMITER $$
 
 DROP PROCEDURE IF EXISTS sp_get_exposure_pct $$
-CREATE  PROCEDURE `sp_get_exposure_pct`(IN p_zone VARCHAR(50))
+CREATE PROCEDURE `sp_get_exposure_pct`(IN p_zone VARCHAR(50))
 BEGIN
     SELECT 
         CASE 
@@ -1016,6 +1016,46 @@ DELIMITER ;
 
 ----------------- sp_get_exposure_pct store procedure end ----------------------------------------------------------
 
+
+----------------- sp_get_category_sales store procedure start ----------------------------------------------------------
+DELIMITER $$
+
+DROP PROCEDURE IF EXISTS sp_get_category_sales $$
+
+CREATE PROCEDURE `sp_get_category_sales`(IN p_zone VARCHAR(50))
+BEGIN
+    IF p_zone IS NULL OR p_zone = '' OR p_zone = 'null' THEN
+        -- No zone filter, fast query (Default Page Load)
+        SELECT 
+            cm.category_name AS category, 
+            ROUND(SUM(sd.Invoice_Value_INR) / 10000000, 2) AS total_sales_cr
+        FROM sales_data sd
+        JOIN sku_master sku ON sd.material = sku.matnr
+        JOIN category_master cm ON sku.category = cm.category_code
+        GROUP BY cm.category_name
+        HAVING total_sales_cr > 0;
+    ELSE
+        -- Filter by zone using IN clause for much better performance
+        SELECT 
+            cm.category_name AS category, 
+            ROUND(SUM(sd.Invoice_Value_INR) / 10000000, 2) AS total_sales_cr
+        FROM sales_data sd
+        JOIN sku_master sku ON sd.material = sku.matnr
+        JOIN category_master cm ON sku.category = cm.category_code
+        WHERE sd.customer IN (
+            SELECT cust.KUNNR
+            FROM customer_master cust
+            JOIN territory_master tm ON cust.territory = tm.territory_code
+            JOIN region_master rm ON tm.region_code = rm.region
+            WHERE rm.zone = p_zone
+        )
+        GROUP BY cm.category_name
+        HAVING total_sales_cr > 0;
+    END IF;
+END$$
+DELIMITER ;
+
+----------------- sp_get_category_sales store procedure end ----------------------------------------------------------
 
 
 """

@@ -16,6 +16,8 @@ def execute_aggregation(user_query: str, get_connection_func, schema_info: str =
     
     User Query: "{user_query}"
     
+    CRITICAL DATE RULE: The 'Month' column (or similar periods) are formatted as YYYYMM (e.g., 202601 for January 2026). If the user mentions a month (e.g., "January 2026"), you MUST format it as YYYYMM in the SQL WHERE clause (e.g., `Month` = 202601).
+    
     Return ONLY the raw SQL query, with no markdown formatting or explanation.
     """
     
@@ -52,6 +54,8 @@ def execute_aggregation(user_query: str, get_connection_func, schema_info: str =
     User Query: "{user_query}"
     Raw Data: {json.dumps(raw_data, default=str)}
     
+    CRITICAL DATE RULE: If the Raw Data contains YYYYMM dates (e.g., 202601), convert them to readable month names (e.g., "January 2026") in your answer.
+    
     Answer:
     """
     try:
@@ -76,6 +80,8 @@ def execute_hybrid(user_query: str, get_connection_func, schema_info: str = "SQL
     Schema/Context: {schema_info}
     
     User Query: "{user_query}"
+    
+    CRITICAL DATE RULE: The 'Month' column (or similar periods) are formatted as YYYYMM (e.g., 202601 for January 2026). If the user mentions a month (e.g., "January 2026"), you MUST format it as YYYYMM in the SQL WHERE clause.
     
     Return ONLY the raw SQL query, with no markdown formatting or explanation. Ensure it selects a single identifier column.
     CRITICAL: You MUST fully qualify the table name with the database name provided in the Schema/Context, in the format `database_name`.`table_name`.

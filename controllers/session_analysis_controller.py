@@ -14,6 +14,8 @@ except ImportError:
 from flask import request, jsonify
 from database.config import MISTRAL_API_KEY, MISTRAL_MODEL, MYSQL_CONFIG
 from model.llm_client import call_llm_chat
+from helper.dynamic_profiler import get_table_aggregates
+
 
 # pyrefly: ignore [missing-import]
 from pyvis.network import Network
@@ -488,6 +490,70 @@ def _fetch_web_data(session_id: str, topics: list, conn) -> list:
     return results
 
 
+def _fetch_agentic_insights(cursor, tables_info: list, db_type: str) -> list:
+    """
+    Agentic Workflow:
+    1. Sends schema to LLM and asks for 5-7 comprehensive business SQL queries.
+    2. Executes the queries.
+    3. Returns the successful results as a list of strings.
+    """
+    if not tables_info:
+        return []
+        
+    schema_desc = []
+    for t in tables_info:
+        schema_desc.append(f"Table: {t['table_name']}")
+        schema_desc.append(f"Columns: {', '.join(t['columns'])}")
+    schema_str = "\n".join(schema_desc)
+    
+    system_prompt = f"""You are an expert Data Analyst and {db_type.upper()} DBA.
+Your task is to write EXACTLY 5 to 7 advanced SQL queries that will extract the most critical business metrics from the provided schema.
+The goal is to generate a comprehensive Executive Summary for a business dashboard.
+You MUST deduce the logical relationships between tables (e.g. SAP naming conventions like KUNNR maps to customer, MATNR maps to material).
+Requirements for each query:
+1. Must be valid {db_type.upper()} SELECT statements.
+2. Use INNER JOIN or LEFT JOIN to connect fact tables with master tables.
+3. Include GROUP BY and ORDER BY to show top metrics (e.g., Top Customers, Regional Revenue, Product Volume).
+4. Include LIMIT 5.
+5. Do NOT write simple SELECT *. Every query must aggregate or join data.
+Respond ONLY with a valid JSON array of strings containing the SQL queries."""
+
+    user_prompt = f"Schema:\n{schema_str}\nGenerate the JSON array of queries."
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+    
+    insights = []
+    try:
+        content_str = call_llm_chat(messages, json_mode=True, temperature=0.1)
+        queries = json.loads(content_str)
+        if not isinstance(queries, list):
+            return insights
+            
+        for i, query in enumerate(queries, 1):
+            query = query.strip()
+            if not query.lower().startswith("select"):
+                continue
+            try:
+                cursor.execute(query)
+                rows = cursor.fetchall()
+                if rows:
+                    insights.append(f"--- Insight Query {i} ---")
+                    insights.append(f"Query: {query}")
+                    for row in rows:
+                        row_str = " | ".join(f"{k}: {v}" for k, v in row.items())
+                        insights.append(f"  {row_str}")
+            except Exception as e:
+                print(f"[Agentic Helper] Query failed: {query}. Error: {e}")
+                
+    except Exception as e:
+        print(f"[Agentic Helper] LLM call failed: {e}")
+        
+    return insights
+
+
 def _fetch_db_data(session_id: str, databases: list, conn) -> list:
     """
     Fetch DB data for analysis — supports MySQL and PostgreSQL.
@@ -514,28 +580,27 @@ def _fetch_db_data(session_id: str, databases: list, conn) -> list:
             """, [session_id] + databases)
             rows = cursor.fetchall()
             for r in rows:
+                new_user_db = r["new_user_db"]
+                if new_user_db not in db_map:
+                    db_map[new_user_db] = {"external_databases": [], "tables": []}
                 ext_db = r["external_database"]
-                if ext_db not in db_map:
-                    db_map[ext_db] = {"new_user_db": r["new_user_db"], "tables": []}
+                if ext_db not in db_map[new_user_db]["external_databases"]:
+                    db_map[new_user_db]["external_databases"].append(ext_db)
                 if r.get("table_name"):
-                    db_map[ext_db]["tables"].append(r["table_name"])
+                    db_map[new_user_db]["tables"].append(r["table_name"])
             print(f"[Analysis] MySQL DB MAP -> {db_map}")
     except Exception as e:
         print(f"[Analysis] db_map error: {e}")
     finally:
         if cursor: cursor.close()
 
-    for ext_db in databases:
-        db_info = db_map.get(ext_db)
-        if not db_info:
-            continue
-
-        new_db = db_info["new_user_db"]
+    for new_db, db_info in db_map.items():
         allowed_tables = db_info["tables"]
+        ext_dbs_str = ", ".join(db_info["external_databases"])
 
         db_result = {
             "source_type":       "database",
-            "external_database": ext_db,
+            "external_database": ext_dbs_str,
             "new_user_db":       new_db,
             "tables":            []
         }
@@ -560,37 +625,24 @@ def _fetch_db_data(session_id: str, databases: list, conn) -> list:
                 ext_cur.execute("SHOW TABLES")
                 tables = [list(r.values())[0] for r in ext_cur.fetchall()]
                 
-            print(f"[Analysis] Tables in {new_db} for {ext_db} -> {tables}")
+            print(f"[Analysis] Tables in {new_db} -> {tables}")
 
             for t in tables:
                 try:
-                    ext_cur.execute(f"SELECT * FROM `{t}` LIMIT %s", (MAX_ROWS,))
-                    rows      = ext_cur.fetchall()
-                    row_count = len(rows)
-                    cols      = list(rows[0].keys()) if row_count > 0 else []
-                    col_stats = {}
-                    if row_count > 0:
-                        for col in cols:
-                            vals = [
-                                str(r[col]).strip()
-                                for r in rows
-                                if r.get(col) is not None and str(r[col]).strip()
-                            ]
-                            distinct_vals = list(dict.fromkeys(vals))
-                            col_stats[col] = {
-                                "total_values":    len(vals),
-                                "distinct_values": len(distinct_vals),
-                                "sample":          distinct_vals[:10]
-                            }
+                    ext_cur.execute(f"SELECT * FROM `{t}` LIMIT 0")
+                    ext_cur.fetchall()
+                    cols = [desc[0] for desc in ext_cur.description]
+                    
                     db_result["tables"].append({
                         "table_name":   t,
-                        "row_count":    row_count,
                         "columns":      cols,
-                        "column_stats": col_stats,
-                        "sample_rows":  rows[:5] if rows else []
+                        "business_aggregates": get_table_aggregates(ext_cur, t)
                     })
                 except Exception as table_error:
                     print(f"[Analysis] MySQL table {t} error -> {table_error}")
+            
+            # [NEW] Fetch agentic insights
+            db_result["executed_insights"] = _fetch_agentic_insights(ext_cur, db_result["tables"], "mysql")
 
         except Exception as db_error:
             print(f"[Analysis] MySQL connect {new_db} error -> {db_error}")
@@ -694,48 +746,23 @@ def _fetch_db_data(session_id: str, databases: list, conn) -> list:
                 for t in tables:
                     qualified = f"{schema}.{t}"
                     try:
-                        pg_cur.execute(
-                            f'SELECT * FROM "{schema}"."{t}" LIMIT %s',
-                            (MAX_ROWS,)
-                        )
-                        rows = [dict(r) for r in pg_cur.fetchall()]
-                        row_count = len(rows)
-                        if row_count == 0:
-                            continue
-
-                        # Serialise non-JSON types
-                        for row in rows:
-                            for k, v in row.items():
-                                if v is not None and not isinstance(v, (str, int, float, bool)):
-                                    row[k] = str(v)
-
-                        cols = list(rows[0].keys())
-                        col_stats = {}
-                        for col in cols:
-                            vals = [
-                                str(r[col]).strip()
-                                for r in rows
-                                if r.get(col) is not None and str(r[col]).strip()
-                            ]
-                            distinct_vals = list(dict.fromkeys(vals))
-                            col_stats[col] = {
-                                "total_values":    len(vals),
-                                "distinct_values": len(distinct_vals),
-                                "sample":          distinct_vals[:10]
-                            }
+                        pg_cur.execute(f'SELECT * FROM "{schema}"."{t}" LIMIT 0')
+                        pg_cur.fetchall()
+                        cols = [desc.name for desc in pg_cur.description]
 
                         db_result["tables"].append({
                             "table_name":   qualified,
-                            "row_count":    row_count,
                             "columns":      cols,
-                            "column_stats": col_stats,
-                            "sample_rows":  rows[:5]
+                            "business_aggregates": get_table_aggregates(pg_cur, qualified)
                         })
-                        print(f"[Analysis] PG {pg_database}.{qualified}: {row_count} rows")
+                        print(f"[Analysis] PG {pg_database}.{qualified}: schema loaded")
 
                     except Exception as te:
                         print(f"[Analysis] PG skip {qualified}: {te}")
                         pg_conn.rollback()
+
+            # [NEW] Execute Agentic Workflow
+            db_result["executed_insights"] = _fetch_agentic_insights(pg_cur, db_result["tables"], "postgresql")
 
             pg_cur.close()
             pg_conn.close()
@@ -766,20 +793,19 @@ def _build_context(web_data: list, db_data: list) -> str:
     for d in db_data:
         lines = [f"=== DATABASE: {d['external_database']} (stored as: {d['new_user_db']}) ==="]
         for tbl in d["tables"]:
-            lines.append(f"\n  Table: {tbl['table_name']} ({tbl['row_count']} rows)")
+            lines.append(f"\n  Table: {tbl['table_name']}")
+            
+            if tbl.get("business_aggregates"):
+                lines.append("  [CRITICAL ACTUAL BUSINESS TOTALS (ENTIRE TABLE)]:")
+                for agg in tbl["business_aggregates"]:
+                    lines.append(f"    - {agg}")
+
             lines.append(f"  Columns: {', '.join(tbl['columns'])}")
-            for col, stats in tbl["column_stats"].items():
-                lines.append(
-                    f"    {col}: {stats['distinct_values']} distinct -- "
-                    f"sample: {', '.join(str(v) for v in stats['sample'][:8])}"
-                )
-            lines.append("  Sample rows (up to 5):")
-            for i, row in enumerate(tbl["sample_rows"], 1):
-                r_str = " | ".join(
-                    f"{k}:{v}" for k, v in row.items()
-                    if v is not None and str(v).strip()
-                )
-                lines.append(f"    Row{i}: {r_str}")
+                
+        if d.get("executed_insights"):
+            lines.append("\n=== CRITICAL EXECUTED INSIGHTS ===")
+            lines.extend(d["executed_insights"])
+            
         parts.append("\n".join(lines))
 
     ctx = "\n\n".join(parts)
@@ -801,11 +827,13 @@ def _call_mistral(context: str, topics: list, databases: list) -> dict:
 Your task is to analyze the provided sales data of different types of tyres, tubes, Ret read Belt, Vul Solutions, flap  and extract purely business-focused insights and context.
 CRITICAL INSTRUCTIONS:
 1. Do NOT include ANY technical details (e.g., table names, column names, row counts, distinct values, data types, schema info, missing values, database structure).
-2. Use ONLY actual values, numbers, and facts from the data provided. DO NOT invent or assume any data.
-3. The column "Customer" means the unique customer, buyer, performer who are categorised or grouped under "Group". The column "Region" means the area or the city where the customer is located. The product type or material type is based on the columns "CATEGORY", "CONSTRUCTION",TYRE TYPE". Total sales, invoice value, revenue, performance should be calculated on the column "Invoice value"
-4. Identify the key columns in the data such as region, account group, product category, construction, tyre type and summarise the    taxable value, claims, quantity, tatal gst and invoice value.
-5. The report must dynamically adapt to the dataset and focus purely on actionable business insights, performance, and trends.
-6. Respond ONLY in valid JSON with a single key: "report".
+2. STRICT ANTI-HALLUCINATION RULE: Use ONLY actual numbers and facts explicitly provided in the context. If you see a customer name (like TYRE HOUSE) in the sample rows, DO NOT invent transaction counts or revenue for them unless those specific numbers are explicitly written next to their name in the CRITICAL CROSS-TABLE INSIGHTS or Aggregates. If you don't have the exact number, state the trend generally or omit the number.
+3. Pay SPECIAL ATTENTION to the "CRITICAL EXECUTED INSIGHTS" block. This contains the exact mathematical results of dynamic SQL queries executed directly against the database. Use ONLY these results to form the quantitative basis of your summary.
+4. Identify the key business trends, top performers, and overall performance metrics explicitly found in the executed insights or table totals.
+5. The report must dynamically adapt to the executed queries and focus purely on actionable business insights, performance, and trends.
+6. Use Descriptive Names: ALWAYS map and use descriptive names instead of raw IDs or codes (e.g., use category_name instead of category_code, customer Cname instead of KUNNR, region_name instead of region_code). Raw IDs make the report difficult to read for business users.
+7. Date Formatting: The 'Month' column or any period formatted as YYYYMM (e.g., 202601, 202512) must be translated into readable month names (e.g., 'January 2026', 'December 2025') in your report.
+8. Respond ONLY in valid JSON with a single key: "report".
 """
 
     user = f"""
@@ -841,7 +869,7 @@ RULES:
 - If specific segments (e.g., categories, regions) or time periods are missing in the data, omit that specific bullet or adapt it to what IS available.
 - Minimum 15-20 lines inside the report string.
 - Use \\n for newlines inside the JSON string.
-- Every point must reference a specific value, name, or number from the actual data.
+- Every point must reference a specific value, name, or number from the actual data. DO NOT INVENT NUMBERS for entities just to fulfill this rule.
 - Do NOT use generic filler sentences.
 """
     messages = [
@@ -922,9 +950,7 @@ def session_analysis_controller(get_connection_func):
                     "tables": [
                         {
                             "table_name":  t["table_name"],
-                            "row_count":   t["row_count"],
-                            "columns":     t["columns"],
-                            "sample_rows": t["sample_rows"]
+                            "columns":     t["columns"]
                         }
                         for t in d["tables"]
                     ]

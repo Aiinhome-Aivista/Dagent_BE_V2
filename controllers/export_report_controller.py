@@ -55,25 +55,23 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                 print(f"[Excel Export] Selected DB: {db_to_use} (Fallback: {external_database})", flush=True)
                 
                 if db_to_use:
-                    # Explicitly call the SP using the correct fully qualified DB name
                     print(f"[Excel Export] Executing {db_to_use}.sp_domestic_sales_value_achivements...", flush=True)
-                    cursor.execute(
-                        f"CALL `{db_to_use}`.sp_domestic_sales_value_achivements(%s, %s, %s)",
-                        (year, month, day)
-                    )
-                    print(f"[Excel Export] sp_domestic_sales_value_achivements finished.", flush=True)
+                    try:
+                        cursor.execute(f"CALL `{db_to_use}`.sp_domestic_sales_value_achivements(%s, %s, %s)", (year, month, day))
+                    except Exception as e:
+                        print(f"[Excel Export] SP execution failed: {e}", flush=True)
                 else:
-                    print(f"[Excel Export] SP not found in assigned DBs, executing fallback...", flush=True)
-                    cursor.execute("CALL sp_domestic_sales_value_achivements(%s, %s, %s)", (year, month, day))
-                    print(f"[Excel Export] sp_domestic_sales_value_achivements finished.", flush=True)
+                    print(f"[Excel Export] SP not found in assigned DBs. Skipping...", flush=True)
             else:
-                # Fallback if no session found (uses default DB)
-                cursor.execute("CALL sp_domestic_sales_value_achivements(%s, %s, %s)", (year, month, day))
+                try:
+                    cursor.execute("CALL sp_domestic_sales_value_achivements(%s, %s, %s)", (year, month, day))
+                except Exception as e:
+                    print(f"[Excel Export] SP fallback execution failed: {e}", flush=True)
         else:
-            # Fallback if no session_id provided
-            print(f"[Excel Export] Executing sp_domestic_sales_value_achivements (fallback)...", flush=True)
-            cursor.execute("CALL sp_domestic_sales_value_achivements(%s, %s, %s)", (year, month, day))
-            print(f"[Excel Export] sp_domestic_sales_value_achivements finished.", flush=True)
+            try:
+                cursor.execute("CALL sp_domestic_sales_value_achivements(%s, %s, %s)", (year, month, day))
+            except Exception as e:
+                print(f"[Excel Export] SP fallback execution failed: {e}", flush=True)
         
         print(f"[Excel Export] Fetching results...", flush=True)
         rows = []
@@ -104,8 +102,10 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                 except Exception: break
         
         print(f"[Excel Export] sp_domestic_sales_value_achivements returned {len(rows)} rows.", flush=True)
-        if len(rows) > 0:
-            print(f"[Excel Export] First row sample: {rows[0]}", flush=True)
+        if len(rows) == 0:
+            raise Exception("No sales data available. Files may still be processing or SP is missing.")
+            
+        print(f"[Excel Export] First row sample: {rows[0]}", flush=True)
             
         # Generate Excel
         wb = Workbook()
@@ -248,10 +248,13 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         try:
             # Update SP call for WS1
             print(f"[Excel Export] Executing sp_sales_numbers for WS1...", flush=True)
-            if session_id and sync_row and db_to_use:
-                cursor.execute(f"CALL `{db_to_use}`.sp_sales_numbers(%s, %s, %s)", (year, month, day))
-            else:
-                cursor.execute("CALL sp_sales_numbers(%s, %s, %s)", (year, month, day))
+            try:
+                if session_id and sync_row and db_to_use:
+                    cursor.execute(f"CALL `{db_to_use}`.sp_sales_numbers(%s, %s, %s)", (year, month, day))
+                else:
+                    cursor.execute("CALL sp_sales_numbers(%s, %s, %s)", (year, month, day))
+            except Exception as e:
+                print(f"[Excel Export] WS1 SP failed: {e}", flush=True)
             print(f"[Excel Export] sp_sales_numbers finished.", flush=True)
                 
             rows_ws1 = []
@@ -452,10 +455,13 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         # ==========================================
         try:
             print(f"[Excel Export] Executing sp_sales_report_by_values for WS2...", flush=True)
-            if session_id and sync_row and db_to_use:
-                cursor.execute(f"CALL `{db_to_use}`.sp_sales_report_by_values(%s, %s, %s)", (year, month, day))
-            else:
-                cursor.execute("CALL sp_sales_report_by_values(%s, %s, %s)", (year, month, day))
+            try:
+                if session_id and sync_row and db_to_use:
+                    cursor.execute(f"CALL `{db_to_use}`.sp_sales_report_by_values(%s, %s, %s)", (year, month, day))
+                else:
+                    cursor.execute("CALL sp_sales_report_by_values(%s, %s, %s)", (year, month, day))
+            except Exception as e:
+                print(f"[Excel Export] WS2 SP failed: {e}", flush=True)
             print(f"[Excel Export] sp_sales_report_by_values finished.", flush=True)
                 
             rows_ws2 = []
@@ -658,10 +664,13 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         # ==========================================
         try:
             print(f"[Excel Export] Executing sp_sales_summary_in_no_and_values_for_month for WS3...", flush=True)
-            if session_id and sync_row and db_to_use:
-                cursor.execute(f"CALL `{db_to_use}`.sp_sales_summary_in_no_and_values_for_month(%s, %s, %s)", (year, month, day))
-            else:
-                cursor.execute("CALL sp_sales_summary_in_no_and_values_for_month(%s, %s, %s)", (year, month, day))
+            try:
+                if session_id and sync_row and db_to_use:
+                    cursor.execute(f"CALL `{db_to_use}`.sp_sales_summary_in_no_and_values_for_month(%s, %s, %s)", (year, month, day))
+                else:
+                    cursor.execute("CALL sp_sales_summary_in_no_and_values_for_month(%s, %s, %s)", (year, month, day))
+            except Exception as e:
+                print(f"[Excel Export] WS3 SP failed: {e}", flush=True)
             print(f"[Excel Export] sp_sales_summary_in_no_and_values_for_month finished.", flush=True)
                 
             rows_ws3 = []
