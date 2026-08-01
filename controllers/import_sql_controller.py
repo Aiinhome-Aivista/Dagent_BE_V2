@@ -134,15 +134,22 @@ def import_sql_data(get_db_connection):
 
             rows_affected = len(commands)
             for t_name in affected_tables:
+                t_info = next((t for t in affected_tables_info if t["table"] == t_name), {"rows": 0, "columns": 0})
+                t_rows = t_info["rows"]
+                t_cols = t_info["columns"]
+                t_size = round((t_rows * 200) / (1024 * 1024), 2)
+                
                 log_query = """
                 INSERT INTO external_db_sync_log
                 (user_id,username,external_database,table_name,
-                action_type,rows_affected,session_id,new_user_db)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                action_type,rows_affected,session_id,new_user_db,
+                total_rows,total_columns,data_size_mb)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """
                 cursor.execute(log_query, (
                     user_id, username, file, t_name,
-                    "IMPORT", rows_affected, session_id, user_db
+                    "IMPORT", rows_affected, session_id, user_db,
+                    t_rows, t_cols, t_size
                 ))
             conn.commit()
 

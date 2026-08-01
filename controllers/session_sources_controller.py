@@ -57,7 +57,10 @@ def session_sources_controller(get_connection_func):
                 COUNT(DISTINCT table_name) AS table_count,
                 GROUP_CONCAT(DISTINCT table_name ORDER BY table_name SEPARATOR ', ')
                                            AS tables,
-                MAX(sync_time)             AS last_sync
+                MAX(sync_time)             AS last_sync,
+                SUM(total_rows)            AS total_rows,
+                SUM(total_columns)         AS total_columns,
+                SUM(data_size_mb)          AS data_size_mb
             FROM external_db_sync_log
             WHERE session_id = %s
               AND external_database IS NOT NULL
@@ -84,6 +87,11 @@ def session_sources_controller(get_connection_func):
                 "table_count":       r["table_count"],
                 "tables":            r["tables"].split(", ") if r["tables"] else [],
                 "last_sync":         str(r["last_sync"]) if r["last_sync"] else None,
+                "summary": {
+                    "total_rows": int(r["total_rows"] or 0),
+                    "total_columns": int(r["total_columns"] or 0),
+                    "data_size_mb": float(r["data_size_mb"] or 0.0)
+                }
             }
             for r in db_rows_deduped
         ]

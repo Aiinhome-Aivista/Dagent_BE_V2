@@ -443,15 +443,18 @@ def import_csv_data(get_db_connection):
             }
 
             if not already_imported:
+                table_data_size_mb = round((table_total_rows * 200) / (1024 * 1024), 2)
                 log_query = """
                 INSERT INTO external_db_sync_log
                 (user_id,username,external_database,table_name,
-                action_type,rows_affected,session_id,new_user_db)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                action_type,rows_affected,session_id,new_user_db,
+                total_rows,total_columns,data_size_mb)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """
                 cursor.execute(log_query, (
                     user_id, username, file, table_name,
-                    "IMPORT", rows_inserted, session_id, user_db
+                    "IMPORT", rows_inserted, session_id, user_db,
+                    table_total_rows, num_columns, table_data_size_mb
                 ))
                 conn.commit()
 
