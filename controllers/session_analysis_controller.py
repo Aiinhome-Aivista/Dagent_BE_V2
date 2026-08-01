@@ -508,13 +508,17 @@ def _fetch_agentic_insights(cursor, tables_info: list, db_type: str) -> list:
     
     system_prompt = f"""You are an expert Data Analyst and {db_type.upper()} DBA.
 Your task is to write EXACTLY 6 to 9 advanced SQL queries that will extract the most critical business metrics from the provided schema.
+The goal is to generate a comprehensive Executive Summary for a business dashboard.
+You MUST deduce the logical relationships between tables dynamically (e.g., if you see SAP naming conventions like KUNNR, it likely maps to 'customer'. MATNR maps to 'material'. distribution_code maps to 'distribution__Channel', etc.).
+
 CRITICAL INSTRUCTIONS:
 1. Must be valid {db_type.upper()} SELECT statements.
 2. Query 1 MUST be a Grand Total query returning overall sums and counts (e.g., Total Revenue, Total Quantity, Total Transactions).
 3. Query 2 MUST group by Month/Year to find the HIGHEST and LOWEST sales months.
-4. The remaining queries should find Top AND Bottom Drivers (e.g., Products, Customers, Territories/Regions, Channels).
-   - IMPORTANT: If the fact table (e.g., sales_data) already contains columns like 'region', 'territory', or 'channel', simply GROUP BY those columns directly instead of writing complex JOINs with master tables. Only use JOINs if the foreign key relationship is 100% obvious.
-5. If a sales_target table exists, you MUST include a query joining it with actual sales (or query it separately if joining is too risky) to find Target vs Actual Performance.
+4. The remaining queries MUST use INNER JOINs based on your deduced foreign keys to find:
+   - Top AND Bottom Drivers (e.g., Top 5 & Bottom 5 Products by Revenue, Customers, Territories/Regions).
+   - Distribution Channel Contribution (e.g., OEM, STU, Replacement).
+5. If a sales_target table exists, you MUST include a query joining it with actual sales to find Target vs Actual Performance.
 6. You MUST include GROUP BY and ORDER BY, and you MUST include LIMIT 5 for breakdowns.
 7. Do NOT write simple SELECT *. Every query must aggregate or join data.
 Respond ONLY with a valid JSON array of strings containing the SQL queries."""
