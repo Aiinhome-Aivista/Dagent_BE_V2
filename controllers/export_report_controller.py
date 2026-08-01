@@ -942,7 +942,7 @@ def export_domestic_sales_report_controller(get_db_connection):
                         db_to_use = row.get('new_user_db') or row.get('external_database')
                         
                 table_prefix = f"`{db_to_use}`." if db_to_use else ""
-                cursor.execute(f"SELECT MAX(billing__doc_date) as max_dt FROM {table_prefix}sales_data")
+                cursor.execute(f"SELECT MAX(billing__doc_date) as max_dt FROM {table_prefix}sales_data WHERE billing__doc_date <= CURDATE()")
                 max_dt_row = cursor.fetchone()
                 if max_dt_row and max_dt_row.get('max_dt'):
                     max_dt = max_dt_row['max_dt']
@@ -1032,7 +1032,7 @@ def export_domestic_sales_preview_controller(get_db_connection):
                         db_to_use = row.get('new_user_db') or row.get('external_database')
                         
                 table_prefix = f"`{db_to_use}`." if db_to_use else ""
-                cursor.execute(f"SELECT MAX(billing__doc_date) as max_dt FROM {table_prefix}sales_data")
+                cursor.execute(f"SELECT MAX(billing__doc_date) as max_dt FROM {table_prefix}sales_data WHERE billing__doc_date <= CURDATE()")
                 max_dt_row = cursor.fetchone()
                 if max_dt_row and max_dt_row.get('max_dt'):
                     max_dt = max_dt_row['max_dt']
