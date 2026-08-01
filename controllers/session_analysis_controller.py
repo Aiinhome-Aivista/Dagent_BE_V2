@@ -512,9 +512,9 @@ The goal is to generate a comprehensive Executive Summary for a business dashboa
 You MUST deduce the logical relationships between tables (e.g. SAP naming conventions like KUNNR maps to customer, MATNR maps to material).
 Requirements for each query:
 1. Must be valid {db_type.upper()} SELECT statements.
-2. Use INNER JOIN or LEFT JOIN to connect fact tables with master tables.
-3. Include GROUP BY and ORDER BY to show top metrics (e.g., Top Customers, Regional Revenue, Product Volume).
-4. Include LIMIT 5.
+2. Query 1 MUST be a Grand Total summary (e.g., Total Revenue, Total Quantity, Total Transactions, Total Customers across the entire dataset without any LIMIT or GROUP BY).
+3. The remaining queries should use INNER JOIN or LEFT JOIN to connect fact tables with master tables to find top drivers (e.g., Top Customers, Regional Revenue, Product Volume).
+4. For the breakdown queries (Queries 2 to 7), you MUST include GROUP BY and ORDER BY, and you MUST include LIMIT 5.
 5. Do NOT write simple SELECT *. Every query must aggregate or join data.
 Respond ONLY with a valid JSON array of strings containing the SQL queries."""
 
@@ -847,7 +847,7 @@ ALSO, generate a category-wise trend report as a "line_chart" visualization extr
 
 Return ONLY this JSON:
 {{
-  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n<Executive Summary: 3-4 sentences summarizing overall business performance, key trends, and the main takeaway. Do not mention data tables or row counts.>\\n\\n### Key Business Insights\\n\\n- **Overall Performance & Trends**: <Highlight overall metric performance, growth/decline patterns over time, and significant variations>\\n- **Volume Analysis**: <Analyze volume such as high/low periods, increasing/decreasing momentum>\\n- **Time-Based Movements**: <Detail week-wise, month-wise, or date-wise upward/downward movements, peak periods, and lowest periods>\\n- **Anomalies & Spikes**: <Identify sudden spikes, sudden drops, or outlier behavior with corresponding dates or periods>\\n- **Segment Performance**: <Highlight product, category, region, customer, or channel performance based on available data>\\n- **Key Drivers**: <Identify key business drivers and observations derived from the data>\\n\\n### Actionable Recommendations\\n\\n- <Actionable recommendation 1 based on the data>\\n- <Actionable recommendation 2 based on the data>\\n- <Strategic conclusion>",
+  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance, key trends, and main takeaways based purely on the data.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue**: <Value>\\n- **Total Quantity**: <Value>\\n- **Total Invoices**: <Value>\\n- **Average Invoice Value**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Sales Month**: <Value>\\n- **Lowest Sales Month**: <Value>\\n- **Monthly Growth**: <Value>\\n\\n**3. Product Performance**\\n- **Top Category**: <Value>\\n- **Top Construction**: <Value>\\n- **Top Tyre Type**: <Value>\\n- **Top Product**: <Value>\\n- **Lowest Selling Product**: <Value>\\n\\n**4. Customer Performance**\\n- **Top Customers**: <Value>\\n- **Dealer Contribution**: <Value>\\n- **Fleet Contribution**: <Value>\\n- **OEM Contribution**: <Value>\\n- **Customer Concentration**: <Value>\\n\\n**5. Geography**\\n- **Top Zone**: <Value>\\n- **Top Region**: <Value>\\n- **Top Territory**: <Value>\\n- **Lowest Territory**: <Value>\\n\\n**6. Distribution**\\n- **Replacement**: <Value>\\n- **OEM**: <Value>\\n- **STU**: <Value>\\n- **DEF**: <Value>\\n- **Contribution %**: <Value>\\n\\n**7. Pricing**\\n- **Average Selling Price**: <Value>\\n- **Discount %**: <Value>\\n- **Claims**: <Value>\\n- **Returns**: <Value>\\n\\n**8. Target Performance (if available)**\\n- **Target**: <Value>\\n- **Actual**: <Value>\\n- **Achievement %**: <Value>\\n- **Gap**: <Value>\\n- **MTD / YTD / YOY**: <Value>\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>\\n\\n### Strategic Conclusion\\n<A final strategic conclusion summarizing the path forward for the business.>",
   "follow_up_questions": ["What ...?", "What ...?", "What ...?", "What ...?", "What ...?"],
   "visualizations": [
     {{
@@ -866,8 +866,7 @@ Return ONLY this JSON:
 RULES:
 - Replace all <...> with REAL business insights and metrics from the actual data provided.
 - DO NOT mention tables, rows, columns, data types, nulls, or database schema. Keep it 100% business-focused.
-- If specific segments (e.g., categories, regions) or time periods are missing in the data, omit that specific bullet or adapt it to what IS available.
-- Minimum 15-20 lines inside the report string.
+- If a specific metric (e.g., Target Performance, OEM Contribution, YTD) is not available in the provided data, write "N/A based on available data" rather than hallucinating numbers, but keep the bullet structure intact.
 - Use \\n for newlines inside the JSON string.
 - Every point must reference a specific value, name, or number from the actual data. DO NOT INVENT NUMBERS for entities just to fulfill this rule.
 - Do NOT use generic filler sentences.
