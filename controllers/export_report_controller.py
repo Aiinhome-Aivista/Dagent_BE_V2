@@ -916,14 +916,55 @@ def export_domestic_sales_report_controller(get_db_connection):
         now = datetime.now()
         
         session_id = data.get("session_id") or request.args.get("session_id")
-        year = data.get("year") or request.args.get("year", now.year, type=int)
-        month = data.get("month") or request.args.get("month", now.month, type=int)
-        day = data.get("day") or request.args.get("day", now.day, type=int)
+        year = data.get("year") or request.args.get("year")
+        month = data.get("month") or request.args.get("month")
+        day = data.get("day") or request.args.get("day")
+        
+        if not year or not month or not day:
+            cursor = None
+            try:
+                try:
+                    cursor = conn.cursor(dictionary=True)
+                except TypeError:
+                    import pymysql
+                    cursor = conn.cursor(pymysql.cursors.DictCursor)
+                
+                db_to_use = None
+                if session_id:
+                    cursor.execute("""
+                        SELECT new_user_db, external_database
+                        FROM external_db_sync_log 
+                        WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
+                        ORDER BY id DESC LIMIT 1
+                    """, (session_id,))
+                    row = cursor.fetchone()
+                    if row:
+                        db_to_use = row.get('new_user_db') or row.get('external_database')
+                        
+                table_prefix = f"`{db_to_use}`." if db_to_use else ""
+                cursor.execute(f"SELECT MAX(invoice_date) as max_dt FROM {table_prefix}sales_data")
+                max_dt_row = cursor.fetchone()
+                if max_dt_row and max_dt_row.get('max_dt'):
+                    max_dt = max_dt_row['max_dt']
+                    if not year: year = max_dt.year
+                    if not month: month = max_dt.month
+                    if not day: day = max_dt.day
+            except Exception as e:
+                print(f"[Excel Export] Failed to fetch max date: {e}")
+            finally:
+                if cursor:
+                    try: cursor.close()
+                    except: pass
+                    
+        # Fallback to now if DB didn't have data
+        if not year: year = now.year
+        if not month: month = now.month
+        if not day: day = now.day
 
         # Convert to int just in case they were passed as strings in JSON
-        if year: year = int(year)
-        if month: month = int(month)
-        if day: day = int(day)
+        year = int(year)
+        month = int(month)
+        day = int(day)
 
         output_path = generate_domestic_sales_excel(conn, session_id, year, month, day)
         
@@ -965,9 +1006,54 @@ def export_domestic_sales_preview_controller(get_db_connection):
         now = datetime.now()
 
         session_id = data.get("session_id") or request.args.get("session_id")
-        year  = int(data.get("year")  or request.args.get("year",  now.year))
-        month = int(data.get("month") or request.args.get("month", now.month))
-        day   = int(data.get("day")   or request.args.get("day",   now.day))
+        year = data.get("year") or request.args.get("year")
+        month = data.get("month") or request.args.get("month")
+        day = data.get("day") or request.args.get("day")
+        
+        if not year or not month or not day:
+            cursor = None
+            try:
+                try:
+                    cursor = conn.cursor(dictionary=True)
+                except TypeError:
+                    import pymysql
+                    cursor = conn.cursor(pymysql.cursors.DictCursor)
+                
+                db_to_use = None
+                if session_id:
+                    cursor.execute("""
+                        SELECT new_user_db, external_database
+                        FROM external_db_sync_log 
+                        WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
+                        ORDER BY id DESC LIMIT 1
+                    """, (session_id,))
+                    row = cursor.fetchone()
+                    if row:
+                        db_to_use = row.get('new_user_db') or row.get('external_database')
+                        
+                table_prefix = f"`{db_to_use}`." if db_to_use else ""
+                cursor.execute(f"SELECT MAX(invoice_date) as max_dt FROM {table_prefix}sales_data")
+                max_dt_row = cursor.fetchone()
+                if max_dt_row and max_dt_row.get('max_dt'):
+                    max_dt = max_dt_row['max_dt']
+                    if not year: year = max_dt.year
+                    if not month: month = max_dt.month
+                    if not day: day = max_dt.day
+            except Exception as e:
+                print(f"[Excel Export Preview] Failed to fetch max date: {e}")
+            finally:
+                if cursor:
+                    try: cursor.close()
+                    except: pass
+
+        # Fallback to now if DB didn't have data
+        if not year: year = now.year
+        if not month: month = now.month
+        if not day: day = now.day
+
+        year = int(year)
+        month = int(month)
+        day = int(day)
 
         import calendar
         month_abbr    = calendar.month_abbr[month] if 1 <= month <= 12 else str(month)

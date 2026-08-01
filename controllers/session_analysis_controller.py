@@ -888,15 +888,18 @@ def _compute_core_kpis(cursor) -> dict:
 
     # ---------- 8. Target Performance ----------
     run("target_vs_actual", """
-        SELECT
-            ROUND(SUM(st.Value),2) AS Target_Value,
-            (
-                SELECT ROUND(SUM(sd.Invoice_Value_INR),2)
-                FROM sales_data sd
-                WHERE DATE_FORMAT(sd.billing__doc_date, '%Y%m') = CAST(st.Month AS CHAR)
-            ) AS Actual_Value
-        FROM sales_target st
-    """, required_tables=["sales_data", "sales_target"])
+    SELECT
+        st.Month AS Target_Month,
+        ROUND(SUM(st.Value),2) AS Target_Value,
+        (
+            SELECT ROUND(SUM(sd.Invoice_Value_INR),2)
+            FROM sales_data sd
+            WHERE DATE_FORMAT(sd.billing__doc_date, '%Y%m') = CAST(st.Month AS CHAR)
+        ) AS Actual_Value
+    FROM sales_target st
+    GROUP BY st.Month
+    ORDER BY st.Month
+""", required_tables=["sales_data", "sales_target"])
 
     # ---------- 9. Business Risks ----------
     run("high_customer_dependency", """
