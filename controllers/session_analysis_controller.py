@@ -507,19 +507,28 @@ def _fetch_agentic_insights(cursor, tables_info: list, db_type: str) -> list:
     schema_str = "\n".join(schema_desc)
     
     system_prompt = f"""You are an expert Data Analyst and {db_type.upper()} DBA.
-Your task is to write EXACTLY 6 to 9 advanced SQL queries that will extract the most critical business metrics from the provided schema.
-The goal is to generate a comprehensive Executive Summary for a business dashboard.
-You MUST deduce the logical relationships between tables dynamically (e.g., if you see SAP naming conventions like KUNNR, it likely maps to 'customer'. MATNR maps to 'material'. distribution_code maps to 'distribution__Channel', etc.).
+Your task is to write EXACTLY 6 to 8 advanced SQL queries that will extract the most critical business metrics from the provided schema.
+
+KNOWN SCHEMA RELATIONSHIPS (Use these EXACT foreign keys for JOINs):
+- sales_data.customer = customer_master.KUNNR
+- sales_data.material = sku_master.MATNR
+- sales_data.distribution__Channel = distribution_mapping.distribution_code
+- customer_master.acc_grp = account_group_master.KTOKD
+- customer_master.class = class_master.class_code
+- customer_master.territory = territory_master.territory_code
+- territory_master.region_code = region_master.region
+- sku_master.category = category_master.category_code
+- sku_master.construction = construction_master.construction_code
+- sku_master.tyre_type = tyre_type_master.tyre_type_code
+- sales_target.MATNR = sku_master.MATNR
 
 CRITICAL INSTRUCTIONS:
 1. Must be valid {db_type.upper()} SELECT statements.
-2. Query 1 MUST be a Grand Total query returning overall sums and counts (e.g., Total Revenue, Total Quantity, Total Transactions).
+2. Query 1 MUST be a Grand Total query returning overall sums and counts (e.g., Total Revenue, Total Quantity, Total Transactions, Total Customers across the entire dataset without any LIMIT or GROUP BY).
 3. Query 2 MUST group by Month/Year to find the HIGHEST and LOWEST sales months.
-4. The remaining queries MUST use INNER JOINs based on your deduced foreign keys to find:
-   - Top AND Bottom Drivers (e.g., Top 5 & Bottom 5 Products by Revenue, Customers, Territories/Regions).
-   - Distribution Channel Contribution (e.g., OEM, STU, Replacement).
-5. If a sales_target table exists, you MUST include a query joining it with actual sales to find Target vs Actual Performance.
-6. You MUST include GROUP BY and ORDER BY, and you MUST include LIMIT 5 for breakdowns.
+4. The remaining queries MUST use INNER JOIN or LEFT JOIN to connect the fact tables with the master tables to find the Top 5 Drivers (e.g., Top 5 Products by Revenue, Top 5 Customers, Top 5 Territories/Regions, Top Distribution Channels).
+5. You MUST include a query for Target vs Actual Performance by joining the sales_target table (if it exists).
+6. You MUST include GROUP BY and ORDER BY DESC, and you MUST include LIMIT 5 for the driver queries.
 7. Do NOT write simple SELECT *. Every query must aggregate or join data.
 Respond ONLY with a valid JSON array of strings containing the SQL queries."""
 
