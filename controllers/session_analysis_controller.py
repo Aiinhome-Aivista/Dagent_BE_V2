@@ -493,7 +493,7 @@ def _fetch_web_data(session_id: str, topics: list, conn) -> list:
 def _fetch_agentic_insights(cursor, tables_info: list, db_type: str) -> list:
     """
     Agentic Workflow:
-    1. Sends schema to LLM and asks for 5-7 comprehensive business SQL queries.
+    1. Sends schema to LLM and asks for 7-10 comprehensive business SQL queries.
     2. Executes the queries.
     3. Returns the successful results as a list of strings.
     """
@@ -507,15 +507,21 @@ def _fetch_agentic_insights(cursor, tables_info: list, db_type: str) -> list:
     schema_str = "\n".join(schema_desc)
     
     system_prompt = f"""You are an expert Data Analyst and {db_type.upper()} DBA.
-Your task is to write EXACTLY 5 to 7 advanced SQL queries that will extract the most critical business metrics from the provided schema.
+Your task is to write EXACTLY 12 to 15 advanced SQL queries that will extract the most critical business metrics from the provided schema.
 The goal is to generate a comprehensive Executive Summary for a business dashboard.
 You MUST deduce the logical relationships between tables (e.g. SAP naming conventions like KUNNR maps to customer, MATNR maps to material).
 Requirements for each query:
 1. Must be valid {db_type.upper()} SELECT statements.
 2. Query 1 MUST be a Grand Total summary (e.g., Total Revenue, Total Quantity, Total Transactions, Total Customers across the entire dataset without any LIMIT or GROUP BY).
-3. The remaining queries should use INNER JOIN or LEFT JOIN to connect fact tables with master tables to find top drivers (e.g., Top Customers, Regional Revenue, Product Volume).
-4. For the breakdown queries (Queries 2 to 7), you MUST include GROUP BY and ORDER BY, and you MUST include LIMIT 5.
-5. Do NOT write simple SELECT *. Every query must aggregate or join data.
+3. Query 2 MUST group by Month/Year to find the HIGHEST and LOWEST sales months.
+4. The remaining queries should use INNER JOIN or LEFT JOIN to connect fact tables with master tables to find BOTH Top and Bottom drivers. You must include queries for:
+   - Top Selling Products & Lowest Selling Products (ORDER BY DESC and ASC)
+   - Top Customers & Lowest Customers
+   - Top Territories & Lowest Territories (e.g., Nepal, Tezpur)
+   - Total Discounts, Claims & Returns summary
+   - Distribution Channel mapping
+5. For the breakdown queries, you MUST include GROUP BY and ORDER BY, and you MUST include LIMIT 5.
+6. Do NOT write simple SELECT *. Every query must aggregate or join data.
 Respond ONLY with a valid JSON array of strings containing the SQL queries."""
 
     user_prompt = f"Schema:\n{schema_str}\nGenerate the JSON array of queries."
@@ -827,7 +833,7 @@ def _call_mistral(context: str, topics: list, databases: list) -> dict:
 Your task is to analyze the provided sales data of different types of tyres, tubes, Ret read Belt, Vul Solutions, flap  and extract purely business-focused insights and context.
 CRITICAL INSTRUCTIONS:
 1. Do NOT include ANY technical details (e.g., table names, column names, row counts, distinct values, data types, schema info, missing values, database structure).
-2. STRICT ANTI-HALLUCINATION RULE: Use ONLY actual numbers and facts explicitly provided in the context. If you see a customer name (like TYRE HOUSE) in the sample rows, DO NOT invent transaction counts or revenue for them unless those specific numbers are explicitly written next to their name in the CRITICAL CROSS-TABLE INSIGHTS or Aggregates. If you don't have the exact number, state the trend generally or omit the number.
+2. STRICT ANTI-HALLUCINATION RULE: Use ONLY actual numbers and facts explicitly provided in the context. If you see a specific entity name in the sample rows, DO NOT invent transaction counts or revenue for them unless those specific numbers are explicitly written next to their name in the CRITICAL CROSS-TABLE INSIGHTS or Aggregates. If you don't have the exact number, state the trend generally or omit the number.
 3. Pay SPECIAL ATTENTION to the "CRITICAL EXECUTED INSIGHTS" block. This contains the exact mathematical results of dynamic SQL queries executed directly against the database. Use ONLY these results to form the quantitative basis of your summary.
 4. Identify the key business trends, top performers, and overall performance metrics explicitly found in the executed insights or table totals.
 5. The report must dynamically adapt to the executed queries and focus purely on actionable business insights, performance, and trends.
@@ -866,7 +872,7 @@ Return ONLY this JSON:
 RULES:
 - Replace all <...> with REAL business insights and metrics from the actual data provided.
 - DO NOT mention tables, rows, columns, data types, nulls, or database schema. Keep it 100% business-focused.
-- If a specific metric (e.g., Target Performance, OEM Contribution, YTD) is not available in the provided data, write "N/A based on available data" rather than hallucinating numbers, but keep the bullet structure intact.
+- If a specific metric (e.g., Target Performance, OEM Contribution, Highest/Lowest Sales Month, YTD) is not explicitly calculated and available in the provided data, write "N/A based on available data" rather than hallucinating or guessing based on overall date ranges. Keep the bullet structure intact.
 - Use \\n for newlines inside the JSON string.
 - Every point must reference a specific value, name, or number from the actual data. DO NOT INVENT NUMBERS for entities just to fulfill this rule.
 - Do NOT use generic filler sentences.
