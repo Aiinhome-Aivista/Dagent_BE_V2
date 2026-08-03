@@ -509,11 +509,9 @@ def _compute_core_kpis(cursor) -> dict:
     as "missing table" rather than a generic failure, so it's clear at
     a glance whether a blank field means "no data synced" or "real bug."
 
-    NOTE on units: every monetary value here is returned as a PLAIN raw
-    rupee figure (e.g. 9950380810.30). The report-writing LLM is instructed
-    (see _call_mistral, rule #11) to display these as-is with commas and a
-    ₹ symbol — NEVER to convert to crore/million/lakh itself, since that
-    conversion is arithmetic the LLM has previously gotten wrong by 10x.
+    NOTE on units: The queries below now divide Invoice_Value_INR by 10,000,000 to
+    return values in CRORES (e.g. 995.04). The report-writing LLM is instructed
+    (see _call_mistral, rule #11) to display these with a ₹ symbol and append " Cr".
     """
     kpis = {}
 
@@ -1408,7 +1406,7 @@ CRITICAL INSTRUCTIONS:
 8. Respond ONLY in valid JSON with a single key: "report".
 9. If a "VERIFIED KPI BLOCK" appears in the data, those numbers are pre-computed and exact — copy them into the report verbatim. Do NOT recompute, re-derive, estimate, or override them using anything from the "SUPPLEMENTARY EXECUTED INSIGHTS" section. The supplementary insights are for color/context only (e.g. the Executive Summary, Business Risks, Actionable Recommendations) — never for the numeric fields already present in the VERIFIED KPI BLOCK.
 10. In the VERIFIED KPI BLOCK, map these field names directly to report labels: claims_amount → "Claims", returns_amount → "Returns", discount_percentage → "Discount %", fleet_contribution_pct → "Fleet Contribution", oem_contribution_pct → "OEM Contribution".
-11. UNIT RULE (critical — a past report was wrong by 10x on this): every monetary value in the VERIFIED KPI BLOCK is a PLAIN RAW RUPEE FIGURE (e.g. 9950380810.30 means nine billion, nine hundred fifty million rupees). Display it EXACTLY as given, formatted only with a ₹ symbol and comma thousands-separators (e.g. "₹9,950,380,810.30"). Do NOT divide by 1,000, 100,000, 1,000,000, or 10,000,000. Do NOT convert to "crore", "lakh", "million", or "thousand" under any circumstance — that conversion is arithmetic you have gotten wrong before, so it is forbidden here regardless of how natural it seems for Indian currency reporting.
+11. UNIT RULE (critical): The monetary values in the VERIFIED KPI BLOCK are ALREADY IN CRORES. You MUST append " Cr" to them. Display them EXACTLY as given, formatted with a ₹ symbol and " Cr" (e.g. if the value is 995.04, write "₹995.04 Cr"). Do NOT divide or multiply them further.
 """
 
     user = f"""
