@@ -1003,23 +1003,65 @@ Always use the following joins when you do write queries. Several join keys have
 MISMATCHED COLUMN TYPES between tables (one side bigint/int, the other text) —
 always wrap the text side in CAST(... AS UNSIGNED) or the numeric side in
 CAST(... AS CHAR) so the join is explicit and doesn't rely on implicit coercion:
+Always use the following joins when you do write queries. Each line below includes
+a brief on what business question that join unlocks, plus any type-cast needed since
+several join keys have MISMATCHED COLUMN TYPES between tables (one side bigint/int,
+the other text):
 
 sales_data.customer = customer_master.KUNNR
+    -- both bigint, no cast needed
+    -- Brief: links every transaction to its dealer/fleet/OEM account — the entry point for any customer-level query.
+
 customer_master.acc_grp = account_group_master.KTOKD
+    -- both text
+    -- Brief: classifies each customer as Dealer / Fleet / OEM / Ship-to-Party — use for channel-type breakdowns beyond the fixed Dealer/Fleet/OEM % already in the KPI block.
+
 customer_master.class = class_master.class_code
-customer_master.territory = CAST(territory_master.territory_code AS UNSIGNED)          -- type mismatch: bigint vs text
-CAST(territory_master.region_code AS UNSIGNED) = region_master.region                    -- type mismatch: text vs bigint
+    -- both text
+    -- Brief: resolves customer tier/segment (e.g. Champion, Common, Fleet Management, oil-company co-branded classes like HPCL/IOCL/ESSAR) — use for customer-class-wise revenue or SKU-preference breakdowns.
+
+CAST(customer_master.territory AS CHAR) = territory_master.territory_code
+    -- bigint vs text: cast the bigint side
+    -- Brief: the first hop from a customer to its geography — required before reaching region/zone.
+
+CAST(territory_master.region_code AS UNSIGNED) = region_master.region
+    -- text vs bigint: cast the text side (region_code is TEXT here, region is BIGINT)
+    -- Brief: rolls a territory up to its region and zone — use for full region/territory breakdowns beyond the fixed Top/Lowest already in the KPI block.
+
 region_master.zone
+    -- Brief: the top-level PAN-India geography grouping (East/West/North/South I & II/Central/Nepal) — use for any zone-comparison angle not already covered by zone_wise_performance in the KPI block.
 
 sales_data.material = sku_master.MATNR
+    -- both text
+    -- Brief: links a transaction to its product master — the entry point for any SKU/product-level query.
+
 sku_master.category = category_master.category_code
-sku_master.construction = CAST(construction_master.construction_code AS UNSIGNED)       -- type mismatch: bigint vs text
+    -- both text
+    -- Brief: resolves Tyre / Tube / Flap / Others — use for category-mix trend angles beyond the fixed Top/Lowest Category.
+
+CAST(sku_master.construction AS CHAR) = construction_master.construction_code
+    -- construction is bigint here; NOTE: this column can only hold numeric codes as currently typed, so alphabetic construction_master codes (A, B, D, E, K, L, M, N, O, P, R, T, Z) will never match — flag any "Unmapped Construction" spike to the data team rather than assuming the query is wrong
+    -- Brief: resolves BIAS vs RADIAL — use for radialization/premiumization trend angles, keeping the known matching gap in mind.
+
 sku_master.tyre_type = tyre_type_master.tyre_type_code
+    -- both text
+    -- Brief: resolves the end-use vehicle segment (Truck, LCV, Car, Tractor, OTR, etc.) — use for segment-growth or vehicle-mix angles beyond the fixed Top Tyre Type.
 
 sales_data.distribution__Channel = distribution_mapping.distribution_code
+    -- bigint vs int, safe implicit match
+    -- Brief: resolves Replacement / OEM / STU / DEF — use for channel-mix angles beyond the fixed Distribution % already in the KPI block.
+
 sales_target.MATNR = sku_master.MATNR
+    -- both text
+    -- Brief: links a planned target line to its product — use for SKU-level target-vs-actual gaps, since the KPI block only covers zone-level target achievement.
+
 sales_target.Terr_Code = territory_master.territory_code
+    -- BOTH TEXT — no cast needed
+    -- Brief: links a planned target line to its territory — combine with region_master.zone for territory-level (not just zone-level) target achievement.
+
 DATE_FORMAT(sales_data.billing__doc_date, '%Y%m') = CAST(sales_target.Month AS CHAR)
+    -- Month is bigint, cast to text for string comparison
+    -- Brief: aligns actual monthly billing to the planned target month — use for any month-by-month target variance beyond the aggregate figures already in the KPI block.
 
 Never display IDs or codes. Always return descriptive names from the master tables.
 
