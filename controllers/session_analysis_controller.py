@@ -536,7 +536,7 @@ def _compute_core_kpis(cursor) -> dict:
 
     # ---------- 1. Overall Performance ----------
     run("total_revenue", """
-        SELECT ROUND(SUM(sd.Invoice_Value_INR),2) AS Total_Revenue
+        SELECT ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Total_Revenue
         FROM sales_data sd
     """, required_tables=["sales_data"])
 
@@ -565,7 +565,7 @@ def _compute_core_kpis(cursor) -> dict:
         SELECT
             YEAR(sd.billing__doc_date) AS Sales_Year,
             MONTHNAME(sd.billing__doc_date) AS Month_Name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         WHERE sd.billing__doc_date IS NOT NULL
         GROUP BY
@@ -578,7 +578,7 @@ def _compute_core_kpis(cursor) -> dict:
         SELECT
             YEAR(sd.billing__doc_date) AS Sales_Year,
             MONTHNAME(sd.billing__doc_date) AS Month_Name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         WHERE sd.billing__doc_date IS NOT NULL
         GROUP BY
@@ -598,7 +598,7 @@ def _compute_core_kpis(cursor) -> dict:
                 YEAR(sd.billing__doc_date) AS Sales_Year,
                 MONTH(sd.billing__doc_date) AS Sales_Month,
                 MONTHNAME(sd.billing__doc_date) AS Month_Name,
-                SUM(sd.Invoice_Value_INR) AS Revenue
+                (SUM(sd.Invoice_Value_INR)/10000000) AS Revenue
             FROM sales_data sd
             WHERE sd.billing__doc_date IS NOT NULL
             GROUP BY
@@ -626,7 +626,7 @@ def _compute_core_kpis(cursor) -> dict:
                 YEAR(sd.billing__doc_date) AS Sales_Year,
                 MONTH(sd.billing__doc_date) AS Sales_Month,
                 MONTHNAME(sd.billing__doc_date) AS Month_Name,
-                SUM(sd.Invoice_Value_INR) AS Revenue
+                (SUM(sd.Invoice_Value_INR)/10000000) AS Revenue
             FROM sales_data sd
             WHERE sd.billing__doc_date IS NOT NULL
             GROUP BY
@@ -652,7 +652,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("top_category", """
         SELECT
             COALESCE(cat.category_name, 'Unmapped Category') AS category_name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         JOIN sku_master sk ON sd.material = sk.MATNR
         JOIN category_master cat ON sk.category = cat.category_code
@@ -664,7 +664,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("lowest_category", """
         SELECT
             COALESCE(cat.category_name, 'Unmapped Category') AS category_name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         JOIN sku_master sk ON sd.material = sk.MATNR
         JOIN category_master cat ON sk.category = cat.category_code
@@ -680,7 +680,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("top_construction", """
         SELECT
             COALESCE(cons.construction_description, 'Unmapped Construction') AS construction_description,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         JOIN sku_master sk ON sd.material = sk.MATNR
         JOIN construction_master cons
@@ -693,7 +693,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("top_tyre_type", """
         SELECT
             COALESCE(tt.tyre_type_name, 'Unmapped Tyre Type') AS tyre_type_name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         JOIN sku_master sk ON sd.material = sk.MATNR
         JOIN tyre_type_master tt ON sk.tyre_type = tt.tyre_type_code
@@ -705,7 +705,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("top_5_products", """
         SELECT
             COALESCE(sk.MAKTX, 'Unmapped Product') AS product_name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         JOIN sku_master sk ON sd.material = sk.MATNR
         GROUP BY product_name
@@ -714,7 +714,7 @@ def _compute_core_kpis(cursor) -> dict:
     """, required_tables=["sales_data", "sku_master"])
 
     run("bottom_5_products", """
-        SELECT sk.MAKTX AS product_name, ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        SELECT sk.MAKTX AS product_name, ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         JOIN sku_master sk ON sd.material = sk.MATNR
         WHERE sk.MAKTX IS NOT NULL
@@ -727,7 +727,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("top_customer", """
         SELECT
             COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Customer_Name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         JOIN customer_master cm ON sd.customer = cm.KUNNR
         GROUP BY Customer_Name
@@ -738,7 +738,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("top_5_customers", """
         SELECT
             COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Customer_Name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         JOIN customer_master cm ON sd.customer = cm.KUNNR
         GROUP BY Customer_Name
@@ -749,7 +749,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("top_dealers", """
         SELECT
             COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Dealer_Name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         JOIN customer_master cm ON sd.customer = cm.KUNNR
         JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
@@ -786,7 +786,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("customer_concentration", """
         SELECT
             COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Customer_Name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue,
             ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Contribution_Percentage
         FROM sales_data sd
         JOIN customer_master cm ON sd.customer = cm.KUNNR
@@ -804,7 +804,7 @@ def _compute_core_kpis(cursor) -> dict:
                 WHEN 'TZ' THEN 'South Zone II' WHEN 'CZ' THEN 'Central Zone'
                 WHEN 'NP' THEN 'Nepal' ELSE 'Unmapped Zone'
             END AS Zone,
-            ROUND(SUM(sd.Invoice_Value_INR), 2) AS Revenue
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         JOIN customer_master cm ON sd.customer = cm.KUNNR
         JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
@@ -817,7 +817,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("top_region", """
         SELECT
             COALESCE(rm.region_name, 'Unmapped Region') AS region_name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         JOIN customer_master cm ON sd.customer = cm.KUNNR
         JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
@@ -830,7 +830,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("top_territory", """
         SELECT
             COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         JOIN customer_master cm ON sd.customer = cm.KUNNR
         JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
@@ -842,7 +842,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("lowest_territory", """
         SELECT
             COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         JOIN customer_master cm ON sd.customer = cm.KUNNR
         JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
@@ -855,7 +855,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("region_contribution_pct", """
         SELECT
             COALESCE(rm.region_name, 'Unmapped Region') AS region_name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue,
             ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Contribution_Percentage
         FROM sales_data sd
         JOIN customer_master cm ON sd.customer = cm.KUNNR
@@ -875,7 +875,7 @@ def _compute_core_kpis(cursor) -> dict:
 
     # ---------- 6. Distribution Analysis ----------
     run("distribution_revenue", """
-        SELECT COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name, ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        SELECT COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name, ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
         GROUP BY distribution_name
@@ -893,7 +893,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("distribution_contribution_pct", """
         SELECT
             COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name,
-            ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue,
+            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue,
             ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Contribution_Percentage
         FROM sales_data sd
         JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
@@ -922,7 +922,7 @@ def _compute_core_kpis(cursor) -> dict:
     #         st.Month AS Target_Month,
     #         ROUND(SUM(st.Value),2) AS Target_Value,
     #         (
-    #             SELECT ROUND(SUM(sd.Invoice_Value_INR),2)
+    #             SELECT ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2)
     #             FROM sales_data sd
     #             WHERE DATE_FORMAT(sd.billing__doc_date, '%Y%m') = CAST(st.Month AS CHAR)
     #         ) AS Actual_Value
@@ -955,7 +955,7 @@ def _compute_core_kpis(cursor) -> dict:
     """, required_tables=["sales_data", "customer_master", "account_group_master"])
 
     run("weak_territory", """
-        SELECT COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name, ROUND(SUM(sd.Invoice_Value_INR),2) AS Revenue
+        SELECT COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name, ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
         JOIN customer_master cm ON sd.customer = cm.KUNNR
         JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
