@@ -1234,6 +1234,12 @@ def _column_ref_correction(violations, col_to_tables):
 #      exact column.
 #   3. Drill-down: "top 3 tyre categories" => WHERE CATEGORY='Tyre' GROUP BY the
 #      next level (CONSTRUCTION).
+#   4. [PATCH] region/zone were falsely claimed as customer_master columns and
+#      were resolvable via an ungoverned fallback scan straight to
+#      region_master with no join path — this produced `cm.zone` in generated
+#      SQL (MySQL error 1054). Geography is now handled by its own dedicated
+#      GEOGRAPHY_CHAIN + _build_geography_prompt(), never by DIMENSIONS or the
+#      generic synonym fallback.
 #
 # IMPORTANT: edit the CONFIG below to match your real schema. Tables are matched
 # by the columns they contain (robust to munged table names), so you usually
@@ -1253,14 +1259,39 @@ DIMENSIONS = [
         "fact_key": "material",
         "dim_key":  "MATNR",
         "owns":     ["category", "tyre_type", "construction", "MAKTX", "PROD_TITLE"],
+        # [PATCH] NOTE: sku_master.construction is typed BIGINT in the live
+        # schema, so alphabetic construction_master codes
+        # (A, B, D, E, K, L, M, N, O, P, R, T, Z) can never match. This is a
+        # data-load defect upstream, not a mapping bug in this file.
     },
     {
         "label":    "customer",
         "fact_key": "customer",
         "dim_key":  "KUNNR",
-        "owns":     ["Cname", "acc_grp", "class", "region", "zone", "territory", "sales_office"],
+        # [PATCH] "region", "zone" REMOVED — customer_master does NOT own
+        # them. They live two joins away (territory_master -> region_master).
+        # Claiming them here let the synonym resolver treat them as reachable
+        # in a single hop, which produced the `cm.zone` bug. See
+        # GEOGRAPHY_CHAIN below, which is the only place region/zone resolve.
+        "owns":     ["Cname", "acc_grp", "class", "territory", "sales_office"],
     },
 ]
+
+# [PATCH — NEW] Multi-hop geography chain. `_build_business_map`'s DIMENSIONS
+# only support a single fact_key/dim_key hop, but region/zone require
+# customer_master -> territory_master -> region_master (two hops). Resolved
+# and injected separately by _build_geography_prompt(), never folded into
+# DIMENSIONS or COLUMN_SYNONYMS.
+GEOGRAPHY_CHAIN = {
+    "customer_fk":     "territory",          # customer_master.territory (bigint)
+    "territory_table": "territory_master",
+    "territory_key":   "territory_code",     # text
+    "territory_owns":  ["territory_name"],
+    "region_fk":       "region_code",        # territory_master.region_code (text)
+    "region_table":    "region_master",
+    "region_key":       "region",            # bigint
+    "region_owns":      ["region_name", "zone"],
+}
 
 # Product hierarchy ROOT → LEAF (column names; matched case/space/underscore-insensitively)
 PRODUCT_HIERARCHY = ["category", "tyre_type", "construction", "MAKTX"]
@@ -1270,14 +1301,21 @@ COLUMN_SYNONYMS = {
     "product category": "category", "category": "category", "categories": "category",
     "construction": "construction", "tyre type": "tyre_type", "tire type": "tyre_type",
     "vehicle": "category", "by vehicle": "category",
-    "region": "region", "zone": "zone",
     "customer": "Cname",
+    # [PATCH] "region": "region", "zone": "zone" REMOVED. Leaving them here let
+    # the fallback scan resolve them to `region_master` directly, with no
+    # join path — that is exactly what produced `cm.zone` in generated SQL.
+    # Geography wording is now handled exclusively by GEOGRAPHY_CHAIN /
+    # _build_geography_prompt(), which enforces the mandatory 2-hop join.
 }
 
 # Explicit definitions for complex business entities that require specific joins, filters, and grouping.
 ENTITY_DEFINITIONS = {
     "dealer": "If the user asks for 'dealer(s)', you MUST JOIN `customer_master` and `account_group_master` (ON `customer_master`.`acc_grp` = `account_group_master`.`KTOKD`), FILTER BY `account_group_master`.`account_group_name` = 'Dealer', and GROUP BY `customer_master`.`KUNNR`, `customer_master`.`Cname`.",
-    "distributor": "If the user asks for 'distributor(s)', you MUST JOIN `customer_master` and `class_master` (ON `customer_master`.`class` = `class_master`.`class_code`), FILTER BY `class_master`.`class_name` = 'Distributor', and GROUP BY `customer_master`.`KUNNR`, `customer_master`.`Cname`. Do NOT use `distribution_mapping` for distributors.",
+    # [PATCH] class_master's real value for code DB is 'DISTRIBUTOR' (all
+    # caps) — matched case-insensitively now so this never silently returns
+    # zero rows depending on collation.
+    "distributor": "If the user asks for 'distributor(s)', you MUST JOIN `customer_master` and `class_master` (ON `customer_master`.`class` = `class_master`.`class_code`), FILTER BY UPPER(`class_master`.`class_name`) = 'DISTRIBUTOR', and GROUP BY `customer_master`.`KUNNR`, `customer_master`.`Cname`. Do NOT use `distribution_mapping` for distributors.",
     "fleet": "If the user asks for 'fleet(s)', you MUST JOIN `customer_master` and FILTER BY `customer_master`.`acc_grp` = 'Z009', and GROUP BY `customer_master`.`KUNNR`, `customer_master`.`Cname`.",
 }
 # ── END CONFIG ───────────────────────────────────────────────────────────────
@@ -1398,10 +1436,19 @@ def _build_business_map(table_cols):
             loc = (t, oc)
         elif fact and nc in norm_tables.get(fact, set()):
             loc = (fact, _orig_col(table_cols, fact, colname))
-            
+
         if not loc:
+            # [PATCH] Restricted fallback: only resolve to a table this map
+            # already knows how to JOIN to (a dimension table already
+            # resolved above, or the two geography-chain tables). Previously
+            # this scanned EVERY table with no join-path check, which let
+            # "region"/"zone" resolve straight to region_master with no way
+            # to reach it — the root cause of the `cm.zone` bug.
+            reachable = {d["table"] for d in dim_resolved}
+            reachable.add(GEOGRAPHY_CHAIN["territory_table"])
+            reachable.add(GEOGRAPHY_CHAIN["region_table"])
             for tbl, cols in norm_tables.items():
-                if nc in cols:
+                if tbl in reachable and nc in cols:
                     loc = (tbl, _orig_col(table_cols, tbl, colname))
                     break
 
@@ -1464,6 +1511,40 @@ def _business_prompt(biz):
             out.append(f"- {rule}")
             
     return "\n".join(out)
+
+
+# [PATCH — NEW] Emits the mandatory 2-hop geography join chain. This is what
+# actually fixes the `cm.zone` / Unknown column bug — region/zone are simply
+# never reachable in one join, and the model has no way to know that without
+# being told explicitly, table by table, with the correct CAST direction.
+def _build_geography_prompt(table_cols):
+    """Emits a mandatory 2-hop join chain for region/zone. These are NEVER
+    reachable in a single join from sales_data or customer_master — omitting
+    this let the model guess an alias like `cm.zone` (MySQL error 1054)."""
+    g = GEOGRAPHY_CHAIN
+    norm_tables = {t: {_norm_ident(c) for c in cols} for t, cols in table_cols.items()}
+
+    cust_tbl = None
+    for t, ncols in norm_tables.items():
+        if "customer" in t.lower() and _norm_ident(g["customer_fk"]) in ncols:
+            cust_tbl = t
+            break
+    if not cust_tbl or g["territory_table"] not in table_cols or g["region_table"] not in table_cols:
+        return ""
+
+    return (
+        f"\n\nGEOGRAPHY CHAIN (MANDATORY — region/zone are NEVER columns on "
+        f"`{cust_tbl}` or the fact table; both joins below are required, in order):\n"
+        f"1. JOIN `{g['territory_table']}` ON "
+        f"CAST(`{cust_tbl}`.`{g['customer_fk']}` AS CHAR) = `{g['territory_table']}`.`{g['territory_key']}`\n"
+        f"2. JOIN `{g['region_table']}` ON "
+        f"`{g['territory_table']}`.`{g['region_fk']}` = CAST(`{g['region_table']}`.`{g['region_key']}` AS CHAR)\n"
+        f"   -- always CAST the BIGINT side to CHAR; never CAST the text side to "
+        f"UNSIGNED (silently coerces non-numeric values to 0 and breaks the join).\n"
+        f"`region`, `zone`, `region_name` exist ONLY on `{g['region_table']}`, reachable "
+        f"only after both joins above. `{cust_tbl}` and any alias of it (e.g. `cm`) "
+        f"NEVER owns `zone` or `region` — referencing them there is INVALID."
+    )
 
 
 def _detect_group_columns(question, biz):
@@ -1799,10 +1880,14 @@ PERFORMER RESOLUTION
 - NEVER rewrite "performer" as "dealer" unless the user explicitly uses the word "dealer".
 
 AUTHORITATIVE SCHEMA MAP PRECEDENCE
-- If the user message contains an "AUTHORITATIVE SCHEMA MAP", a "GROUP-BY MAPPING",
-  or a "HIERARCHY DRILL-DOWN" block, those are RESOLVED FROM THE REAL SCHEMA and
-  OVERRIDE these generic definitions for table names, column ownership, joins,
-  filters and group-by. Follow them exactly.
+- If the user message contains an "AUTHORITATIVE SCHEMA MAP", a "GEOGRAPHY CHAIN",
+  a "GROUP-BY MAPPING", or a "HIERARCHY DRILL-DOWN" block, those are RESOLVED
+  FROM THE REAL SCHEMA and OVERRIDE these generic definitions for table names,
+  column ownership, joins, filters and group-by. Follow them exactly.
+- REGION / ZONE ARE NEVER A SINGLE JOIN: if the user asks about region or zone,
+  you MUST follow the GEOGRAPHY CHAIN block exactly — it requires TWO joins
+  (customer -> territory_master -> region_master). Never reference `region` or
+  `zone` on `customer_master` or any alias of it (e.g. `cm.zone` is INVALID).
 - FAN-OUT: a dimension table must be joined on its key so each fact row matches
   at most one dimension row. Joining a product attribute on the wrong key (e.g.
   Customer) multiplies rows and inflates SUM — never do it.
@@ -2038,11 +2123,17 @@ Return ONLY valid JSON:
         try:
             biz = _build_business_map(table_cols_map)
             biz_prompt = _business_prompt(biz)
+            # [PATCH] Geography chain is resolved and injected separately —
+            # region/zone are never part of DIMENSIONS or biz_prompt.
+            geo_prompt = _build_geography_prompt(table_cols_map)
             if biz_prompt:
                 sql_user += f"\n\n{biz_prompt}"
                 print(f"[BIZMAP] fact={biz['fact']} measure={biz['measure']} "
                       f"dims={[(d['label'], d['table']) for d in biz['dims']]} "
                       f"levels={biz['levels']}")
+            if geo_prompt:
+                sql_user += geo_prompt
+                print("[GEOMAP] geography chain injected")
 
             values_by_col = _parse_value_index(schema_chunks)
             drill = _detect_drilldown(question, values_by_col, biz)
