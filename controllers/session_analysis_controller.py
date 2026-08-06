@@ -1087,6 +1087,20 @@ GENERAL RULES:
   still summing across ALL rows, producing a single fake row that silently absorbs nearly the
   whole table's revenue instead of a real answer. Before finalizing each query, check: does
   every non-aggregate item in SELECT also appear in GROUP BY? If not, fix it.
+- JOINED TABLE AGGREGATION (critical): When joining sales_target or any table that has a numeric
+  column (e.g. sales_target.Value, sales_target.Qty) that is NOT a grouping key, you MUST wrap it
+  in an aggregate function (e.g. SUM(st.Value), MAX(st.Value)). NEVER use a raw column from a
+  joined table in SELECT unless it also appears in GROUP BY. This prevents MySQL error 1055
+  (only_full_group_by) which will cause the query to fail completely.
+- COLUMN NAMES (critical): Use ONLY the exact column names as listed in the schema. Do NOT invent
+  column names. Key verified mappings:
+  * customer_master.class (code) → JOIN class_master ON class_master.class_code = customer_master.class → use class_master.class_name
+  * customer_master.acc_grp (code) → JOIN account_group_master ON account_group_master.KTOKD = customer_master.acc_grp → use account_group_master.account_group_name
+  * sku_master.category (code) → JOIN category_master ON category_master.category_code = sku_master.category → use category_master.category_name
+  * sku_master.tyre_type (code) → JOIN tyre_type_master ON tyre_type_master.tyre_type_code = sku_master.tyre_type → use tyre_type_master.tyre_type_name
+  * sku_master.construction (bigint) → JOIN construction_master ON CAST(sku_master.construction AS CHAR) = construction_master.construction_code → use construction_master.construction_description (NOT construction_name)
+  * sales_data → distribution_mapping: sales_data.distribution__Channel (NOTE: double underscore) = distribution_mapping.distribution_code → use distribution_mapping.distribution_name
+  * Never use cm.class_name, cm.tyre_type_name, or any invented alias. Always traverse the correct master table join.
 - STRICT LIMITS: Every query MUST include an ORDER BY clause (usually on revenue or quantity) and a LIMIT 5 or LIMIT 10 to prevent overloading the context window.
 - PERCENTAGE CONTEXT: Where possible, include a percentage calculation (e.g. (Revenue / Total_Revenue) * 100) so the final report knows how significant a trend is relative to the whole business.
 - Generate optimized MySQL 8+ queries.
