@@ -1130,7 +1130,10 @@ Respond ONLY with a valid JSON array of strings containing the SQL queries."""
                     insights.append(f"--- Insight Query {i} ---")
                     insights.append(f"Query: {query}")
                     for row in rows:
-                        row_str = " | ".join(f"{k}: {v}" for k, v in row.items())
+                        row_str = " | ".join(
+                            f"{k}: {json.dumps(v) if isinstance(v, (dict, list)) else v}"
+                            for k, v in row.items()
+                        )
                         insights.append(f"  {row_str}")
             except Exception as e:
                 print(f"[Agentic Helper] Query failed: {query}. Error: {e}")
@@ -1603,6 +1606,11 @@ def session_analysis_controller(get_connection_func):
             }), 200
 
         report = analysis.get("report", "")
+        # Guard: LLM may return report as a dict instead of string — serialize it
+        if isinstance(report, dict):
+            report = json.dumps(report, ensure_ascii=False)
+        elif not isinstance(report, str):
+            report = str(report)
         follow_up_questions = analysis.get("follow_up_questions", [])
         visualizations = analysis.get("visualizations", [])
 
