@@ -998,6 +998,9 @@ those are already handled. Focus instead on open-ended, exploratory angles. You 
 1. SEASONALITY: A month-over-month revenue trend (grouping by YEAR and MONTH of billing__doc_date) to identify massive seasonal spikes or slumps.
 2. SKU CONCENTRATION: A query to find the top 5 SKUs (by MAKTX) and their exact revenue contribution, as the business might be heavily reliant on a few materials.
 3. ZONE-WISE PERFORMANCE: A full breakdown of revenue by zone (using the customer -> territory -> region -> zone joins) to clearly highlight both dominating zones (like CZ) and severely underperforming zones (like WZ).
+4. TARGET VS ACTUALS GAP: Join sales_target with sales_data to find the exact top 5 SKUs or Regions that are missing their targets by the highest margins.
+5. DISCOUNT IMPACT: Analyze the relationship between Total_Discount_INR and Invoice_Value_INR by zone or category to reveal heavily discounted revenue sources.
+6. CUSTOMER CHANNEL MIX: Break down revenue by Account Group (customer_master.acc_grp = account_group_master.KTOKD) to reveal the split between Dealers, OEM, and Fleets.
 
 Always use the following joins when you do write queries. Several join keys have
 MISMATCHED COLUMN TYPES between tables (one side bigint/int, the other text) —
@@ -1084,8 +1087,10 @@ GENERAL RULES:
   still summing across ALL rows, producing a single fake row that silently absorbs nearly the
   whole table's revenue instead of a real answer. Before finalizing each query, check: does
   every non-aggregate item in SELECT also appear in GROUP BY? If not, fix it.
+- STRICT LIMITS: Every query MUST include an ORDER BY clause (usually on revenue or quantity) and a LIMIT 5 or LIMIT 10 to prevent overloading the context window.
+- PERCENTAGE CONTEXT: Where possible, include a percentage calculation (e.g. (Revenue / Total_Revenue) * 100) so the final report knows how significant a trend is relative to the whole business.
 - Generate optimized MySQL 8+ queries.
-- Write 4 to 8 queries total (fewer than before, since core KPIs are already covered elsewhere).
+- Write 6 to 10 queries total (to cover all the required specific angles above).
 
 Respond ONLY with a valid JSON array of strings containing the SQL queries."""
 
