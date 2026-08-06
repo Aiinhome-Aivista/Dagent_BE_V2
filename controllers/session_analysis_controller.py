@@ -994,10 +994,10 @@ beyond the core KPIs, which are already computed separately and provided verbati
 elsewhere in the context (look for "VERIFIED KPI BLOCK"). Do NOT recompute Total Revenue,
 Total Quantity, Total Transactions, Top Category/Construction/Tyre Type, Top Customer,
 Top Zone/Region/Territory, Distribution %, Claims, Returns, or Target Performance —
-those are already handled. Focus instead on open-ended, exploratory angles: seasonal
-patterns, cross-category comparisons, customer-class breakdowns, SKU-level trends,
-full region/territory breakdowns beyond Top/Lowest, or anything else that adds color
-beyond the fixed KPI set.
+those are already handled. Focus instead on open-ended, exploratory angles. You MUST generate specific queries to uncover:
+1. SEASONALITY: A month-over-month revenue trend (grouping by YEAR and MONTH of billing__doc_date) to identify massive seasonal spikes or slumps.
+2. SKU CONCENTRATION: A query to find the top 5 SKUs (by MAKTX) and their exact revenue contribution, as the business might be heavily reliant on a few materials.
+3. ZONE-WISE PERFORMANCE: A full breakdown of revenue by zone (using the customer -> territory -> region -> zone joins) to clearly highlight both dominating zones (like CZ) and severely underperforming zones (like WZ).
 
 Always use the following joins when you do write queries. Several join keys have
 MISMATCHED COLUMN TYPES between tables (one side bigint/int, the other text) —
