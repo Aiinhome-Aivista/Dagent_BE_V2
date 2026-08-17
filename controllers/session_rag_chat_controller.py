@@ -57,7 +57,7 @@ Generate exactly {count} intelligent follow-up questions based on the previous a
 
 STRICT RULES:
 1. Questions must be high-level BUSINESS INSIGHT questions.
-2. Questions must be directly related to the returned data.
+2. Questions must be directly related to the returned data (e.g., Sales vs Targets, Brand performance, Size or Division insights).
 
 Do not assume:
 - causes
@@ -68,7 +68,7 @@ Do not assume:
 - operational issues
 
 Only ask questions supported by the data.
-3. Questions must encourage deeper analysis, strategic thinking, or early problem detection.
+3. Questions must encourage deeper analysis, strategic thinking, or early problem detection (like target achievement).
 4. DO NOT mention table names, database names, column names, or technical terms.
 5. Questions should sound like executive/business analyst questions.
 6. Each question must start with "{ftype}".

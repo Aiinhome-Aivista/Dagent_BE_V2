@@ -146,7 +146,7 @@ def detect_cross_source_relationships(table_columns: dict, web_data: list, db_da
 You are an expert Knowledge Graph Builder specializing in tyre and automotive parts distribution data.
 
 Analyze the uploaded sales dataset and generate a RICH, HIERARCHICAL, business-focused Knowledge Graph.
-The graph MUST reflect the full product taxonomy AND all business relationships visible in the data from the 9 Master tables and 3 Fact tables.
+The graph MUST reflect the full product taxonomy AND all business relationships visible in the data from the 15 Master tables and multiple Fact tables (Sales Data, Target).
 
 ## DB Tables and Sample Data:
 {json.dumps(db_summary, indent=2)}
@@ -194,6 +194,29 @@ Node types: "Zone", "Region", "Territory"
 Create nodes for each billing distribution channel (e.g., ZOR, ZBCL, ZCC).
 Node type: "BillingChannel"
 
+### LEVEL 10 — Brand Nodes (from Brand Master)
+Create one node per unique Brand.
+Node type: "Brand"
+
+### LEVEL 11 — Sub Brand Nodes (from Sub Brand Master)
+Create one node per unique Sub Brand.
+Node type: "SubBrand"
+
+### LEVEL 12 — Size Nodes (from Size Master)
+Create one node per unique Size.
+Node type: "Size"
+
+### LEVEL 13 — Material Group Nodes (from Material Group Master)
+Create one node per unique Material Group.
+Node type: "MaterialGroup"
+
+### LEVEL 14 — Division Nodes (from Division Master)
+Create one node per unique Division.
+Node type: "Division"
+
+### LEVEL 15 — Sales Target Nodes (from SALES TARGET)
+Identify targets associated with Customers, Regions or Products.
+Node type: "SalesTarget"
 
 ## MANDATORY EDGES (Only create if supported by data)
 
@@ -203,6 +226,11 @@ Node type: "BillingChannel"
    - (SKU) --[BELONGS_TO_CATEGORY]--> (ProductCategory)
    - (SKU) --[HAS_CONSTRUCTION_TYPE]--> (Construction)
    - (SKU) --[USED_IN]--> (TyreType)
+   - (Brand) --[HAS_SUB_BRAND]--> (SubBrand)
+   - (SKU) --[HAS_BRAND]--> (Brand)
+   - (SKU) --[HAS_SIZE]--> (Size)
+   - (SKU) --[BELONGS_TO_MATERIAL_GROUP]--> (MaterialGroup)
+   - (SKU) --[BELONGS_TO_DIVISION]--> (Division)
 
 2. CUSTOMER & GEOGRAPHY HIERARCHY
    - (Zone) --[CONTAINS_REGION]--> (Region)
@@ -215,6 +243,9 @@ Node type: "BillingChannel"
    - (Customer) --[PURCHASED]--> (SKU)
    - (Customer) --[PRIMARILY_BUYS]--> (ProductCategory)
    - (ProductCategory) --[SOLD_VIA]--> (BillingChannel)
+   - (SalesTarget) --[TARGET_FOR]--> (Customer)
+   - (SalesTarget) --[TARGET_FOR]--> (SKU)
+   - (SalesTarget) --[TARGET_FOR]--> (Region)
 
 ---
 
@@ -251,8 +282,8 @@ Return EXACTLY this JSON (no markdown, no extra text):
     {{"from": "cust_99", "to": "cls_A", "label": "HAS_CLASS", "properties": {{}}}},
     {{"from": "cust_99", "to": "acc_z1", "label": "BELONGS_TO_ACCOUNT_GROUP", "properties": {{}}}}
   ],
-  "identified_node_types": ["ProductCategory", "Construction", "TyreType", "SKU", "Customer", "CustomerClass", "AccountGroup", "Zone", "Region", "Territory", "BillingChannel"],
-  "identified_relationship_types": ["HAS_CONSTRUCTION", "FITS_TYRE_TYPE", "BELONGS_TO_CATEGORY", "HAS_CONSTRUCTION_TYPE", "USED_IN", "CONTAINS_REGION", "CONTAINS_TERRITORY", "HAS_CUSTOMER", "HAS_CLASS", "BELONGS_TO_ACCOUNT_GROUP", "PURCHASED", "PRIMARILY_BUYS", "SOLD_VIA"],
+  "identified_node_types": ["ProductCategory", "Construction", "TyreType", "SKU", "Customer", "CustomerClass", "AccountGroup", "Zone", "Region", "Territory", "BillingChannel", "Brand", "SubBrand", "Size", "MaterialGroup", "Division", "SalesTarget"],
+  "identified_relationship_types": ["HAS_CONSTRUCTION", "FITS_TYRE_TYPE", "BELONGS_TO_CATEGORY", "HAS_CONSTRUCTION_TYPE", "USED_IN", "CONTAINS_REGION", "CONTAINS_TERRITORY", "HAS_CUSTOMER", "HAS_CLASS", "BELONGS_TO_ACCOUNT_GROUP", "PURCHASED", "PRIMARILY_BUYS", "SOLD_VIA", "HAS_SUB_BRAND", "HAS_BRAND", "HAS_SIZE", "BELONGS_TO_MATERIAL_GROUP", "BELONGS_TO_DIVISION", "TARGET_FOR"],
   "graph_schema": [
     "(Customer)-[:PURCHASED]->(SKU)",
     "(SKU)-[:BELONGS_TO_CATEGORY]->(ProductCategory)",
@@ -320,6 +351,12 @@ def generate_session_graph(session_id, web_data, db_data, target_arango_db=None)
     "BillingChannel":  "#00bfa5",   # teal — sales channel
     "Date":            "#00bcd4",
     "Month":           "#18ffff",
+    "Brand":           "#ab47bc",   # purple
+    "SubBrand":        "#ba68c8",   # lighter purple
+    "Size":            "#8d6e63",   # brown
+    "MaterialGroup":   "#66bb6a",   # light green
+    "Division":        "#26a69a",   # teal
+    "SalesTarget":     "#ef5350",   # red
     }
 
     table_columns = {}
