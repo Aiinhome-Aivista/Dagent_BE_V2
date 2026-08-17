@@ -218,6 +218,10 @@ Node type: "Division"
 Identify targets associated with Customers, Regions or Products.
 Node type: "SalesTarget"
 
+### LEVEL 16 — Day Nodes (from Day Master)
+Create nodes representing distinct days if relevant.
+Node type: "Day"
+
 ## MANDATORY EDGES (Only create if supported by data)
 
 1. PRODUCT HIERARCHY
@@ -282,7 +286,7 @@ Return EXACTLY this JSON (no markdown, no extra text):
     {{"from": "cust_99", "to": "cls_A", "label": "HAS_CLASS", "properties": {{}}}},
     {{"from": "cust_99", "to": "acc_z1", "label": "BELONGS_TO_ACCOUNT_GROUP", "properties": {{}}}}
   ],
-  "identified_node_types": ["ProductCategory", "Construction", "TyreType", "SKU", "Customer", "CustomerClass", "AccountGroup", "Zone", "Region", "Territory", "BillingChannel", "Brand", "SubBrand", "Size", "MaterialGroup", "Division", "SalesTarget"],
+  "identified_node_types": ["ProductCategory", "Construction", "TyreType", "SKU", "Customer", "CustomerClass", "AccountGroup", "Zone", "Region", "Territory", "BillingChannel", "Brand", "SubBrand", "Size", "MaterialGroup", "Division", "SalesTarget", "Day"],
   "identified_relationship_types": ["HAS_CONSTRUCTION", "FITS_TYRE_TYPE", "BELONGS_TO_CATEGORY", "HAS_CONSTRUCTION_TYPE", "USED_IN", "CONTAINS_REGION", "CONTAINS_TERRITORY", "HAS_CUSTOMER", "HAS_CLASS", "BELONGS_TO_ACCOUNT_GROUP", "PURCHASED", "PRIMARILY_BUYS", "SOLD_VIA", "HAS_SUB_BRAND", "HAS_BRAND", "HAS_SIZE", "BELONGS_TO_MATERIAL_GROUP", "BELONGS_TO_DIVISION", "TARGET_FOR"],
   "graph_schema": [
     "(Customer)-[:PURCHASED]->(SKU)",
@@ -357,6 +361,7 @@ def generate_session_graph(session_id, web_data, db_data, target_arango_db=None)
     "MaterialGroup":   "#66bb6a",   # light green
     "Division":        "#26a69a",   # teal
     "SalesTarget":     "#ef5350",   # red
+    "Day":             "#4dd0e1",   # cyan
     }
 
     table_columns = {}
