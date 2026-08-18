@@ -671,7 +671,11 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
         add_join("customer_master", "cm", "s.`customer` = cm.`KUNNR`")
         add_join("territory_master", "tm", "cm.`territory` = tm.`territory_code`")
         add_join("region_master", "rm", "tm.`region_code` = rm.`region`")
-        add_join("sku_master", "sm", "s.`material` = sm.`MATNR`")
+        if "material_master" in synced_lower:
+            add_join("material_master", "sm", "s.`material` = sm.`MATNR`")
+        else:
+            add_join("sku_master", "sm", "s.`material` = sm.`MATNR`")
+            
         add_join("tyre_type_master", "ttm", "sm.`tyre_type` = ttm.`tyre_type_code`")
         add_join("category_master", "catm", "sm.`category` = catm.`category_code`")
         add_join("construction_master", "consm", "sm.`construction` = consm.`construction_code`")
@@ -686,7 +690,8 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
             "tyre_type_master": "ttm",
             "category_master": "catm",
             "construction_master": "consm",
-            "sku_master": "sm"
+            "sku_master": "sm",
+            "material_master": "sm"
         }
         
         for req_key, opts in all_metrics.items():
