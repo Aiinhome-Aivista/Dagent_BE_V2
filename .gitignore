@@ -6,3 +6,4 @@ __pycache__
 graphs
 chroma_store
 *.xlsx
+/lib
