@@ -146,7 +146,7 @@ def detect_cross_source_relationships(table_columns: dict, web_data: list, db_da
 You are an expert Knowledge Graph Builder specializing in tyre and automotive parts distribution data.
 
 Analyze the uploaded sales dataset and generate a RICH, HIERARCHICAL, business-focused Knowledge Graph.
-The graph MUST reflect the full product taxonomy AND all business relationships visible in the data from the 15 Master tables and multiple Fact tables (Sales Data, Target).
+The graph MUST reflect the full product taxonomy AND all business relationships visible in the data from the 16 Master tables and Sales Data fact table.
 
 ## DB Tables and Sample Data:
 {json.dumps(db_summary, indent=2)}
@@ -170,9 +170,9 @@ Node type: "Construction"
 Create one node per unique vehicle/application type (e.g., TRUCK, LCV, CAR, 3W, SCV).
 Node type: "TyreType"
 
-### LEVEL 4 — SKU/Material Nodes (from SKU Master)
-Identify the TOP 15 most frequently appearing SKUs/Materials in the sales data.
-Node type: "SKU"
+### LEVEL 4 — Material Nodes (from Material Master)
+Identify the TOP 15 most frequently appearing Materials in the sales data.
+Node type: "Material"
 
 ### LEVEL 5 — Customer/Dealer Nodes (from Customer Master)
 Identify the TOP 15 most frequently appearing customers in the sales data.
@@ -187,8 +187,8 @@ Create one node for each account group (e.g., ZOR, Z1).
 Node type: "AccountGroup"
 
 ### LEVEL 8 — Geography Nodes (from Region & Territory Masters)
-Create nodes for Zone, Region, and Territory based on the data.
-Node types: "Zone", "Region", "Territory"
+Create nodes for Region and Territory based on the data.
+Node types: "Region", "Territory"
 
 ### LEVEL 9 — Billing/Channel Type Nodes (from Fact Tables)
 Create nodes for each billing distribution channel (e.g., ZOR, ZBCL, ZCC).
@@ -214,9 +214,9 @@ Node type: "MaterialGroup"
 Create one node per unique Division.
 Node type: "Division"
 
-### LEVEL 15 — Sales Target Nodes (from SALES TARGET)
-Identify targets associated with Customers, Regions or Products.
-Node type: "SalesTarget"
+### LEVEL 15 — Catg Nodes (from Catg Master)
+Create one node per unique Catg.
+Node type: "Catg"
 
 ### LEVEL 16 — Day Nodes (from Day Master)
 Create nodes representing distinct days if relevant.
@@ -227,34 +227,31 @@ Node type: "Day"
 1. PRODUCT HIERARCHY
    - (ProductCategory) --[HAS_CONSTRUCTION]--> (Construction)
    - (Construction) --[FITS_TYRE_TYPE]--> (TyreType)
-   - (SKU) --[BELONGS_TO_CATEGORY]--> (ProductCategory)
-   - (SKU) --[HAS_CONSTRUCTION_TYPE]--> (Construction)
-   - (SKU) --[USED_IN]--> (TyreType)
+   - (Material) --[BELONGS_TO_CATEGORY]--> (ProductCategory)
+   - (Material) --[HAS_CONSTRUCTION_TYPE]--> (Construction)
+   - (Material) --[USED_IN]--> (TyreType)
    - (Brand) --[HAS_SUB_BRAND]--> (SubBrand)
-   - (SKU) --[HAS_BRAND]--> (Brand)
-   - (SKU) --[HAS_SIZE]--> (Size)
-   - (SKU) --[BELONGS_TO_MATERIAL_GROUP]--> (MaterialGroup)
-   - (SKU) --[BELONGS_TO_DIVISION]--> (Division)
+   - (Material) --[HAS_BRAND]--> (Brand)
+   - (Material) --[HAS_SIZE]--> (Size)
+   - (Material) --[BELONGS_TO_MATERIAL_GROUP]--> (MaterialGroup)
+   - (Material) --[BELONGS_TO_DIVISION]--> (Division)
+   - (Material) --[BELONGS_TO_CATG]--> (Catg)
 
 2. CUSTOMER & GEOGRAPHY HIERARCHY
-   - (Zone) --[CONTAINS_REGION]--> (Region)
    - (Region) --[CONTAINS_TERRITORY]--> (Territory)
    - (Territory) --[HAS_CUSTOMER]--> (Customer)
    - (Customer) --[HAS_CLASS]--> (CustomerClass)
    - (Customer) --[BELONGS_TO_ACCOUNT_GROUP]--> (AccountGroup)
 
 3. FACT / TRANSACTION EDGES (Linking Customer to Material via Sales Data)
-   - (Customer) --[PURCHASED]--> (SKU)
+   - (Customer) --[PURCHASED]--> (Material)
    - (Customer) --[PRIMARILY_BUYS]--> (ProductCategory)
    - (ProductCategory) --[SOLD_VIA]--> (BillingChannel)
-   - (SalesTarget) --[TARGET_FOR]--> (Customer)
-   - (SalesTarget) --[TARGET_FOR]--> (SKU)
-   - (SalesTarget) --[TARGET_FOR]--> (Region)
 
 ---
 
 ## NUMERICAL PROPERTIES (store as node/edge properties, NEVER as separate nodes)
-- On ProductCategory / SKU nodes: total_sales_qty, total_invoice_value, total_discount
+- On ProductCategory / Material nodes: total_sales_qty, total_invoice_value, total_discount
 - On Customer nodes: total_invoice_value, total_claims
 - On PURCHASED edges: transaction_count, total_invoice_value, total_qty
 
@@ -267,51 +264,50 @@ Return EXACTLY this JSON (no markdown, no extra text):
     {{"id": "cat_tyre", "label": "Tyre", "type": "ProductCategory", "properties": {{"total_invoice_value": 0}}}},
     {{"id": "const_bias", "label": "BIAS", "type": "Construction", "properties": {{}}}},
     {{"id": "tt_truck", "label": "TRUCK", "type": "TyreType", "properties": {{}}}},
-    {{"id": "sku_1001", "label": "1001-TYRE", "type": "SKU", "properties": {{}}}},
+    {{"id": "mat_1001", "label": "1001-TYRE", "type": "Material", "properties": {{}}}},
     {{"id": "cust_99", "label": "CUST 99", "type": "Customer", "properties": {{}}}},
     {{"id": "cls_A", "label": "Class A", "type": "CustomerClass", "properties": {{}}}},
     {{"id": "acc_z1", "label": "Z1 Group", "type": "AccountGroup", "properties": {{}}}},
-    {{"id": "zone_central", "label": "Central", "type": "Zone", "properties": {{}}}},
     {{"id": "reg_jaipur", "label": "JAIPUR", "type": "Region", "properties": {{}}}},
     {{"id": "ter_north", "label": "North Terr", "type": "Territory", "properties": {{}}}},
-    {{"id": "ch_zor", "label": "ZOR", "type": "BillingChannel", "properties": {{}}}}
+    {{"id": "ch_zor", "label": "ZOR", "type": "BillingChannel", "properties": {{}}}},
+    {{"id": "catg_1", "label": "Catg 1", "type": "Catg", "properties": {{}}}}
   ],
   "edges": [
     {{"from": "cat_tyre", "to": "const_bias", "label": "HAS_CONSTRUCTION", "properties": {{}}}},
-    {{"from": "sku_1001", "to": "cat_tyre", "label": "BELONGS_TO_CATEGORY", "properties": {{}}}},
-    {{"from": "cust_99", "to": "sku_1001", "label": "PURCHASED", "properties": {{"total_invoice_value": 50000}}}},
-    {{"from": "zone_central", "to": "reg_jaipur", "label": "CONTAINS_REGION", "properties": {{}}}},
+    {{"from": "mat_1001", "to": "cat_tyre", "label": "BELONGS_TO_CATEGORY", "properties": {{}}}},
+    {{"from": "cust_99", "to": "mat_1001", "label": "PURCHASED", "properties": {{"total_invoice_value": 50000}}}},
     {{"from": "reg_jaipur", "to": "ter_north", "label": "CONTAINS_TERRITORY", "properties": {{}}}},
     {{"from": "ter_north", "to": "cust_99", "label": "HAS_CUSTOMER", "properties": {{}}}},
     {{"from": "cust_99", "to": "cls_A", "label": "HAS_CLASS", "properties": {{}}}},
     {{"from": "cust_99", "to": "acc_z1", "label": "BELONGS_TO_ACCOUNT_GROUP", "properties": {{}}}}
   ],
-  "identified_node_types": ["ProductCategory", "Construction", "TyreType", "SKU", "Customer", "CustomerClass", "AccountGroup", "Zone", "Region", "Territory", "BillingChannel", "Brand", "SubBrand", "Size", "MaterialGroup", "Division", "SalesTarget", "Day"],
-  "identified_relationship_types": ["HAS_CONSTRUCTION", "FITS_TYRE_TYPE", "BELONGS_TO_CATEGORY", "HAS_CONSTRUCTION_TYPE", "USED_IN", "CONTAINS_REGION", "CONTAINS_TERRITORY", "HAS_CUSTOMER", "HAS_CLASS", "BELONGS_TO_ACCOUNT_GROUP", "PURCHASED", "PRIMARILY_BUYS", "SOLD_VIA", "HAS_SUB_BRAND", "HAS_BRAND", "HAS_SIZE", "BELONGS_TO_MATERIAL_GROUP", "BELONGS_TO_DIVISION", "TARGET_FOR"],
+  "identified_node_types": ["ProductCategory", "Construction", "TyreType", "Material", "Customer", "CustomerClass", "AccountGroup", "Region", "Territory", "BillingChannel", "Brand", "SubBrand", "Size", "MaterialGroup", "Division", "Catg", "Day"],
+  "identified_relationship_types": ["HAS_CONSTRUCTION", "FITS_TYRE_TYPE", "BELONGS_TO_CATEGORY", "HAS_CONSTRUCTION_TYPE", "USED_IN", "CONTAINS_REGION", "CONTAINS_TERRITORY", "HAS_CUSTOMER", "HAS_CLASS", "BELONGS_TO_ACCOUNT_GROUP", "PURCHASED", "PRIMARILY_BUYS", "SOLD_VIA", "HAS_SUB_BRAND", "HAS_BRAND", "HAS_SIZE", "BELONGS_TO_MATERIAL_GROUP", "BELONGS_TO_DIVISION", "BELONGS_TO_CATG"],
   "graph_schema": [
-    "(Customer)-[:PURCHASED]->(SKU)",
-    "(SKU)-[:BELONGS_TO_CATEGORY]->(ProductCategory)",
+    "(Customer)-[:PURCHASED]->(Material)",
+    "(Material)-[:BELONGS_TO_CATEGORY]->(ProductCategory)",
     "(Territory)-[:HAS_CUSTOMER]->(Customer)"
   ],
   "sample_cypher_queries": [
-    "MATCH (c:Customer)-[p:PURCHASED]->(s:SKU) RETURN c.label, s.label, p.total_invoice_value ORDER BY p.total_invoice_value DESC LIMIT 10",
+    "MATCH (c:Customer)-[p:PURCHASED]->(s:Material) RETURN c.label, s.label, p.total_invoice_value ORDER BY p.total_invoice_value DESC LIMIT 10",
     "MATCH (t:Territory)-[:HAS_CUSTOMER]->(c:Customer) RETURN t.label, count(c) as customer_count"
   ],
   "business_insights": [
-    "Identify any insights based on the relationship between Customer Classes and Top SKUs",
+    "Identify any insights based on the relationship between Customer Classes and Top Materials",
     "Identify top regions based on Customer purchases"
   ],
   "suggested_graphrag_paths": [
-    "Start from Customer → PURCHASED → SKU → BELONGS_TO_CATEGORY → ProductCategory",
-    "Start from Zone → CONTAINS_REGION → Region → CONTAINS_TERRITORY → Territory → HAS_CUSTOMER → Customer"
+    "Start from Customer → PURCHASED → Material → BELONGS_TO_CATEGORY → ProductCategory",
+    "Start from Region → CONTAINS_TERRITORY → Territory → HAS_CUSTOMER → Customer"
   ]
 }}
 
 ## RULES
 1. Use ONLY node IDs you defined in the "nodes" array for "from"/"to" in edges.
-2. Extract actual values from the sample data — do NOT invent SKU codes or customer IDs.
+2. Extract actual values from the sample data — do NOT invent Material codes or customer IDs.
 3. Node IDs must be unique strings with no spaces (use underscores).
-4. For nodes like Customer, SKU, limit to the top 15 most frequent/significant ones from the sample to avoid overwhelming the graph, but capture all master table reference nodes (like Category, Construction, Region, etc.).
+4. For nodes like Customer, Material, limit to the top 15 most frequent/significant ones from the sample to avoid overwhelming the graph, but capture all master table reference nodes.
 """
 
     messages = [{"role": "user", "content": prompt}]
@@ -345,12 +341,12 @@ def generate_session_graph(session_id, web_data, db_data, target_arango_db=None)
     "ProductCategory": "#ff4081",   # pink — top-level product
     "Construction":    "#e040fb",   # purple — construction subtype
     "TyreType":        "#2979ff",   # blue — end-use vehicle
-    "SKU":             "#9ccc65",   # green — SKU/product code
+    "Material":        "#9ccc65",   # green — SKU/product code
+    "Catg":            "#a1887f",   # brown
     "Customer":        "#ffc107",   # amber — customer/dealer
     "CustomerClass":   "#ff9800",   # orange — customer class
     "AccountGroup":    "#ff5722",   # deep orange — account group
-    "Zone":            "#ff6d00",   # deep orange — geography parent
-    "Region":          "#fb8c00",   # orange — geography
+        "Region":          "#fb8c00",   # orange — geography
     "Territory":       "#f57c00",   # orange — geography child
     "BillingChannel":  "#00bfa5",   # teal — sales channel
     "Date":            "#00bcd4",
@@ -360,8 +356,7 @@ def generate_session_graph(session_id, web_data, db_data, target_arango_db=None)
     "Size":            "#8d6e63",   # brown
     "MaterialGroup":   "#66bb6a",   # light green
     "Division":        "#26a69a",   # teal
-    "SalesTarget":     "#ef5350",   # red
-    "Day":             "#4dd0e1",   # cyan
+        "Day":             "#4dd0e1",   # cyan
     }
 
     table_columns = {}
@@ -694,24 +689,24 @@ def _compute_core_kpis(cursor) -> dict:
             COALESCE(cat.category_name, 'Unmapped Category') AS category_name,
             ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
-        JOIN sku_master sk ON sd.material = sk.MATNR
+        JOIN material_master sk ON sd.material = sk.MATNR
         JOIN category_master cat ON sk.category = cat.category_code
         GROUP BY category_name
         ORDER BY Revenue DESC
         LIMIT 1
-    """, required_tables=["sales_data", "sku_master", "category_master"])
+    """, required_tables=["sales_data", "material_master", "category_master"])
 
     run("lowest_category", """
         SELECT
             COALESCE(cat.category_name, 'Unmapped Category') AS category_name,
             ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
-        JOIN sku_master sk ON sd.material = sk.MATNR
+        JOIN material_master sk ON sd.material = sk.MATNR
         JOIN category_master cat ON sk.category = cat.category_code
         GROUP BY category_name
         ORDER BY Revenue ASC
         LIMIT 1
-    """, required_tables=["sales_data", "sku_master", "category_master"])
+    """, required_tables=["sales_data", "material_master", "category_master"])
 
     # NOTE: CAST direction flipped — casting the bigint side to CHAR is
     # always safe; casting a text column to UNSIGNED silently coerces any
@@ -722,46 +717,46 @@ def _compute_core_kpis(cursor) -> dict:
             COALESCE(cons.construction_description, 'Unmapped Construction') AS construction_description,
             ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
-        JOIN sku_master sk ON sd.material = sk.MATNR
+        JOIN material_master sk ON sd.material = sk.MATNR
         JOIN construction_master cons
             ON CAST(sk.construction AS CHAR) = cons.construction_code
         GROUP BY construction_description
         ORDER BY Revenue DESC
         LIMIT 1
-    """, required_tables=["sales_data", "sku_master", "construction_master"])
+    """, required_tables=["sales_data", "material_master", "construction_master"])
 
     run("top_tyre_type", """
         SELECT
             COALESCE(tt.tyre_type_name, 'Unmapped Tyre Type') AS tyre_type_name,
             ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
-        JOIN sku_master sk ON sd.material = sk.MATNR
+        JOIN material_master sk ON sd.material = sk.MATNR
         JOIN tyre_type_master tt ON sk.tyre_type = tt.tyre_type_code
         GROUP BY tyre_type_name
         ORDER BY Revenue DESC
         LIMIT 1
-    """, required_tables=["sales_data", "sku_master", "tyre_type_master"])
+    """, required_tables=["sales_data", "material_master", "tyre_type_master"])
 
     run("top_5_products", """
         SELECT
             COALESCE(sk.MAKTX, 'Unmapped Product') AS product_name,
             ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
-        JOIN sku_master sk ON sd.material = sk.MATNR
+        JOIN material_master sk ON sd.material = sk.MATNR
         GROUP BY product_name
         ORDER BY Revenue DESC
         LIMIT 5
-    """, required_tables=["sales_data", "sku_master"])
+    """, required_tables=["sales_data", "material_master"])
 
     run("bottom_5_products", """
         SELECT sk.MAKTX AS product_name, ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
-        JOIN sku_master sk ON sd.material = sk.MATNR
+        JOIN material_master sk ON sd.material = sk.MATNR
         WHERE sk.MAKTX IS NOT NULL
         GROUP BY sk.MAKTX
         ORDER BY Revenue ASC
         LIMIT 5
-    """, required_tables=["sales_data", "sku_master"])
+    """, required_tables=["sales_data", "material_master"])
 
     # ---------- 4. Customer Performance ----------
     run("top_customer", """
@@ -915,31 +910,28 @@ def _compute_core_kpis(cursor) -> dict:
 
     # ---------- 6. Distribution Analysis ----------
     run("distribution_revenue", """
-        SELECT COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name, ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
+        SELECT COALESCE(sd.distribution__Channel, 'Unmapped Channel') AS distribution_name, ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
         FROM sales_data sd
-        JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
         GROUP BY distribution_name
         ORDER BY Revenue DESC
-    """, required_tables=["sales_data", "distribution_mapping"])
+    """, required_tables=["sales_data"])
 
     run("distribution_quantity", """
-        SELECT COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name, ROUND(SUM(sd.Sales_Qty),2) AS Quantity
+        SELECT COALESCE(sd.distribution__Channel, 'Unmapped Channel') AS distribution_name, ROUND(SUM(sd.Sales_Qty),2) AS Quantity
         FROM sales_data sd
-        JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
         GROUP BY distribution_name
         ORDER BY Quantity DESC
-    """, required_tables=["sales_data", "distribution_mapping"])
+    """, required_tables=["sales_data"])
 
     run("distribution_contribution_pct", """
         SELECT
-            COALESCE(dm.distribution_name, 'Unmapped Channel') AS distribution_name,
+            COALESCE(sd.distribution__Channel, 'Unmapped Channel') AS distribution_name,
             ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue,
             ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Contribution_Percentage
         FROM sales_data sd
-        JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
         GROUP BY distribution_name
         ORDER BY Revenue DESC
-    """, required_tables=["sales_data", "distribution_mapping"])
+    """, required_tables=["sales_data"])
 
     # # ---------- 7. Pricing Analysis ----------
     # run("pricing", """
@@ -1076,27 +1068,27 @@ CAST(territory_master.region_code AS UNSIGNED) = region_master.region
 region_master.zone
     -- Brief: the top-level PAN-India geography grouping (East/West/North/South I & II/Central/Nepal) — use for any zone-comparison angle not already covered by zone_wise_performance in the KPI block.
 
-sales_data.material = sku_master.MATNR
+sales_data.material = material_master.MATNR
     -- both text
     -- Brief: links a transaction to its product master — the entry point for any SKU/product-level query.
 
-sku_master.category = category_master.category_code
+material_master.category = category_master.category_code
     -- both text
     -- Brief: resolves Tyre / Tube / Flap / Others — use for category-mix trend angles beyond the fixed Top/Lowest Category.
 
-CAST(sku_master.construction AS CHAR) = construction_master.construction_code
+CAST(material_master.construction AS CHAR) = construction_master.construction_code
     -- construction is bigint here; NOTE: this column can only hold numeric codes as currently typed, so alphabetic construction_master codes (A, B, D, E, K, L, M, N, O, P, R, T, Z) will never match — flag any "Unmapped Construction" spike to the data team rather than assuming the query is wrong
     -- Brief: resolves BIAS vs RADIAL — use for radialization/premiumization trend angles, keeping the known matching gap in mind.
 
-sku_master.tyre_type = tyre_type_master.tyre_type_code
+material_master.tyre_type = tyre_type_master.tyre_type_code
     -- both text
     -- Brief: resolves the end-use vehicle segment (Truck, LCV, Car, Tractor, OTR, etc.) — use for segment-growth or vehicle-mix angles beyond the fixed Top Tyre Type.
 
-sales_data.distribution__Channel = distribution_mapping.distribution_code
+
     -- bigint vs int, safe implicit match
     -- Brief: resolves Replacement / OEM / STU / DEF — use for channel-mix angles beyond the fixed Distribution % already in the KPI block.
 
-sales_target.MATNR = sku_master.MATNR
+sales_target.MATNR = material_master.MATNR
     -- both text
     -- Brief: links a planned target line to its product — use for SKU-level target-vs-actual gaps, since the KPI block only covers zone-level target achievement.
 
@@ -1122,7 +1114,7 @@ GENERAL RULES:
 - Use JOIN (not INNER JOIN) when resolving names, and use COALESCE() to label unmatched
   codes explicitly (e.g. "Unmapped Account") rather than dropping those rows.
 - Cast mismatched join key types explicitly (see CASTs above) — do not rely on implicit coercion.
-- GROUP BY CORRECTNESS (critical): every non-aggregated column you SELECT (e.g. sku_master.MAKTX,
+- GROUP BY CORRECTNESS (critical): every non-aggregated column you SELECT (e.g. material_master.MAKTX,
   customer_master.Cname, region_master.zone) MUST also appear in that query's GROUP BY clause.
   Never SELECT a descriptive name column next to SUM(...)/COUNT(...) without grouping by that
   same column — doing so lets the database pick an arbitrary or NULL value for the name while
@@ -1138,10 +1130,10 @@ GENERAL RULES:
   column names. Key verified mappings:
   * customer_master.class (code) → JOIN class_master ON class_master.class_code = customer_master.class → use class_master.class_name
   * customer_master.acc_grp (code) → JOIN account_group_master ON account_group_master.KTOKD = customer_master.acc_grp → use account_group_master.account_group_name
-  * sku_master.category (code) → JOIN category_master ON category_master.category_code = sku_master.category → use category_master.category_name
-  * sku_master.tyre_type (code) → JOIN tyre_type_master ON tyre_type_master.tyre_type_code = sku_master.tyre_type → use tyre_type_master.tyre_type_name
-  * sku_master.construction (bigint) → JOIN construction_master ON CAST(sku_master.construction AS CHAR) = construction_master.construction_code → use construction_master.construction_description (NOT construction_name)
-  * sales_data → distribution_mapping: sales_data.distribution__Channel (NOTE: double underscore) = distribution_mapping.distribution_code → use distribution_mapping.distribution_name
+  * material_master.category (code) → JOIN category_master ON category_master.category_code = material_master.category → use category_master.category_name
+  * material_master.tyre_type (code) → JOIN tyre_type_master ON tyre_type_master.tyre_type_code = material_master.tyre_type → use tyre_type_master.tyre_type_name
+  * material_master.construction (bigint) → JOIN construction_master ON CAST(material_master.construction AS CHAR) = construction_master.construction_code → use construction_master.construction_description (NOT construction_name)
+  
   * Never use cm.class_name, cm.tyre_type_name, or any invented alias. Always traverse the correct master table join.
 - STRICT LIMITS: Every query MUST include an ORDER BY clause (usually on revenue or quantity) and a LIMIT 5 or LIMIT 10 to prevent overloading the context window.
 - PERCENTAGE CONTEXT: Where possible, include a percentage calculation (e.g. (Revenue / Total_Revenue) * 100) so the final report knows how significant a trend is relative to the whole business.

@@ -1258,8 +1258,8 @@ DIMENSIONS = [
         "label":    "product",
         "fact_key": "material",
         "dim_key":  "MATNR",
-        "owns":     ["category", "tyre_type", "construction", "MAKTX", "PROD_TITLE"],
-        # [PATCH] NOTE: sku_master.construction is typed BIGINT in the live
+        "owns":     ["category", "tyre_type", "construction", "MAKTX", "PROD_TITLE", "BRAND", "SUB_BRAND", "MATKL", "ZSIZE_CD"],
+        # [PATCH] NOTE: material_master.construction is typed BIGINT in the live
         # schema, so alphabetic construction_master codes
         # (A, B, D, E, K, L, M, N, O, P, R, T, Z) can never match. This is a
         # data-load defect upstream, not a mapping bug in this file.
@@ -1315,7 +1315,7 @@ ENTITY_DEFINITIONS = {
     # [PATCH] class_master's real value for code DB is 'DISTRIBUTOR' (all
     # caps) — matched case-insensitively now so this never silently returns
     # zero rows depending on collation.
-    "distributor": "If the user asks for 'distributor(s)', you MUST JOIN `customer_master` and `class_master` (ON `customer_master`.`class` = `class_master`.`class_code`), FILTER BY UPPER(`class_master`.`class_name`) = 'DISTRIBUTOR', and GROUP BY `customer_master`.`KUNNR`, `customer_master`.`Cname`. Do NOT use `distribution_mapping` for distributors.",
+    "distributor": "If the user asks for 'distributor(s)', you MUST JOIN `customer_master` and `class_master` (ON `customer_master`.`class` = `class_master`.`class_code`), FILTER BY UPPER(`class_master`.`class_name`) = 'DISTRIBUTOR', and GROUP BY `customer_master`.`KUNNR`, `customer_master`.`Cname`. Do NOT use `` for distributors.",
     "fleet": "If the user asks for 'fleet(s)', you MUST JOIN `customer_master` and FILTER BY `customer_master`.`acc_grp` = 'Z009', and GROUP BY `customer_master`.`KUNNR`, `customer_master`.`Cname`.",
 }
 # ── END CONFIG ───────────────────────────────────────────────────────────────
@@ -1849,10 +1849,10 @@ BUSINESS DEFINITIONS
 - Net Sales = SUM(invoice_value) - SUM(total_discount)
 - Invoice Count = COUNT(DISTINCT invoice_number)
 - Product = Material
-- Product Category ("Tyre", "Tube", "Flap") = ALWAYS LEFT JOIN `category_master` on `sku_master.category = category_master.category_code` and select `category_name`. Do NOT just select the category code from `sku_master`.
-- Construction / "tyre type" / "tube type" ("RADIAL", "BIAS") = ALWAYS LEFT JOIN `construction_master` on `sku_master.construction = construction_master.construction_code` and select `construction_description`.
-- Vehicle / "vehicle type" / "vehicle category" ("TRUCK", "CAR") = ALWAYS LEFT JOIN `tyre_type_master` on `sku_master.tyre_type = tyre_type_master.tyre_type_code` and select `tyre_type_name`. This is DIFFERENT from CATEGORY.
-- These attributes are PRODUCT attributes keyed by Material (`sku_master`). First LEFT JOIN `sku_master` to fact, then LEFT JOIN these master tables to `sku_master`. Never join them directly on Customer.
+- Product Category ("Tyre", "Tube", "Flap") = ALWAYS LEFT JOIN `category_master` on `material_master.category = category_master.category_code` and select `category_name`. Do NOT just select the category code from `material_master`.
+- Construction / "tyre type" / "tube type" ("RADIAL", "BIAS") = ALWAYS LEFT JOIN `construction_master` on `material_master.construction = construction_master.construction_code` and select `construction_description`.
+- Vehicle / "vehicle type" / "vehicle category" ("TRUCK", "CAR") = ALWAYS LEFT JOIN `tyre_type_master` on `material_master.tyre_type = tyre_type_master.tyre_type_code` and select `tyre_type_name`. This is DIFFERENT from CATEGORY.
+- These attributes are PRODUCT attributes keyed by Material (`material_master`). First LEFT JOIN `material_master` to fact, then LEFT JOIN these master tables to `material_master`. Never join them directly on Customer.
 - "category-wise" / "by category" / "product category wise" / "per category" => GROUP BY `CATEGORY`, NOT Material
 - "product-wise" / "by product" => GROUP BY Material
 - Top Dealer = Dealer ranked by Sales descending
@@ -2009,7 +2009,7 @@ PLAIN TOP-N vs WINDOWED TOP-N
 - Use the window-function pattern ONLY for per-group ("X-wise") questions.
 
 JOINS AND MISSING DIMENSIONS (CRITICAL)
-- ALWAYS use `LEFT JOIN` for ANY join to a dimension table (e.g., `customer_master`, `sku_master`, `category_master`, etc.). NEVER use an `INNER JOIN` or `JOIN` anywhere in the query when fetching dimension data, even when joining from a CTE!
+- ALWAYS use `LEFT JOIN` for ANY join to a dimension table (e.g., `customer_master`, `material_master`, `category_master`, etc.). NEVER use an `INNER JOIN` or `JOIN` anywhere in the query when fetching dimension data, even when joining from a CTE!
 - NEVER use an `INNER JOIN` (or plain `JOIN`) that might drop valid records just because the dimension data is missing.
 - When selecting ANY name from a dimension table (whether inside a CTE or in the final MAIN query), you MUST wrap it in `COALESCE` to prevent nulls in the JSON output. 
   Example: `SELECT COALESCE(cm.Cname, 'N/A') AS dealer_name`
