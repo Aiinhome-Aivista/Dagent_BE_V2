@@ -692,7 +692,8 @@ def apply_external_sync(user_id, connection_id, session_id, table):
 
     # Create stored procedures for this database
     try:
-        run_stored_procedures(user_db_name)
+        # run_stored_procedures(user_db_name)
+        pass
     except Exception as e:
         print(f"Error creating stored procedures for {user_db_name}: {e}")
 

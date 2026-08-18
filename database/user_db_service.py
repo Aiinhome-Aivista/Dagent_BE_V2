@@ -36,7 +36,8 @@ def create_user_database(email):
             cursor.execute(f"CREATE DATABASE `{db_name}`")
             
             try:
-                run_stored_procedures(db_name)
+                # run_stored_procedures(db_name)
+                pass
             except Exception as e:
                 print(f"Failed to create stored procedures for {db_name}: {e}")
 
@@ -128,7 +129,8 @@ def create_workspace_database(workspace_id, workspace_name):
             cursor.execute(f"CREATE DATABASE `{db_name}`")
             
             try:
-                run_stored_procedures(db_name)
+                # run_stored_procedures(db_name)
+                pass
             except Exception as e:
                 print(f"Failed to create stored procedures for {db_name}: {e}")
 

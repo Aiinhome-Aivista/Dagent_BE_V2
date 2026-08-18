@@ -36,7 +36,7 @@ def get_all_users_controller(get_db_connection):
         cursor.execute("""
             SELECT u.id, u.name, u.email, u.created_at
             FROM users u
-            WHERE u.role_id = 1
+            WHERE u.role_id = 2
             ORDER BY u.name ASC
         """)
         users = cursor.fetchall()
@@ -96,7 +96,7 @@ def create_workspace_controller(get_db_connection):
         # Only Admin (role_id = 2) can create workspaces, unless it's a default workspace
         is_default = workspace_name.startswith("default_")
         
-        if user['role_id'] != 2 and not is_default:
+        if user['role_id'] != 1 and not is_default:
             cursor.close()
             db_conn.close()
             return jsonify({
@@ -246,7 +246,7 @@ def assign_workspace_users_controller(get_db_connection):
                 "message": f"Invalid admin: User ID {admin_id} does not exist."
             }), 404
 
-        if admin_user['role_id'] != 2:
+        if admin_user['role_id'] != 1:
             cursor.close()
             db_conn.close()
             return jsonify({
@@ -409,7 +409,7 @@ def remove_workspace_user_controller(get_db_connection):
         cursor.execute("SELECT id, role_id FROM users WHERE id = %s", (admin_id,))
         admin_user = cursor.fetchone()
 
-        if not admin_user or admin_user['role_id'] != 2:
+        if not admin_user or admin_user['role_id'] != 1:
             cursor.close()
             db_conn.close()
             return jsonify({
@@ -1232,7 +1232,7 @@ def create_user_controller(get_db_connection):
         )
         admin = cursor.fetchone()
 
-        if not admin or admin["role_id"] != 2:
+        if not admin or admin["role_id"] != 1:
             return jsonify({
                 "status": "error",
                 "message": "Access denied. Only admin can create users."
@@ -1254,7 +1254,7 @@ def create_user_controller(get_db_connection):
         # --- 3. INSERT USER ---
         insert_query = """
             INSERT INTO users (name, email, password, role_id)
-            VALUES (%s, %s, %s, 1)
+            VALUES (%s, %s, %s, 2)
         """
 
         cursor.execute(insert_query, (name, email, password))
