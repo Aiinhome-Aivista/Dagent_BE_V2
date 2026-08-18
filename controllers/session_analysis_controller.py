@@ -271,7 +271,11 @@ Return EXACTLY this JSON (no markdown, no extra text):
     {{"id": "reg_jaipur", "label": "JAIPUR", "type": "Region", "properties": {{}}}},
     {{"id": "ter_north", "label": "North Terr", "type": "Territory", "properties": {{}}}},
     {{"id": "ch_zor", "label": "ZOR", "type": "BillingChannel", "properties": {{}}}},
-    {{"id": "catg_1", "label": "Catg 1", "type": "Catg", "properties": {{}}}}
+    {{"id": "catg_1", "label": "Catg 1", "type": "Catg", "properties": {{}}}},
+    {{"id": "brand_1", "label": "Brand X", "type": "Brand", "properties": {{}}}},
+    {{"id": "subbrand_1", "label": "SubBrand Y", "type": "SubBrand", "properties": {{}}}},
+    {{"id": "day_1", "label": "Monday", "type": "Day", "properties": {{}}}},
+    {{"id": "div_1", "label": "Division 1", "type": "Division", "properties": {{}}}}
   ],
   "edges": [
     {{"from": "cat_tyre", "to": "const_bias", "label": "HAS_CONSTRUCTION", "properties": {{}}}},
@@ -280,7 +284,9 @@ Return EXACTLY this JSON (no markdown, no extra text):
     {{"from": "reg_jaipur", "to": "ter_north", "label": "CONTAINS_TERRITORY", "properties": {{}}}},
     {{"from": "ter_north", "to": "cust_99", "label": "HAS_CUSTOMER", "properties": {{}}}},
     {{"from": "cust_99", "to": "cls_A", "label": "HAS_CLASS", "properties": {{}}}},
-    {{"from": "cust_99", "to": "acc_z1", "label": "BELONGS_TO_ACCOUNT_GROUP", "properties": {{}}}}
+    {{"from": "cust_99", "to": "acc_z1", "label": "BELONGS_TO_ACCOUNT_GROUP", "properties": {{}}}},
+    {{"from": "mat_1001", "to": "brand_1", "label": "HAS_BRAND", "properties": {{}}}},
+    {{"from": "brand_1", "to": "subbrand_1", "label": "HAS_SUB_BRAND", "properties": {{}}}}
   ],
   "identified_node_types": ["ProductCategory", "Construction", "TyreType", "Material", "Customer", "CustomerClass", "AccountGroup", "Region", "Territory", "BillingChannel", "Brand", "SubBrand", "Size", "MaterialGroup", "Division", "Catg", "Day"],
   "identified_relationship_types": ["HAS_CONSTRUCTION", "FITS_TYRE_TYPE", "BELONGS_TO_CATEGORY", "HAS_CONSTRUCTION_TYPE", "USED_IN", "CONTAINS_REGION", "CONTAINS_TERRITORY", "HAS_CUSTOMER", "HAS_CLASS", "BELONGS_TO_ACCOUNT_GROUP", "PURCHASED", "PRIMARILY_BUYS", "SOLD_VIA", "HAS_SUB_BRAND", "HAS_BRAND", "HAS_SIZE", "BELONGS_TO_MATERIAL_GROUP", "BELONGS_TO_DIVISION", "BELONGS_TO_CATG"],
@@ -308,6 +314,7 @@ Return EXACTLY this JSON (no markdown, no extra text):
 2. Extract actual values from the sample data — do NOT invent Material codes or customer IDs.
 3. Node IDs must be unique strings with no spaces (use underscores).
 4. For nodes like Customer, Material, limit to the top 15 most frequent/significant ones from the sample to avoid overwhelming the graph, but capture all master table reference nodes.
+5. CRITICAL: You MUST extract and create at least 2 nodes for Brand, SubBrand, Day, Size, Division, MaterialGroup, and Catg if they appear in the provided sample data. Do not skip these new dimensions.
 """
 
     messages = [{"role": "user", "content": prompt}]
