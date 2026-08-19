@@ -7,3 +7,4 @@ graphs
 chroma_store
 *.xlsx
 /lib
+*.zip
