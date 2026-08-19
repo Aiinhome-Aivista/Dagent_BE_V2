@@ -11,6 +11,7 @@ from sqlalchemy import create_engine , text
 from apscheduler.schedulers.background import BackgroundScheduler
 from database.csv_processor import process_csv_job
 from database.sql_processor import detect_sql_dialect, parse_mysql_or_pg, parse_mssql, process_sql_job
+from database.doc_processor import process_doc_job
 from database.config import MYSQL_CONFIG
 
 
@@ -245,8 +246,8 @@ def upload_chunk_controller(get_db_connection):
         # 🔹 INSERT INTO connection_history
         history_name = f"Chunk Upload: {filename} to allocated DB ({allocated_db_name})"
 
-        db_type_hist = 'sql_chunk_upload' if filename.lower().endswith('.sql') else 'csv_chunk_upload'
-        db_type_cred = 'sql_upload' if filename.lower().endswith('.sql') else 'csv_upload'
+        db_type_hist = 'sql_chunk_upload' if filename.lower().endswith('.sql') else 'doc_chunk_upload' if filename.lower().endswith(('.pdf', '.doc', '.docx')) else 'csv_chunk_upload'
+        db_type_cred = 'sql_upload' if filename.lower().endswith('.sql') else 'doc_upload' if filename.lower().endswith(('.pdf', '.doc', '.docx')) else 'csv_upload'
 
         cursor.execute("""
             INSERT INTO connection_history
@@ -269,9 +270,16 @@ def upload_chunk_controller(get_db_connection):
         cursor.close()
         db_conn.close()
 
-        # The background processing (scheduler.add_job) has been removed from here.
-        # Data will now only be inserted into the database when the user explicitly 
-        # clicks the 'Continue to Import' button which triggers import_csv_controller.
+        # Trigger background job for PDF/DOC/TXT files
+        if filename.lower().endswith(('.pdf', '.txt', '.doc', '.docx', '.md')):
+            job = scheduler.add_job(
+                func=process_doc_job,
+                args=[merged_path, allocated_db_name, MYSQL_CONFIG.get("host"), MYSQL_CONFIG.get("user"), MYSQL_CONFIG.get("password"), MYSQL_CONFIG.get("port", 3306)],
+                trigger='date',
+                id=str(uuid.uuid4()),
+                replace_existing=True
+            )
+            print(f"Scheduled Document processing job: {job.id}")
 
         import shutil
         shutil.rmtree(session_folder)
