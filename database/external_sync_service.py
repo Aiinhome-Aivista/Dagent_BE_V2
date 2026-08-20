@@ -187,6 +187,60 @@ def sync_external_database(user_id, connection_id, session_id):
     user_conn.close()
     user_db_name = new_user_db
 
+    if db_type in ['csv_upload', 'csv_chunk_upload', 'sql_upload', 'sql_chunk_upload', 'doc_upload', 'doc_chunk_upload']:
+        total_rows = 0
+        total_columns = 0
+        table_summary = []
+        
+        try:
+            target_conn = pymysql.connect(
+                host=MYSQL_CONFIG["host"],
+                user=MYSQL_CONFIG["user"],
+                password=MYSQL_CONFIG["password"],
+                database=user_db_name,
+                autocommit=True
+            )
+            
+            # For doc upload, wait up to 5 minutes for the background job to create the table
+            if db_type in ['doc_upload', 'doc_chunk_upload']:
+                import time
+                for _ in range(150):
+                    with target_conn.cursor() as cursor:
+                        cursor.execute("SHOW TABLES")
+                        current_tables = [t[0] for t in cursor.fetchall()]
+                    if "workspace_files" in current_tables:
+                        break
+                    time.sleep(2)
+            
+            with target_conn.cursor() as cursor:
+                cursor.execute("SHOW TABLES")
+                tables = [t[0] for t in cursor.fetchall()]
+                for t in tables:
+                    cursor.execute(f"SELECT COUNT(*) FROM `{t}`")
+                    row_count = cursor.fetchone()[0]
+                    cursor.execute(f"SHOW COLUMNS FROM `{t}`")
+                    col_count = len(cursor.fetchall())
+                    total_rows += row_count
+                    total_columns += col_count
+                    table_summary.append({"table": t, "rows": row_count, "columns": col_count})
+            
+            target_conn.close()
+        except Exception as e:
+            print("Error fetching tables for file upload:", e)
+            
+        data_size_mb = round((total_rows * total_columns * 8) / (1024 * 1024), 2)
+        return {
+            "summary": {
+                "total_rows": total_rows,
+                "total_columns": total_columns,
+                "data_size_mb": data_size_mb,
+                "last_sync": "Just now"
+            },
+            "tables": table_summary,
+            "situations": [],
+            "new_tables": [t["table"] for t in table_summary]
+        }
+
     if db_type == 'ftp':
         import ftplib
         import os
@@ -699,6 +753,9 @@ def apply_external_sync(user_id, connection_id, session_id, table):
 
     db_conn.close()
 
+    if db_type in ['csv_upload', 'csv_chunk_upload', 'sql_upload', 'sql_chunk_upload', 'doc_upload', 'doc_chunk_upload']:
+        return
+
     if db_type in ["postgresql", "postgres"]:
         import psycopg2
         source_conn = psycopg2.connect(
@@ -881,6 +938,9 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
     user_conn.close()
 
     user_db_name = new_user_db
+
+    if db_type in ['csv_upload', 'csv_chunk_upload', 'sql_upload', 'sql_chunk_upload', 'doc_upload', 'doc_chunk_upload']:
+        return
 
     # 3. Connect to Source and Target Databases
     if db_type in ["postgresql", "postgres"]:

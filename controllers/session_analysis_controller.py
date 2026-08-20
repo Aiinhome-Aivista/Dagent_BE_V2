@@ -27,7 +27,7 @@ from database.config import GRAPH_FOLDER, BASE_URL
 
 MISTRAL_URL    = "https://api.mistral.ai/v1/chat/completions"
 MAX_ROWS       = 100
-MAX_CTX_CHARS  = 24000
+MAX_CTX_CHARS  = 80000
 
 
 
@@ -133,7 +133,8 @@ Tables and columns:
             json={
                 "model": MISTRAL_MODEL,
                 "messages":[{"role":"user","content":prompt}],
-                "temperature":0
+                "temperature":0,
+                "response_format": {"type": "json_object"}
             },
             timeout=60
         )
@@ -187,8 +188,9 @@ def generate_session_graph(session_id, web_data, db_data):
     for db in db_data:
 
         db_name = db["external_database"]
+        display_name = db.get("display_name", db_name)
 
-        net.add_node(db_name, label=db_name, **DB_STYLE)
+        net.add_node(db_name, label=display_name, **DB_STYLE)
         net.add_edge(session_node, db_name)
 
         for table in db["tables"]:
@@ -207,8 +209,8 @@ def generate_session_graph(session_id, web_data, db_data):
             net.add_edge(db_name, tname)
 
             # Column nodes
+            sample_rows = table.get("sample_rows", [])
             for col in columns:
-
                 col_node = f"{tname}.{col}"
 
                 net.add_node(
@@ -219,6 +221,22 @@ def generate_session_graph(session_id, web_data, db_data):
                 )
 
                 net.add_edge(tname, col_node)
+                
+                # Add values as leaf nodes to make the graph rich!
+                added_vals = set()
+                for row in sample_rows:
+                    val = row.get(col)
+                    if val is not None and str(val).strip():
+                        val_str = str(val).strip()
+                        # Shorten if too long
+                        if len(val_str) > 25:
+                            val_str = val_str[:22] + "..."
+                            
+                        if val_str not in added_vals:
+                            added_vals.add(val_str)
+                            val_node = f"{col_node}_{val_str}"
+                            net.add_node(val_node, label=val_str, color="#bcaaa4", size=5, shape="text")
+                            net.add_edge(col_node, val_node)
 
 
     # -------------------------
@@ -392,7 +410,10 @@ def _fetch_db_data(session_id: str, databaseses: list, conn) -> list:
 
                 try:
 
-                    ext_cur.execute(f"SELECT * FROM `{t}` LIMIT %s", (MAX_ROWS,))
+                    if t == 'workspace_files':
+                        ext_cur.execute(f"SELECT * FROM `{t}` ORDER BY id DESC LIMIT %s", (MAX_ROWS,))
+                    else:
+                        ext_cur.execute(f"SELECT * FROM `{t}` LIMIT %s", (MAX_ROWS,))
                     rows = ext_cur.fetchall()
 
                     row_count = len(rows)
@@ -430,13 +451,71 @@ def _fetch_db_data(session_id: str, databaseses: list, conn) -> list:
                                 "sample": distinct_vals[:10]
                             }
 
-                    db_result["tables"].append({
-                        "table_name": t,
-                        "row_count": row_count,
-                        "columns": cols,
-                        "column_stats": col_stats,
-                        "sample_rows": rows[:5] if rows else []
-                    })
+                    if t == 'workspace_files':
+                        for r in rows:
+                            try:
+                                import json
+                                if isinstance(r.get('file_data'), str):
+                                    file_data = json.loads(r['file_data'])
+                                else:
+                                    file_data = r.get('file_data') or {}
+                                    
+                                # Grab the file name to use as the display name for the db node
+                                file_name = r.get('file_name', 'Document')
+                                db_result["display_name"] = file_name
+                                    
+                                structured = file_data.get('structured_content')
+                                if structured:
+                                    # Add Paragraphs as a virtual table
+                                    paragraphs = structured.get('paragraphs', [])
+                                    if paragraphs:
+                                        db_result["tables"].append({
+                                            "table_name": "Document_Paragraphs",
+                                            "row_count": len(paragraphs),
+                                            "columns": ["title", "text"],
+                                            "column_stats": {},
+                                            "sample_rows": paragraphs[:5]
+                                        })
+                                    # Add each PDF table as a virtual table
+                                    for idx, vtable in enumerate(structured.get('tables', [])):
+                                        vname = vtable.get('table_name', f"PDF_Table_{idx+1}")
+                                        vcols = vtable.get('headers', [])
+                                        
+                                        seen_cols = {}
+                                        dedup_cols = []
+                                        for c in vcols:
+                                            base = str(c).strip() if c else "Column"
+                                            if base in seen_cols:
+                                                seen_cols[base] += 1
+                                                dedup_cols.append(f"{base} ({seen_cols[base]})")
+                                            else:
+                                                seen_cols[base] = 1
+                                                dedup_cols.append(base)
+
+                                        sample_vrows = []
+                                        for vrow in vtable.get('rows', [])[:5]:
+                                            row_dict = {}
+                                            for i, col in enumerate(dedup_cols):
+                                                row_dict[col] = vrow[i] if i < len(vrow) else ""
+                                            sample_vrows.append(row_dict)
+                                            
+                                        db_result["tables"].append({
+                                            "table_name": vname,
+                                            "row_count": len(vtable.get('rows', [])),
+                                            "columns": dedup_cols,
+                                            "column_stats": {},
+                                            "sample_rows": sample_vrows
+                                        })
+                            except Exception as e:
+                                print(f"Error parsing workspace_files json: {e}")
+                    else:
+                        db_result["tables"].append({
+                            "table_name": t,
+                            "row_count": row_count,
+                            "columns": cols,
+                            "column_stats": col_stats,
+                            "sample_rows": rows[:5] if rows else []
+                        })
 
                 except Exception as table_error:
                     print(f"[Analysis] table {t} error -> {table_error}")
@@ -656,9 +735,12 @@ RULES:
 
 def session_analysis_controller(get_connection_func):
     data       = request.json or {}
+    print(f"DEBUG /session-analysis RAW JSON: {data}")
     session_id = (data.get("session_id") or "").strip()
     topics     = [t.strip() for t in (data.get("topics")    or []) if str(t).strip()]
-    databaseses  = [d.strip() for d in (data.get("databaseses") or []) if str(d).strip()]
+    raw_databases = data.get("databases") or data.get("databaseses") or []
+    databaseses  = [d.strip() for d in raw_databases if str(d).strip()]
+    print(f"DEBUG parsed topics: {topics}, parsed databases: {databaseses}")
 
     if not session_id:
         return jsonify({
@@ -675,6 +757,21 @@ def session_analysis_controller(get_connection_func):
     conn = None
     try:
         conn = get_connection_func()
+        
+        # Check if files are still processing for this workspace
+        from controllers.uploads_controller import is_workspace_processing
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT workspace_db FROM workspaces WHERE session_id = %s", (session_id,))
+        ws = cur.fetchone()
+        cur.close()
+        
+        if ws and ws.get("workspace_db"):
+            if is_workspace_processing(ws["workspace_db"]):
+                return jsonify({
+                    "status": "error",
+                    "statusCode": 400,
+                    "message": "Documents are still being processed in the background. Please wait a few minutes before running the analysis."
+                }), 400
 
         web_data = _fetch_web_data(session_id, topics, conn)
         db_data  = _fetch_db_data(session_id, databaseses, conn)

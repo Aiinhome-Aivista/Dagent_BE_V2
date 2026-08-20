@@ -25,6 +25,21 @@ scheduler = BackgroundScheduler()
 if not scheduler.running:
     scheduler.start()
 
+def is_workspace_processing(workspace_db_name):
+    """
+    Checks if there are any active document or CSV processing jobs 
+    for the given workspace database in the APScheduler.
+    """
+    if not workspace_db_name:
+        return False
+        
+    for job in scheduler.get_jobs():
+        # Both process_doc_job and process_csv_job receive allocated_db_name as their second argument (args[1])
+        if job.args and len(job.args) > 1 and job.args[1] == workspace_db_name:
+            return True
+    return False
+
+
 # =========================================================
 # 1. HELPER: DETECTOR & PARSERS (Moved to database/sql_processor.py)
 # =========================================================
@@ -235,13 +250,13 @@ def upload_chunk_controller(get_db_connection):
         cursor = db_conn.cursor(dictionary=True)
 
         cursor.execute("""
-            SELECT new_user_db
-            FROM users
-            WHERE id=%s
-        """, (user_id,))
+            SELECT workspace_db
+            FROM workspaces
+            WHERE session_id=%s
+        """, (session_id,))
 
         user_data = cursor.fetchone()
-        allocated_db_name = user_data["new_user_db"]
+        allocated_db_name = user_data["workspace_db"] if user_data else None
 
         # 🔹 INSERT INTO connection_history
         history_name = f"Chunk Upload: {filename} to allocated DB ({allocated_db_name})"
@@ -322,19 +337,18 @@ def upload_csv_controller(get_db_connection):
                 "message": "Access denied for workspace"
             }), 403
 
-        # Fetch user DB
         cursor.execute("""
-            SELECT new_user_db
-            FROM users
-            WHERE id=%s
-        """, (user_id,))
+            SELECT workspace_db
+            FROM workspaces
+            WHERE session_id=%s
+        """, (session_id,))
 
         user_data = cursor.fetchone()
 
-        if not user_data:
-            return jsonify({"status":"error","message":"User DB missing"}),404
+        if not user_data or not user_data["workspace_db"]:
+            return jsonify({"status":"error","message":"Workspace DB missing"}),404
 
-        allocated_db_name = user_data["new_user_db"]
+        allocated_db_name = user_data["workspace_db"]
 
         # DB server credentials
         db_user = MYSQL_CONFIG.get("user")

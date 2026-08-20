@@ -48,10 +48,10 @@ CHROMA_PERSIST_DIR = os.path.join(
 os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
 
 MISTRAL_URL        = "https://api.mistral.ai/v1/chat/completions"
-MAX_ROWS           = 200
-TOP_K              = 80
+MAX_ROWS           = 300
+TOP_K              = 400
 CACHE_TTL          = 600
-MAX_CTX_CHARS      = 15000
+MAX_CTX_CHARS      = 50000
 
 _CACHE   = {}
 _CLIENTS = {}
@@ -297,30 +297,75 @@ def _load_db(session_id, get_fn):
                     c2.execute(f"SELECT * FROM `{t}` LIMIT %s", (MAX_ROWS,))
                     rows = c2.fetchall()
                     if not rows: continue
-                    all_rows[t] = rows
-                    cols = list(rows[0].keys())
-                    chunks.append(_chunk(
-                        f"[SCHEMA] db:{db} table:{t} columns:{','.join(cols)} total_rows:{len(rows)}",
-                        db=db, table=t, kind="schema"))
-                    lines = [
-                        f"[COUNT] db:{db} table:{t} has {len(rows)} rows total.",
-                        f"Number of {t}: {len(rows)}",
-                        f"Total {t} count: {len(rows)}"
-                    ]
-                    for col in cols[:10]:
-                        vals = list(dict.fromkeys(
-                            str(r[col]) for r in rows if r[col] is not None and str(r[col]).strip()))
-                        if vals:
-                            lines.append(f"All values of {col} in {t}: {', '.join(vals[:40])}")
-                    chunks.append(_chunk("\n".join(lines), db=db, table=t, kind="count"))
-                    for i, row in enumerate(rows, 1):
-                        parts = " | ".join(f"{k}:{v}" for k,v in row.items()
-                                           if v is not None and str(v).strip())
-                        chunks.append(_chunk(f"[ROW] db:{db} table:{t} row{i}: {parts}",
-                                             db=db, table=t, kind="row"))
-                    print(f"[RAG] {db}.{t}: {len(rows)} rows → {len(rows)+2} chunks")
+                    
+                    if t == 'workspace_files':
+                        for r in rows:
+                            try:
+                                import json
+                                file_data = json.loads(r['file_data']) if isinstance(r.get('file_data'), str) else (r.get('file_data') or {})
+                                structured = file_data.get('structured_content')
+                                if structured:
+                                    paragraphs = structured.get('paragraphs', [])
+                                    if paragraphs:
+                                        all_rows['Document_Paragraphs'] = paragraphs
+                                    for idx, vtable in enumerate(structured.get('tables', [])):
+                                        base_vname = vtable.get('table_name', f"PDF_Table_{idx+1}")
+                                        vname = base_vname
+                                        v_counter = 1
+                                        while vname in all_rows:
+                                            vname = f"{base_vname} ({v_counter})"
+                                            v_counter += 1
+                                        vcols = vtable.get('headers', [])
+                                        
+                                        # Deduplicate headers
+                                        seen_cols = {}
+                                        dedup_cols = []
+                                        for c in vcols:
+                                            base = str(c).strip() if c else "Column"
+                                            if base in seen_cols:
+                                                seen_cols[base] += 1
+                                                dedup_cols.append(f"{base} ({seen_cols[base]})")
+                                            else:
+                                                seen_cols[base] = 1
+                                                dedup_cols.append(base)
+
+                                        vrows = []
+                                        for row_arr in vtable.get('rows', []):
+                                            row_dict = {}
+                                            for i, col in enumerate(dedup_cols):
+                                                row_dict[col] = row_arr[i] if i < len(row_arr) else ""
+                                            vrows.append(row_dict)
+                                        all_rows[vname] = vrows
+                            except Exception as e:
+                                print(f"Error parsing workspace_files json in RAG: {e}")
+                    else:
+                        all_rows[t] = rows
                 except Exception as e:
                     print(f"[RAG] skip {t}: {e}")
+
+            for t, rows in all_rows.items():
+                if not rows: continue
+                cols = list(rows[0].keys())
+                chunks.append(_chunk(
+                    f"[SCHEMA] db:{db} table:{t} columns:{','.join(cols)} total_rows:{len(rows)}",
+                    db=db, table=t, kind="schema"))
+                lines = [
+                    f"[COUNT] db:{db} table:{t} has {len(rows)} rows total.",
+                    f"Number of {t}: {len(rows)}",
+                    f"Total {t} count: {len(rows)}"
+                ]
+                for col in cols[:10]:
+                    vals = list(dict.fromkeys(
+                        str(r[col]) for r in rows if r.get(col) is not None and str(r.get(col)).strip()))
+                    if vals:
+                        lines.append(f"All values of {col} in {t}: {', '.join(vals[:40])}")
+                chunks.append(_chunk("\n".join(lines), db=db, table=t, kind="count"))
+                for i, row in enumerate(rows, 1):
+                    parts = " | ".join(f"{k}:{v}" for k,v in row.items()
+                                       if v is not None and str(v).strip())
+                    chunks.append(_chunk(f"[ROW] db:{db} table:{t} row{i}: {parts}",
+                                         db=db, table=t, kind="row"))
+                print(f"[RAG] {db}.{t}: {len(rows)} rows → {len(rows)+2} chunks")
 
             chunks += _build_joins(db, all_rows)
         except Exception as e:
@@ -605,9 +650,9 @@ def _retrieve(all_chunks, bm25_idx, col, question, understanding):
         if i not in forced: candidate_indices.append(i)
         if len(candidate_indices) >= TOP_K: break
 
-    # OPTIMIZATION 5: Cross-encoder reranking top-40 → keep best 20
-    RERANK_TOP  = 40
-    RERANK_KEEP = 20
+    # OPTIMIZATION 5: Cross-encoder reranking top-300 → keep best 250
+    RERANK_TOP  = 300
+    RERANK_KEEP = 250
     rerank_pool = candidate_indices[:RERANK_TOP]
 
     if len(rerank_pool) > RERANK_KEEP:
@@ -856,26 +901,26 @@ Chunk types:
   [ANALYSIS_DB_META] — database metadata: which databases and tables were analyzed
 
 DEEP ANALYSIS RULES:
-1. Read EVERY chunk exhaustively before forming your answer.
-2. For COUNT questions: find [COUNT] chunk with "Number of X: N" — this is authoritative.
-3. For LIST questions: find [COUNT] chunk "All values of column_name:" — gives complete list.
-4. For JOIN/relationship questions: find [JOIN] chunks — they show cross-table activity per user.
-5. For WHY questions: analyze patterns, dates, sequences, frequencies across chunks to infer reasons.
-6. For TREND questions: compare timestamps, sequences, values across [ROW] chunks.
-7. For COMPARISON questions: pull data from multiple tables and compare side by side.
-8. For DEEP questions: combine ROW + JOIN + COUNT chunks to give comprehensive multi-part answers.
-9. NEVER say "I could not find" if ANY relevant data exists — dig deeper into chunks.
-10. Always answer in full sentences with specifics — no vague responses.
-11. DO NOT include source citations in the answer text — keep answer clean.
-12. follow_up_questions MUST follow the EXACT format specified in the user prompt.
-13. Respond ONLY in valid JSON."""
+1. Read EVERY chunk exhaustively before forming your answer. Pay STRICT ATTENTION to the exact year, date, or context associated with each value.
+2. STRICT DATA INTEGRITY: DO NOT hallucinate or swap values between different rows, years, or entities. Ensure absolute alignment.
+3. For COUNT questions: find [COUNT] chunk with "Number of X: N" — this is authoritative.
+4. For LIST questions: find [COUNT] chunk "All values of column_name:" — gives complete list.
+5. For JOIN/relationship questions: find [JOIN] chunks — they show cross-table activity per user.
+6. For WHY questions: analyze patterns, dates, sequences, frequencies across chunks to infer reasons.
+7. For TREND questions: compare timestamps, sequences, values across [ROW] chunks.
+8. For COMPARISON questions: pull data from multiple tables and compare side by side.
+9. For DEEP questions: combine ROW + JOIN + COUNT chunks to give comprehensive multi-part answers.
+10. NEVER say "I could not find" if ANY relevant data exists — dig deeper into chunks.
+11. Always answer in full sentences with specifics — no vague responses.
+12. DO NOT include source citations in the answer text — keep answer clean.
+13. follow_up_questions MUST follow the EXACT format specified in the user prompt.
+14. Respond ONLY in valid JSON."""
 
 from model.llm_client import call_llm_chat
 
 def _mistral(system, user, retries=2):
-    if len(user) > 28000:
-        user = user[:28000] + "\n\n[...context trimmed for token limit...]"
-        print("[LLM] prompt trimmed")
+    if len(user) > 60000:
+        print("[LLM] prompt is very large, but proceeding without arbitrary truncation to preserve JSON instructions.")
         
     messages = [
         {"role":"system","content":system},
@@ -1153,25 +1198,28 @@ Relevant tables: {understanding['table_hints']}
 
 {multi_hint}
 DEEP ANALYSIS PROTOCOL:
-1. Exhaustively scan every chunk — extract ALL relevant business facts.
-2. Counts/Totals → [COUNT] chunks are authoritative (e.g. "Number of recipe_users: 12").
-3. Complete lists → [COUNT] "All values of column:" lines.
-4. User/entity activity → [JOIN] chunks show cross-table relationships.
-5. Time patterns → compare timestamps in [ROW] chunks to find trends.
-6. Business logic → reason about WHY data looks the way it does.
-7. Write a COMPREHENSIVE, analyst-grade answer:
+1. Exhaustively scan every chunk — extract ALL relevant business facts. NEVER swap data between different years, rows, or categories.
+2. STRICT CONTEXT MATCHING: Ensure that any number you output exactly matches the year or category it was found with in the chunks.
+3. Counts/Totals → [COUNT] chunks are authoritative (e.g. "Number of recipe_users: 12").
+4. Complete lists → [COUNT] "All values of column:" lines.
+5. User/entity activity → [JOIN] chunks show cross-table relationships.
+6. Time patterns → compare timestamps in [ROW] chunks to find trends.
+7. Business logic → reason about WHY data looks the way it does.
+8. Write a COMPREHENSIVE, analyst-grade answer:
    - Start with the direct answer to the question.
-   - Then provide supporting details, related facts, patterns.
+   - Compare available years objectively. Avoid sweeping claims like "clear downward trend" unless explicitly verified across all requested years.
+   - Use the word "Actual" (not "projected" or "estimated") for actual cost/expenditure values from the data, regardless of the year.
+   - Do NOT explicitly state "No data for X was found" if a specific year is missing. Just provide the comparison for the years that are available in the context.
    - Use bullet points (•) for lists of items.
    - Use plain text paragraphs for explanations and reasoning.
-   - Minimum 3-5 sentences for any non-trivial question.
-8. Do NOT include "(source:...)" tags in the answer text.
-9. {followup_ins}
+9. Do NOT include "(source:...)" tags in the answer text.
+10. {followup_ins}
 
 VISUALIZATION RULES:
 If the question involves comparison, distribution, ranking, trends, or category breakdown,
-generate up to 3 visualizations from: bar_chart, pie_chart, table.
+generate up to 3 visualizations from: bar_chart, line_chart, pie_chart, table.
 bar_chart: {{"type":"bar_chart","title":"...","xKey":"...","yKey":"...","data":[{{"<xKey>":"A","<yKey>":100}}]}}
+line_chart: {{"type":"line_chart","title":"...","xKey":"...","yKey":"...","data":[{{"<xKey>":"A","<yKey>":100}}]}}
 pie_chart: {{"type":"pie_chart","title":"...","data":[{{"name":"A","value":100}}]}}
 table:     {{"type":"table","title":"...","columns":[{{"key":"k","label":"L"}}],"data":[]}}
 
@@ -1185,7 +1233,14 @@ Return ONLY valid JSON (answer must be a plain text string):
     clean_answer = re.sub(r'\s*\(source:[^)]*\)', '', clean_answer).strip()
     clean_answer = re.sub(r'\s*\[source:[^\]]*\]', '', clean_answer).strip()
 
-    fuq = res.get("follow_up_questions", [])
+    raw_fuq = res.get("follow_up_questions", [])
+    fuq = []
+    if isinstance(raw_fuq, list):
+        for q in raw_fuq:
+            if isinstance(q, dict):
+                fuq.append(str(q.get("question", list(q.values())[0] if q else "")))
+            else:
+                fuq.append(str(q))
 
     visualizations = _safe_visualizations(
         _normalize_visualizations(res.get("visualizations", []))
