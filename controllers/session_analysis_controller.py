@@ -363,17 +363,17 @@ def _fetch_db_data(session_id: str, databaseses: list, conn) -> list:
         if cursor:
             cursor.close()
 
-    for ext_db in databaseses:
+    # We need to query each unique new_user_db only once, otherwise if multiple files map to the same workspace database (e.g. document uploads), we'll duplicate the data.
+    unique_new_dbs = list(set(db_map.values()))
 
-        new_db = db_map.get(ext_db)
-
-        if not new_db:
-            print(f"[Analysis] No mapped DB for {ext_db}")
-            continue
+    for new_db in unique_new_dbs:
+        # Find which external_databases map to this new_db to list as the source
+        mapped_ext_dbs = [ext for ext, ndb in db_map.items() if ndb == new_db]
+        display_name_str = ", ".join(mapped_ext_dbs)
 
         db_result = {
             "source_type": "database",
-            "external_database": ext_db,
+            "external_database": display_name_str,
             "new_user_db": new_db,
             "tables": []
         }
@@ -688,28 +688,103 @@ def _call_mistral(context: str, topics: list, databaseses: list) -> dict:
     if topics:    source_desc.append(f"web topics: {', '.join(topics)}")
     if databaseses: source_desc.append(f"databaseses: {', '.join(databaseses)}")
 
-    system = """You are a senior data analyst who writes detailed textbook-style reports.
-Your report must be written as ONE continuous plain text — like a textbook chapter.
-Mix paragraphs and bullet points naturally. Minimum 15-20 lines of content.
-Use actual values, names, numbers from the data. Never be vague or generic.
-Respond ONLY in valid JSON with a single key: "report"."""
+    system = """You are a Generic Data Analysis and Visualization Engine.
+
+Analyze the provided dataset dynamically. Do not assume any fixed domain, column names, business logic, or visualization type.
+
+STEP 1 — PROFILE THE DATA
+First identify:
+- Column names and data types
+- Numeric, categorical, date/time, identifier, text, percentage and currency fields
+- Missing values and duplicate records
+- Possible dimensions and measures
+- Time granularity if date/time fields exist
+- Relationships between columns
+- Whether columns represent Budget, Actual, Target, Forecast, Cost, Revenue, Quantity, etc.
+
+Do not infer a business meaning unless it is reasonably supported by the column name and data.
+
+STEP 2 — DETECT DATA PATTERNS & FINANCIAL REPORTS
+Before generating any visualization, determine which patterns are actually present.
+For annual financial reports, first detect available financial dimensions and measures.
+
+Rules:
+1. Budget + Actual → grouped bar + variance KPI.
+2. Category + amount → ranked bar.
+3. Income components → pie/donut when few categories.
+4. Multiple financial years → trend chart (Line/Bar).
+5. Positive/negative variance → diverging bar chart.
+6. Top/Bottom values (e.g., Top 5 Expense Items, Top 5 Over/Under Budget) → horizontal bar.
+7. Two meaningful numeric measures → Correlation/scatter.
+
+STEP 3 — GENERATE KPIs DYNAMICALLY
+Generate only KPIs supported by the dataset.
+IMPORTANT: Generate AT LEAST 6 to 8 highly relevant KPIs if the data supports it! Do not limit yourself to just 2 or 3.
+For financial reports, by default, generate only data-supported KPIs such as:
+Total Income, Total Expenditure, Budget vs Actual, Variance %, Total CAM / CAM Rate, Electricity Cost, Savings / Surplus (if data exists), Highest Expense Category, Highest Variance Category.
+Never assume a KPI exists unless the required fields are present.
+
+STEP 4 — SELECT VISUALIZATIONS
+Do NOT automatically create every possible chart.
+IMPORTANT: Generate AT LEAST 4 to 6 meaningful charts if the data supports it! Create multiple charts to provide a comprehensive analysis.
+For financial reports, use Default Charts / Graphs if data is available:
+- Budget vs Actual → Grouped Bar
+- Income vs Expenditure → Bar
+- Expense Category Breakdown → Bar
+- Variance % by Category → Diverging Bar
+- Income Source Contribution → Donut/Pie (if few categories)
+- Year-wise Trend → Line/Bar (if multiple FY available)
+- Top 5 Expense Items / Top 5 Over/Under Budget Items → Horizontal Bar
+Never generate a chart unless required fields are present. Avoid duplicate or redundant charts.
+
+STEP 5 — DATA ACCURACY & MATH LOGIC
+- Use only values present in the dataset. Do not invent, estimate, or fabricate missing values.
+- NEVER hallucinate mathematical comparisons or trends.
+- Double-check calculations (percentages, multiples). For example, a jump from 7.3M to 8.5M is a ~16.4% increase, NOT an 11x increase.
+- Ensure trend descriptions strictly match the actual values (e.g., if costs go from 7.8M to 6.6M to 6.3M, describe it as a "steady decline", NOT "significant increase followed by sharp decline").
+- Identify the lowest/highest values accurately (e.g., if 2025-26 is 63.35 lakh and 2022-23 is 78.76 lakh, 2025-26 is the lowest).
+
+STEP 6 — INSIGHTS
+Provide concise insights based strictly on the available data.
+Insights may include: Highest/lowest values, Increasing/decreasing trends, Significant variance, Top/bottom categories, Period-over-period changes, Target achievement, Major contributors.
+
+STEP 7 — OUTPUT
+Respond ONLY in valid JSON containing three keys: "report", "kpis", and "charts".
+Your report text must be written as ONE continuous plain text — like a textbook chapter. Mix paragraphs and bullet points naturally. Minimum 15-20 lines of content. Use actual values, names, and numbers from the data. Never be vague or generic."""
 
     user = f"""
 Analyze the following data ({'; '.join(source_desc)}):
 
 {context}
 
-Write a comprehensive textbook-style analysis report. Return ONLY this JSON:
+Based on the data, return ONLY this JSON structure:
 {{
-  "report": "TITLE: <descriptive title here>\n\n<Opening paragraph — 3 to 4 sentences introducing what data was analyzed, how many sources, key highlights.>\n\n<Second paragraph — describe the main data sources, table names, row counts, column names found.>\n\n• <Bullet: specific fact with actual value from data>\n• <Bullet: another specific metric or count>\n• <Bullet: notable user/record/entry found>\n• <Bullet: pattern or trend observed>\n• <Bullet: another important data point>\n\n<Third paragraph — deeper analysis: relationships between tables, user activity, data patterns.>\n\n• <Bullet: cross-table insight>\n• <Bullet: most active user or top record>\n• <Bullet: date range or time pattern>\n• <Bullet: data distribution observation>\n• <Bullet: anomaly or interesting finding>\n\n<Fourth paragraph — data quality and completeness observations.>\n\n• <Bullet: data quality note>\n• <Bullet: missing or null value observation>\n\n<Fifth paragraph — recommendations and conclusions based on the data.>\n\n• <Bullet: actionable recommendation>\n• <Bullet: another recommendation>\n• <Bullet: conclusion>"
+  "report": "TITLE: <descriptive title here>\\n\\n<Opening paragraph — 3 to 4 sentences introducing what data was analyzed, how many sources, key highlights.>\\n\\n<Second paragraph — describe the main data sources, table names, row counts, column names found.>\\n\\n• <Bullet: specific fact with actual value from data>\\n• <Bullet: another specific metric or count>\\n• <Bullet: notable user/record/entry found>\\n• <Bullet: pattern or trend observed>\\n• <Bullet: another important data point>\\n\\n<Third paragraph — deeper analysis: relationships between tables, user activity, data patterns.>\\n\\n• <Bullet: cross-table insight>\\n• <Bullet: most active user or top record>\\n• <Bullet: date range or time pattern>\\n• <Bullet: data distribution observation>\\n• <Bullet: anomaly or interesting finding>\\n\\n<Fourth paragraph — data quality and completeness observations.>\\n\\n• <Bullet: data quality note>\\n• <Bullet: missing or null value observation>\\n\\n<Fifth paragraph — recommendations and conclusions based on the data.>\\n\\n• <Bullet: actionable recommendation>\\n• <Bullet: another recommendation>\\n• <Bullet: conclusion>",
+  
+  "kpis": [
+    {{
+      "title": "<Name of the Metric (e.g., Total Users, Average Price)>",
+      "value": "<Actual numeric value extracted from data>",
+      "description": "<Short explanation of this KPI>",
+      "trend": "up"
+    }}
+  ],
+  
+  "charts": [
+    {{
+      "chart_type": "<bar or pie or line>",
+      "title": "<Descriptive title for the chart>",
+      "description": "<What this chart represents>",
+      "labels": ["<Category 1>", "<Category 2>", "<Category 3>"],
+      "datasets": [
+        {{
+          "label": "<Metric Name (e.g., Count, Total Amount)>",
+          "data": [1, 2, 3]
+        }}
+      ]
+    }}
+  ]
 }}
-
-RULES:
-- Replace all <...> placeholders with REAL content from the data above.
-- Minimum 18 lines inside the report string.
-- Use \n for newlines inside the JSON string.
-- Every bullet point must have a specific value/name/number from the actual data.
-- Do NOT use generic filler — every sentence must reference actual data.
 """
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}",
                "Content-Type": "application/json", "Accept": "application/json"}
@@ -829,6 +904,7 @@ def session_analysis_controller(get_connection_func):
                 "databaseses": databaseses
             },
             "report": analysis.get("report", ""),
+            "report_content": analysis,
             "graph_url": graph_url,
             "raw_data":  raw_summary
         }), 200

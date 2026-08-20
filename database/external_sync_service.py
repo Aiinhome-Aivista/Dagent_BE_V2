@@ -209,6 +209,8 @@ def sync_external_database(user_id, connection_id, session_id):
                         cursor.execute("SHOW TABLES")
                         current_tables = [t[0] for t in cursor.fetchall()]
                     if "workspace_files" in current_tables:
+                        # Wait an extra few seconds to allow data insertion to complete
+                        time.sleep(2)
                         break
                     time.sleep(2)
             
@@ -223,12 +225,22 @@ def sync_external_database(user_id, connection_id, session_id):
                     total_rows += row_count
                     total_columns += col_count
                     table_summary.append({"table": t, "rows": row_count, "columns": col_count})
-            
+                
+                # Accurately calculate data size from information_schema
+                cursor.execute("""
+                    SELECT SUM(data_length + index_length) 
+                    FROM information_schema.tables 
+                    WHERE table_schema = %s
+                """, (user_db_name,))
+                size_result = cursor.fetchone()[0]
+                total_size_bytes = size_result if size_result else 0
+                data_size_mb = round(total_size_bytes / (1024 * 1024), 2)
+                
             target_conn.close()
         except Exception as e:
             print("Error fetching tables for file upload:", e)
+            data_size_mb = 0.0
             
-        data_size_mb = round((total_rows * total_columns * 8) / (1024 * 1024), 2)
         return {
             "summary": {
                 "total_rows": total_rows,

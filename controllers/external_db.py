@@ -55,7 +55,7 @@ def connect_external_db():
 
                 new_tables = result.get("new_tables", [])
                 size_per_table = file_size_mb / max(1, len(new_tables))
-
+                
                 for t in new_tables:
                     # check if already exists
                     cur.execute("SELECT id FROM external_db_sync_log WHERE session_id=%s AND table_name=%s", (session_id, t))
