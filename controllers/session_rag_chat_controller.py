@@ -1218,6 +1218,12 @@ DEEP ANALYSIS PROTOCOL:
 VISUALIZATION RULES:
 If the question involves comparison, distribution, ranking, trends, or category breakdown,
 generate up to 3 visualizations from: bar_chart, line_chart, pie_chart, table.
+Also generate at least 4 to 6 KPIs (if data supports it) to provide context.
+
+For KPIs:
+{{"type":"kpi","title":"...","value":"...","description":"...","trend":"up|down|neutral"}}
+
+For Charts:
 bar_chart: {{"type":"bar_chart","title":"...","xKey":"...","yKey":"...","data":[{{"<xKey>":"A","<yKey>":100}}]}}
 line_chart: {{"type":"line_chart","title":"...","xKey":"...","yKey":"...","data":[{{"<xKey>":"A","<yKey>":100}}]}}
 pie_chart: {{"type":"pie_chart","title":"...","data":[{{"name":"A","value":100}}]}}
