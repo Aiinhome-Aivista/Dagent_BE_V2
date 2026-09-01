@@ -20,7 +20,46 @@ def connect_external_db():
             "msg": "Missing data"
         }), 400
 
-    result = sync_external_database(user_id, connection_id, session_id)
+    is_tally = False
+    try:
+        import pymysql
+        from database.config import MYSQL_CONFIG
+        conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
+        with conn.cursor() as cur:
+            cur.execute("SELECT db_type FROM database_credential WHERE connection_id=%s AND user_id=%s", (connection_id, user_id))
+            cred_row = cur.fetchone()
+            if cred_row and cred_row[0].strip().lower() == 'tally':
+                is_tally = True
+        conn.close()
+    except Exception:
+        pass
+
+    tally_sync_result = None
+    if is_tally:
+        try:
+            import pymysql, json
+            from database.config import MYSQL_CONFIG
+            conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
+            with conn.cursor() as cur:
+                cur.execute("SELECT credential FROM database_credential WHERE connection_id=%s AND user_id=%s", (connection_id, user_id))
+                clean_cred_data = json.loads(cur.fetchone()[0])
+                cur.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s", (session_id,))
+                user_db_name = cur.fetchone()[0]
+                cur.execute("SELECT email FROM users WHERE id=%s", (user_id,))
+                user_email = cur.fetchone()[0]
+                username_for_sync = user_email.split("@")[0] if user_email else "unknown"
+            conn.close()
+
+            from database.tally_connector import sync_tally_database
+            print("[*] Triggering Auto-Sync for Tally after connection creation...")
+            tally_sync_result = sync_tally_database(user_id, connection_id, session_id, clean_cred_data, user_db_name, username_for_sync)
+            result = tally_sync_result
+        except Exception as sync_e:
+            print(f"[!] Auto-Sync failed for Tally: {sync_e}")
+            tally_sync_result = {"error": str(sync_e)}
+            result = {"situations": [], "new_tables": [], "summary": {}, "tables": []}
+    else:
+        result = sync_external_database(user_id, connection_id, session_id)
 
     # For doc_upload, the frontend never calls apply_bulk_sync, and apply_bulk_sync skips it anyway.
     # We must insert it into external_db_sync_log here so it appears in /session-sources.
@@ -70,27 +109,33 @@ def connect_external_db():
     except Exception as e:
         print(f"Error auto-syncing doc_upload: {e}")
 
-    if not result["situations"] and not result["new_tables"]:
-        return jsonify({
+    if not result.get("situations") and not result.get("new_tables"):
+        response_data = {
             "status": True,
             "statuscode": 200,
             "data": {
-                "summary": result["summary"],
-                "tables": result["tables"]
+                "summary": result.get("summary", {}),
+                "tables": result.get("tables", [])
             },
             "msg": "Database already up to date. No changes detected."
-        })
+        }
+    else:
+        response_data = {
+            "status": True,
+            "statuscode": 200,
+            "data": {
+                "situations": result.get("situations", []),
+                "tables": result.get("tables", []),
+                "summary": result.get("summary", {})
+            },
+            "msg": "External database analyzed successfully"
+        }
 
-    return jsonify({
-        "status": True,
-        "statuscode": 200,
-        "data": {
-            "situations": result["situations"],
-            "tables": result["tables"],
-            "summary": result["summary"]
-        },
-        "msg": "External database analyzed successfully"
-    })
+    if 'tally_sync_result' in locals() and tally_sync_result:
+        response_data["tally_sync_result"] = tally_sync_result
+        response_data["msg"] += " (Data fetched and saved successfully!)"
+
+    return jsonify(response_data)
 
 def apply_external_sync():
 

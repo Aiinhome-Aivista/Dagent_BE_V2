@@ -529,7 +529,25 @@ def create_connector_controllers(get_db_connection):
                 return jsonify({"status": "error", "message": "A 'url' or 'database' field is required"}), 400
             status = "success"
             message = f"Successfully configured Google Sheets connection: {conn_name}"
-
+        elif db_type == 'tally':
+            target_host = data.get('host')
+            port = data.get('port')
+            
+            try:
+                from database.tally_connector import fetch_tally_data
+                company_name = data.get("database")
+                
+                # Test connection by fetching a simple XML payload
+                fetch_tally_data(target_host, port, company_name, "Company")
+                
+                status = "success"
+                message = f"Successfully connected to Tally database: {conn_name}"
+            except Exception as e:
+                status = "failed"
+                message = "Failed to connect to Tally (Ensure Tally is running and XML API is accessible)"
+                error_msg = str(e)
+                raise Exception(error_msg)
+        
         elif db_type == 'snowflake':
 
             host = data.get('host')
@@ -624,20 +642,37 @@ def create_connector_controllers(get_db_connection):
                                 (user_id, session_id, db_type, credential) 
                                 VALUES (%s, %s, %s, %s)"""
                 cursor.execute(cred_query, (user_id, user_session_id, db_type, json.dumps(clean_cred_data)))
+                new_connection_id = cursor.lastrowid
+
+                # Fetch user details for sync
+                cursor.execute("SELECT email FROM users WHERE id=%s", (user_id,))
+                user_res = cursor.fetchone()
+                user_email = user_res[0] if user_res else "unknown@mail.com"
+                username_for_sync = user_email.split("@")[0]
+                
+                cursor.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s", (user_session_id,))
+                ws_res = cursor.fetchone()
+                user_db_name = ws_res[0] if ws_res else None
 
                 db_conn.commit()
                 cursor.close()
                 db_conn.close()
+                
+
+
         except Exception as log_e:
             print(f"Logging Error: {log_e}")
 
     # --- RETURN FINAL RESPONSE ---
     if status == "success":
-        return jsonify({
+        response_data = {
             "status": "success", 
             "message": message,
             "session_id": user_session_id
-        }), 200
+        }
+
+            
+        return jsonify(response_data), 200
     else:
         return jsonify({"status": "error", "message": message, "details": error_msg}), 400
 
@@ -709,7 +744,7 @@ def get_connection_history_controller(get_db_connection):
 
         # Formatting 1: Add Connections
         for row in raw_history:
-            if row['db_type'] not in ['mysql', 'mssql', 'web_search', 'google_sheets', 'csv_upload', 'csv_chunk_upload','snowflake', 'postgresql', 'postgres', 'sql_upload', 'sql_chunk_upload', 'doc_upload', 'doc_chunk_upload', 'ftp']:
+            if row['db_type'] not in ['mysql', 'mssql', 'web_search', 'google_sheets', 'csv_upload', 'csv_chunk_upload','snowflake', 'postgresql', 'postgres', 'sql_upload', 'sql_chunk_upload', 'doc_upload','doc_chunk_upload', 'ftp','tally']:
                 continue
 
             date_str = row['created_at'].strftime("%Y-%m-%dT%H:%M:%SZ") if row['created_at'] else ""
@@ -1556,6 +1591,7 @@ def delete_workspace_controller(get_db_connection):
         # 1. Delete ChromaDB Collection
         try:
             import hashlib
+            # pyrefly: ignore [missing-import]
             import chromadb
             import os
             # Compute the collection name as done in session_rag_chat_controller.py
@@ -1580,6 +1616,7 @@ def delete_workspace_controller(get_db_connection):
         # 2. Delete ArangoDB Data
         try:
             from database.config import ARANGO_HOST, ARANGO_USER, ARANGO_PASS, ARANGO_DB
+            # pyrefly: ignore [missing-import]
             from arango import ArangoClient
             
             arango_client = ArangoClient(hosts=ARANGO_HOST)
