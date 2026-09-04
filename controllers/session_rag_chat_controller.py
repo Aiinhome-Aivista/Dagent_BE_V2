@@ -13,6 +13,7 @@ from controllers.query_branches import execute_hybrid
 from database.config import MISTRAL_API_KEY, MISTRAL_MODEL, MYSQL_CONFIG
 from controllers.kgraph_service import (
     load_kgraph, build_sql_rules, resolve_grouping, detect_drilldown, validate_sql)
+from helper.email_action_handler import is_email_action_request, execute_email_action
 # ChromaDB persistent storage — vectors survive server restarts
 CHROMA_PERSIST_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_store"
@@ -1709,6 +1710,17 @@ def session_rag_chat_controller(get_connection_func):
             "follow_up_questions": suggested,
             "visit_number": visit_number
         }), 200
+
+    # Email Action Handler
+    if question and is_email_action_request(question):
+        email_res = execute_email_action(
+            question,
+            session_id=session_id,
+            user_id=int(user_id) if user_id else 1,
+            get_connection_func=get_connection_func
+        )
+        email_res["visit_number"] = visit_number
+        return jsonify(email_res), 200
 
     # Build/get store
     try:
