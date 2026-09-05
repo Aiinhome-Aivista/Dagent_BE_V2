@@ -105,6 +105,18 @@ from controllers.scheduled_reports_controller import (
     update_schedule_controller, delete_schedule_controller
 )
 from helper.report_mailer import check_and_send_scheduled_reports
+from controllers.agent_actions_controller import (
+    log_agent_action_controller,
+    update_agent_action_controller,
+    get_agent_actions_controller,
+    get_agent_action_detail_controller,
+    delete_agent_actions_controller,
+)
+from controllers.action_approval_controller import (
+    action_approve_controller,
+    action_reject_controller,
+    action_pending_controller,
+)
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from flask_socketio import SocketIO
@@ -558,6 +570,56 @@ def delete_workspace():
     return delete_workspace_controller(get_db_connection)
 
 
+
+
+# ==========================================
+# Agent Actions API
+# ==========================================
+
+@app.route("/agent-actions", methods=["POST"])
+def log_agent_action():
+    """Log a new agent action step into agent_actions table."""
+    return log_agent_action_controller()
+
+@app.route("/agent-actions", methods=["GET"])
+def get_agent_actions():
+    """List agent actions filtered by session_id or user_id."""
+    return get_agent_actions_controller()
+
+@app.route("/agent-actions/<int:action_id>", methods=["GET"])
+def get_agent_action_detail(action_id):
+    """Fetch a single agent action by its id."""
+    return get_agent_action_detail_controller(action_id)
+
+@app.route("/agent-actions/<int:action_id>", methods=["PATCH"])
+def update_agent_action(action_id):
+    """Update status/output of an existing agent action."""
+    return update_agent_action_controller(action_id)
+
+@app.route("/agent-actions", methods=["DELETE"])
+def delete_agent_actions():
+    """Delete all agent actions for a given session_id."""
+    return delete_agent_actions_controller()
+
+
+# ==========================================
+# Action Approval (HITL) API
+# ==========================================
+
+@app.route("/action-approve", methods=["POST"])
+def action_approve():
+    """Approve a pending HITL action and trigger background execution."""
+    return action_approve_controller(get_db_connection)
+
+@app.route("/action-reject", methods=["POST"])
+def action_reject():
+    """Reject (skip) a pending HITL action."""
+    return action_reject_controller(get_db_connection)
+
+@app.route("/action-pending", methods=["GET"])
+def action_pending():
+    """List all pending-approval actions for a session."""
+    return action_pending_controller(get_db_connection)
 
 
 if __name__ == '__main__':
