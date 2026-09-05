@@ -1,6 +1,7 @@
 # controllers/login_controller.py (FINAL FIX)
 
 import uuid
+# pyrefly: ignore [missing-import]
 import mysql.connector 
 from flask import request, jsonify
 

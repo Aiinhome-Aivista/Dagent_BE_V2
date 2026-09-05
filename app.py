@@ -14,6 +14,7 @@ for logger_name in ["httpx", "sentence_transformers", "huggingface_hub", "chroma
     logging.getLogger(logger_name).setLevel(logging.ERROR)
 
 import os
+# pyrefly: ignore [missing-import]
 import mysql.connector 
 from flask import Flask, request
 from flask_cors import CORS
@@ -105,6 +106,9 @@ from controllers.scheduled_reports_controller import (
     update_schedule_controller, delete_schedule_controller
 )
 from helper.report_mailer import check_and_send_scheduled_reports
+# pyrefly: ignore [missing-import]
+from apscheduler.schedulers.background import BackgroundScheduler
+
 from controllers.agent_actions_controller import (
     log_agent_action_controller,
     update_agent_action_controller,
@@ -117,7 +121,12 @@ from controllers.action_approval_controller import (
     action_reject_controller,
     action_pending_controller,
 )
-from apscheduler.schedulers.background import BackgroundScheduler
+from controllers.pricing_controller import (
+    get_pricing_controller,
+    create_pricing_controller,
+    update_pricing_controller,
+    delete_pricing_controller
+)
 
 from flask_socketio import SocketIO
 app = Flask(__name__)
@@ -323,10 +332,6 @@ def agent_query_db():
     """The endpoint your Agent will call to 'process the db directly'"""
     return agent_query_controller()
 
-
-@app.route("/login", methods=["POST"])
-def login_controller(data):
-    return login()
 
 @app.route("/connect-external-db", methods=["POST"])
 def connect_external_db_controller():
@@ -600,6 +605,27 @@ def update_agent_action(action_id):
 def delete_agent_actions():
     """Delete all agent actions for a given session_id."""
     return delete_agent_actions_controller()
+
+# ==========================================
+# Pricing API
+# ==========================================
+
+@app.route("/api/pricing", methods=["GET"])
+def get_pricing():
+    return get_pricing_controller()
+
+@app.route("/api/pricing", methods=["POST"])
+def create_pricing():
+    return create_pricing_controller()
+
+@app.route("/api/pricing/<int:plan_id>", methods=["PUT"])
+def update_pricing(plan_id):
+    return update_pricing_controller(plan_id)
+
+@app.route("/api/pricing/<int:plan_id>", methods=["DELETE"])
+def delete_pricing(plan_id):
+    return delete_pricing_controller(plan_id)
+
 
 
 # ==========================================
