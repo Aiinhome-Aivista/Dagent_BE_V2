@@ -2,6 +2,7 @@ import json
 import uuid
 import smtplib
 import pandas as pd
+from utils.crypto_utils import encrypt_password, decrypt_password
 from database import config
 from flask import request, jsonify
 from flask import request, jsonify
@@ -34,12 +35,16 @@ def get_all_users_controller(get_db_connection):
         cursor = db_conn.cursor(dictionary=True)
 
         cursor.execute("""
-            SELECT u.id, u.name, u.email, u.created_at
+            SELECT u.id, u.name, u.email, u.password, u.created_at, GROUP_CONCAT(wu.workspace_name SEPARATOR ', ') as workspaces
             FROM users u
+            LEFT JOIN workspace_users wu ON u.id = wu.user_id
             WHERE u.role_id = 2
+            GROUP BY u.id
             ORDER BY u.name ASC
         """)
         users = cursor.fetchall()
+        for user in users:
+            user['password'] = decrypt_password(user['password'])
 
         cursor.close()
         db_conn.close()
@@ -1304,12 +1309,13 @@ def create_user_controller(get_db_connection):
             }), 409
 
         # --- 3. INSERT USER ---
+        hashed_password = encrypt_password(password)
         insert_query = """
             INSERT INTO users (name, email, password, role_id)
             VALUES (%s, %s, %s, 2)
         """
 
-        cursor.execute(insert_query, (name, email, password))
+        cursor.execute(insert_query, (name, email, hashed_password))
         db_conn.commit()
 
         new_user_id = cursor.lastrowid
@@ -1763,3 +1769,82 @@ def delete_workspace_controller(get_db_connection):
             db_conn.close()
 
 
+# =========================================================
+# NEW: Handles the /edit_user/<user_id> route (POST)
+# =========================================================
+def edit_user_controller(get_db_connection, user_id):
+    data = request.get_json()
+    admin_id = data.get("admin_id")
+    name = data.get("name")
+    email = data.get("email")
+    password = data.get("password")
+
+    if not admin_id:
+        return jsonify({"status": "error", "message": "admin_id is required"}), 400
+
+    db_conn = None
+    try:
+        db_conn = get_db_connection()
+        cursor = db_conn.cursor(dictionary=True)
+
+        # Verify Admin
+        cursor.execute("SELECT id, role_id FROM users WHERE id = %s", (admin_id,))
+        admin = cursor.fetchone()
+        if not admin or admin["role_id"] != 1:
+            return jsonify({"status": "error", "message": "Access denied."}), 403
+
+        # Update User
+        if password:
+            hashed_password = encrypt_password(password)
+            cursor.execute(
+                "UPDATE users SET name = %s, email = %s, password = %s WHERE id = %s",
+                (name, email, hashed_password, user_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE users SET name = %s, email = %s WHERE id = %s",
+                (name, email, user_id)
+            )
+        db_conn.commit()
+        return jsonify({"status": "success", "message": "User updated successfully"}), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if db_conn:
+            db_conn.close()
+
+# =========================================================
+# NEW: Handles the /delete_user/<user_id> route (DELETE)
+# =========================================================
+def delete_user_controller(get_db_connection, user_id):
+    data = request.get_json() or {}
+    admin_id = data.get("admin_id")
+
+    if not admin_id:
+        return jsonify({"status": "error", "message": "admin_id is required"}), 400
+
+    db_conn = None
+    try:
+        db_conn = get_db_connection()
+        cursor = db_conn.cursor(dictionary=True)
+
+        # Verify Admin
+        cursor.execute("SELECT id, role_id FROM users WHERE id = %s", (admin_id,))
+        admin = cursor.fetchone()
+        if not admin or admin["role_id"] != 1:
+            return jsonify({"status": "error", "message": "Access denied."}), 403
+
+        # Delete from workspace_users
+        cursor.execute("DELETE FROM workspace_users WHERE user_id = %s", (user_id,))
+        # Delete user
+        cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
+        
+        db_conn.commit()
+        return jsonify({"status": "success", "message": "User deleted successfully"}), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if db_conn:
+            db_conn.close()

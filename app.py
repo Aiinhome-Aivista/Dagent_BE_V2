@@ -73,7 +73,9 @@ from controllers.connector_controllers import (create_connector_controllers,
                                                 get_workspace_users_controller,
                                                 remove_workspace_user_controller,
                                                 delete_connection_history_controller,
-                                                delete_workspace_controller)
+                                                delete_workspace_controller,
+                                                edit_user_controller,
+                                                delete_user_controller)
 from controllers.session_rag_chat_controller import session_rag_chat_controller
 from controllers.session_sources_controller import session_sources_controller
 from controllers.session_analysis_controller import session_analysis_controller
@@ -516,6 +518,14 @@ def create_user():
     return create_user_controller(get_db_connection)
 
 
+@app.route("/edit_user/<int:user_id>", methods=["POST"])
+def edit_user(user_id):
+    return edit_user_controller(get_db_connection, user_id)
+
+
+@app.route("/delete_user/<int:user_id>", methods=["DELETE"])
+def delete_user(user_id):
+    return delete_user_controller(get_db_connection, user_id)
 
 @app.route("/session-chat-history", methods=["GET", "POST", "DELETE"])
 def session_chat_history():

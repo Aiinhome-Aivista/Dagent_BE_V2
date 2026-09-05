@@ -1,6 +1,7 @@
 from flask import request, jsonify
 from database.db_connection import get_db_connection
 from database.user_db_service import create_user_database
+from utils.crypto_utils import encrypt_password, decrypt_password
 
 def register_user_controller(get_db_connection):
     data = request.json
@@ -20,7 +21,8 @@ def register_user_controller(get_db_connection):
             cursor.close()
             db_conn.close()
             return jsonify({"status": "error", "message": "A user with this email already exists"}), 409
-        cursor.execute("INSERT INTO users (name, email, password) VALUES (%s, %s, %s)", (name, email, password))
+        hashed_password = encrypt_password(password)
+        cursor.execute("INSERT INTO users (name, email, password) VALUES (%s, %s, %s)", (name, email, hashed_password))
         db_conn.commit()
         new_user_id = cursor.lastrowid
         cursor.close()
@@ -42,14 +44,21 @@ def login():
     conn = get_db_connection()
     cursor = conn.cursor()
     query = """
-    SELECT u.id, u.email, u.name, u.role_id, u.new_user_db, r.role_name
+    SELECT u.id, u.email, u.name, u.password as stored_password, u.role_id, u.new_user_db, r.role_name
     FROM users u
     LEFT JOIN roles r ON u.role_id = r.id
-    WHERE u.email=%s AND u.password=%s
+    WHERE u.email=%s
     """
-    cursor.execute(query, (email, password))
+    cursor.execute(query, (email,))
     user = cursor.fetchone()
+    
     if not user:
+        return jsonify({"status": False, "statuscode": 401, "data": None, "msg": "Invalid credentials"}), 401
+
+    stored_password = user["stored_password"]
+    is_valid_password = (decrypt_password(stored_password) == password)
+        
+    if not is_valid_password:
         return jsonify({"status": False, "statuscode": 401, "data": None, "msg": "Invalid credentials"}), 401
     
     user_id = user["id"]
@@ -115,14 +124,20 @@ def admin_login_auth():
     conn = get_db_connection()
     cursor = conn.cursor()
     query = """
-    SELECT u.id, u.email, u.name, u.role_id, u.new_user_db, r.role_name
+    SELECT u.id, u.email, u.name, u.password as stored_password, u.role_id, u.new_user_db, r.role_name
     FROM users u
     LEFT JOIN roles r ON u.role_id = r.id
-    WHERE u.email=%s AND u.password=%s
+    WHERE u.email=%s
     """
-    cursor.execute(query, (email, password))
+    cursor.execute(query, (email,))
     user = cursor.fetchone()
     if not user:
+        return jsonify({"status": False, "statuscode": 401, "data": None, "msg": "Invalid credentials"}), 401
+        
+    stored_password = user["stored_password"]
+    is_valid_password = (decrypt_password(stored_password) == password)
+        
+    if not is_valid_password:
         return jsonify({"status": False, "statuscode": 401, "data": None, "msg": "Invalid credentials"}), 401
     
     user_id = user["id"]
