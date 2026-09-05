@@ -35,7 +35,7 @@ def get_all_users_controller(get_db_connection):
         cursor = db_conn.cursor(dictionary=True)
 
         cursor.execute("""
-            SELECT u.id, u.name, u.email, u.password, u.created_at, GROUP_CONCAT(wu.workspace_name SEPARATOR ', ') as workspaces
+            SELECT u.id, u.name, u.email, u.password, u.visibility, u.created_at, u.updated_at, GROUP_CONCAT(wu.workspace_name SEPARATOR ', ') as workspaces
             FROM users u
             LEFT JOIN workspace_users wu ON u.id = wu.user_id
             WHERE u.role_id = 2
@@ -1264,6 +1264,7 @@ def create_user_controller(get_db_connection):
     name = data.get("name")
     email = data.get("email")
     password = data.get("password")
+    visibility = data.get('visibility', 1)
 
     if not admin_id:
         return jsonify({"status": "error", "message": "admin_id is required"}), 400
@@ -1311,11 +1312,11 @@ def create_user_controller(get_db_connection):
         # --- 3. INSERT USER ---
         hashed_password = encrypt_password(password)
         insert_query = """
-            INSERT INTO users (name, email, password, role_id)
-            VALUES (%s, %s, %s, 2)
+            INSERT INTO users (name, email, password, role_id, visibility)
+            VALUES (%s, %s, %s, 2, %s)
         """
 
-        cursor.execute(insert_query, (name, email, hashed_password))
+        cursor.execute(insert_query, (name, email, hashed_password, visibility))
         db_conn.commit()
 
         new_user_id = cursor.lastrowid
@@ -1778,6 +1779,7 @@ def edit_user_controller(get_db_connection, user_id):
     name = data.get("name")
     email = data.get("email")
     password = data.get("password")
+    visibility = data.get("visibility", 1)
 
     if not admin_id:
         return jsonify({"status": "error", "message": "admin_id is required"}), 400
@@ -1797,13 +1799,13 @@ def edit_user_controller(get_db_connection, user_id):
         if password:
             hashed_password = encrypt_password(password)
             cursor.execute(
-                "UPDATE users SET name = %s, email = %s, password = %s WHERE id = %s",
-                (name, email, hashed_password, user_id)
+                "UPDATE users SET name = %s, email = %s, password = %s, visibility = %s WHERE id = %s",
+                (name, email, hashed_password, visibility, user_id)
             )
         else:
             cursor.execute(
-                "UPDATE users SET name = %s, email = %s WHERE id = %s",
-                (name, email, user_id)
+                "UPDATE users SET name = %s, email = %s, visibility = %s WHERE id = %s",
+                (name, email, visibility, user_id)
             )
         db_conn.commit()
         return jsonify({"status": "success", "message": "User updated successfully"}), 200
