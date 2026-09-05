@@ -27,6 +27,12 @@ def get_all_pricing_plans():
         cursor.close()
         conn.close()
 
+def safe_int(val, default=0):
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
 def create_pricing_plan(data):
     conn = get_db_connection()
     if not conn:
@@ -39,12 +45,12 @@ def create_pricing_plan(data):
     """
     values = (
         data.get("plan_name", ""),
-        data.get("data_storage", ""),
-        data.get("uploads", ""),
-        data.get("insights_queries", ""),
+        safe_int(data.get("data_storage", 0)),
+        safe_int(data.get("uploads", 0)),
+        safe_int(data.get("insights_queries", 0)),
         data.get("basic_features", ""),
         data.get("download_allowed", ""),
-        data.get("number_of_users", ""),
+        safe_int(data.get("number_of_users", 0)),
         data.get("custom_kpi", ""),
         data.get("scheduled_email", "")
     )
@@ -73,12 +79,12 @@ def update_pricing_plan(plan_id, data):
     """
     values = (
         data.get("plan_name", ""),
-        data.get("data_storage", ""),
-        data.get("uploads", ""),
-        data.get("insights_queries", ""),
+        safe_int(data.get("data_storage", 0)),
+        safe_int(data.get("uploads", 0)),
+        safe_int(data.get("insights_queries", 0)),
         data.get("basic_features", ""),
         data.get("download_allowed", ""),
-        data.get("number_of_users", ""),
+        safe_int(data.get("number_of_users", 0)),
         data.get("custom_kpi", ""),
         data.get("scheduled_email", ""),
         plan_id
