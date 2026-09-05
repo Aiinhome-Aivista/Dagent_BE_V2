@@ -246,6 +246,7 @@ def import_csv_data(get_db_connection):
 
         imported_files = []
         unique_tables_info = {}
+        force_import_tables = set()  # Track tables that are newly created or empty during this API call
 
         # fetch credential
         query = """
@@ -268,6 +269,9 @@ def import_csv_data(get_db_connection):
                 
         # Remove duplicates while preserving order
         files = list(dict.fromkeys(all_files))
+        
+        # Sort files alphabetically so base files (e.g. sales_data.csv) are processed BEFORE variants (sales_data_2.csv)
+        files.sort()
 
         if not files:
             return jsonify({"status": "error", "message": "Credentials not found or no files to import"}), 404
@@ -368,6 +372,15 @@ def import_csv_data(get_db_connection):
             cursor.execute("SELECT id FROM external_db_sync_log WHERE session_id=%s AND external_database=%s AND action_type='IMPORT'", (session_id, file))
             already_imported = cursor.fetchone() is not None
             
+            # If the table was just created, or if it is currently empty, mark it for forced import
+            user_cursor.execute(f"SELECT COUNT(*) as cnt FROM `{table_name}`")
+            if user_cursor.fetchone()['cnt'] == 0:
+                force_import_tables.add(table_name)
+                
+            # If this table is marked for forced import in this run, bypass the session log
+            if table_name in force_import_tables:
+                already_imported = False
+            
             rows_inserted = 0
             
             if not already_imported:
@@ -430,15 +443,18 @@ def import_csv_data(get_db_connection):
             }
 
             if not already_imported:
+                table_data_size_mb = round((table_total_rows * 200) / (1024 * 1024), 2)
                 log_query = """
                 INSERT INTO external_db_sync_log
                 (user_id,username,external_database,table_name,
-                action_type,rows_affected,session_id,new_user_db)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                action_type,rows_affected,session_id,new_user_db,
+                total_rows,total_columns,data_size_mb)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """
                 cursor.execute(log_query, (
                     user_id, username, file, table_name,
-                    "IMPORT", rows_inserted, session_id, user_db
+                    "IMPORT", rows_inserted, session_id, user_db,
+                    table_total_rows, num_columns, table_data_size_mb
                 ))
                 conn.commit()
 

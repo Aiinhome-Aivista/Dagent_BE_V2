@@ -1241,6 +1241,12 @@ def _column_ref_correction(violations, col_to_tables):
 #      exact column.
 #   3. Drill-down: "top 3 tyre categories" => WHERE CATEGORY='Tyre' GROUP BY the
 #      next level (CONSTRUCTION).
+#   4. [PATCH] region/zone were falsely claimed as customer_master columns and
+#      were resolvable via an ungoverned fallback scan straight to
+#      region_master with no join path — this produced `cm.zone` in generated
+#      SQL (MySQL error 1054). Geography is now handled by its own dedicated
+#      GEOGRAPHY_CHAIN + _build_geography_prompt(), never by DIMENSIONS or the
+#      generic synonym fallback.
 #
 # IMPORTANT: edit the CONFIG below to match your real schema. Tables are matched
 # by the columns they contain (robust to munged table names), so you usually
@@ -1249,6 +1255,81 @@ def _column_ref_correction(violations, col_to_tables):
 # ── DYNAMIC CONFIG (Fetched from DB via workspace_config) ───────────────────
 # Defaults are used if the workspace_config prompt is not found or is invalid JSON.
 # ── END DYNAMIC CONFIG ────────────────────────────────────────────────────────
+# ── CONFIG ───────────────────────────────────────────────────────────────────
+FACT_TABLE_HINTS = ["sales_data", "invoice"]          # name substring(s) of the fact table
+MEASURE_COLUMN   = "Invoice_Value_INR"      # the Sales measure column on the fact table
+DATE_COLUMN      = "billing__doc_date"      # the Date column on the fact table used for year/month filtering
+
+# Dimensions: each is auto-located as the (non-fact) table that contains its
+# `dim_key` AND the most of its `owns` columns. `fact_key` is the column on the
+# fact table that joins to `dim_key` on the dimension.
+DIMENSIONS = [
+    {
+        "label":    "product",
+        "fact_key": "material",
+        "dim_key":  "MATNR",
+        "owns":     ["category", "tyre_type", "construction", "MAKTX", "PROD_TITLE"],
+        # [PATCH] NOTE: sku_master.construction is typed BIGINT in the live
+        # schema, so alphabetic construction_master codes
+        # (A, B, D, E, K, L, M, N, O, P, R, T, Z) can never match. This is a
+        # data-load defect upstream, not a mapping bug in this file.
+    },
+    {
+        "label":    "customer",
+        "fact_key": "customer",
+        "dim_key":  "KUNNR",
+        # [PATCH] "region", "zone" REMOVED — customer_master does NOT own
+        # them. They live two joins away (territory_master -> region_master).
+        # Claiming them here let the synonym resolver treat them as reachable
+        # in a single hop, which produced the `cm.zone` bug. See
+        # GEOGRAPHY_CHAIN below, which is the only place region/zone resolve.
+        "owns":     ["Cname", "acc_grp", "class", "territory", "sales_office"],
+    },
+]
+
+# [PATCH — NEW] Multi-hop geography chain. `_build_business_map`'s DIMENSIONS
+# only support a single fact_key/dim_key hop, but region/zone require
+# customer_master -> territory_master -> region_master (two hops). Resolved
+# and injected separately by _build_geography_prompt(), never folded into
+# DIMENSIONS or COLUMN_SYNONYMS.
+GEOGRAPHY_CHAIN = {
+    "customer_fk":     "territory",          # customer_master.territory (bigint)
+    "territory_table": "territory_master",
+    "territory_key":   "territory_code",     # text
+    "territory_owns":  ["territory_name"],
+    "region_fk":       "region_code",        # territory_master.region_code (text)
+    "region_table":    "region_master",
+    "region_key":       "region",            # bigint
+    "region_owns":      ["region_name", "zone"],
+}
+
+# Product hierarchy ROOT → LEAF (column names; matched case/space/underscore-insensitively)
+PRODUCT_HIERARCHY = ["category", "tyre_type", "construction", "MAKTX"]
+
+# Natural-language phrase → exact column name. Longest phrase wins.
+COLUMN_SYNONYMS = {
+    "product category": "category", "category": "category", "categories": "category",
+    "construction": "construction", "tyre type": "tyre_type", "tire type": "tyre_type",
+    "vehicle": "category", "by vehicle": "category",
+    "customer": "Cname",
+    # [PATCH] "region": "region", "zone": "zone" REMOVED. Leaving them here let
+    # the fallback scan resolve them to `region_master` directly, with no
+    # join path — that is exactly what produced `cm.zone` in generated SQL.
+    # Geography wording is now handled exclusively by GEOGRAPHY_CHAIN /
+    # _build_geography_prompt(), which enforces the mandatory 2-hop join.
+}
+
+# Explicit definitions for complex business entities that require specific joins, filters, and grouping.
+ENTITY_DEFINITIONS = {
+    "dealer": "If the user asks for 'dealer(s)', you MUST JOIN `customer_master` and `account_group_master` (ON `customer_master`.`acc_grp` = `account_group_master`.`KTOKD`), FILTER BY `account_group_master`.`account_group_name` = 'Dealer', and GROUP BY `customer_master`.`KUNNR`, `customer_master`.`Cname`.",
+    # [PATCH] class_master's real value for code DB is 'DISTRIBUTOR' (all
+    # caps) — matched case-insensitively now so this never silently returns
+    # zero rows depending on collation.
+    "distributor": "If the user asks for 'distributor(s)', you MUST JOIN `customer_master` and `class_master` (ON `customer_master`.`class` = `class_master`.`class_code`), FILTER BY UPPER(`class_master`.`class_name`) = 'DISTRIBUTOR', and GROUP BY `customer_master`.`KUNNR`, `customer_master`.`Cname`. Do NOT use `distribution_mapping` for distributors.",
+    "fleet": "If the user asks for 'fleet(s)', you MUST JOIN `customer_master` and FILTER BY `customer_master`.`acc_grp` = 'Z009', and GROUP BY `customer_master`.`KUNNR`, `customer_master`.`Cname`.",
+}
+# ── END CONFIG ───────────────────────────────────────────────────────────────
+
 # Words that signal the user wants a ranked breakdown (so we apply the GROUP BY).
 _RANK_OR_BREAKDOWN_RE = re.compile(
     r'\b(top|bottom|best|worst|highest|lowest|leading|poor|performing|rank|'
@@ -1409,16 +1490,35 @@ def _build_business_map(table_cols, workspace_id):
             loc = (t, oc)
         elif fact and nc in norm_tables.get(fact, set()):
             loc = (fact, _orig_col(table_cols, fact, colname))
+
+        if not loc:
+            # [PATCH] Restricted fallback: only resolve to a table this map
+            # already knows how to JOIN to (a dimension table already
+            # resolved above, or the two geography-chain tables). Previously
+            # this scanned EVERY table with no join-path check, which let
+            # "region"/"zone" resolve straight to region_master with no way
+            # to reach it — the root cause of the `cm.zone` bug.
+            reachable = {d["table"] for d in dim_resolved}
+            reachable.add(GEOGRAPHY_CHAIN["territory_table"])
+            reachable.add(GEOGRAPHY_CHAIN["region_table"])
+            for tbl, cols in norm_tables.items():
+                if tbl in reachable and nc in cols:
+                    loc = (tbl, _orig_col(table_cols, tbl, colname))
+                    break
+
         if loc:
             for variant in _plurals(phrase.lower()):
                 syn_resolved.setdefault(variant, loc)
 
     measure = _orig_col(table_cols, fact, MEASURE_COLUMN) if fact else None
 
+    date_col = _orig_col(table_cols, fact, DATE_COLUMN) if fact else None
+
     return {
-        "fact": fact, "measure": measure or MEASURE_COLUMN,
+        "fact": fact, "measure": measure or MEASURE_COLUMN, "date_column": date_col or DATE_COLUMN,
         "dims": dim_resolved, "attr_source": attr_source,
         "synonyms": syn_resolved, "levels": levels,
+        "entity_definitions": ENTITY_DEFINITIONS,
     }
 
 
@@ -1430,7 +1530,8 @@ def _business_prompt(biz):
     fact = biz["fact"]
     out = [f"AUTHORITATIVE SCHEMA MAP (follow EXACTLY — overrides any guess):",
            f"- Fact table: `{fact}`. Sales / performance / revenue = "
-           f"SUM(`{fact}`.`{biz['measure']}`)."]
+           f"SUM(`{fact}`.`{biz['measure']}`).",
+           f"- Date filtering: If the user mentions a year (e.g., '2026') or date, you MUST apply a WHERE clause using `{fact}`.`{biz['date_column']}` (e.g. YEAR({fact}.{biz['date_column']}) = 2026). Do NOT use STR_TO_DATE; assume the column is already a proper DATE type."]
     forbid = []
     for d in biz["dims"]:
         if not d["owns"]:
@@ -1457,7 +1558,47 @@ def _business_prompt(biz):
     out.append("FAN-OUT GUARD: every dimension JOIN must be on the key above so "
                "each fact row matches at most one dimension row. If a column name "
                "exists on more than one table, use the table named in this map.")
+    
+    if biz.get("entity_definitions"):
+        out.append("\nBUSINESS ENTITY DEFINITIONS (Strictly follow these rules if the user mentions these entities):")
+        for entity, rule in biz["entity_definitions"].items():
+            out.append(f"- {rule}")
+            
     return "\n".join(out)
+
+
+# [PATCH — NEW] Emits the mandatory 2-hop geography join chain. This is what
+# actually fixes the `cm.zone` / Unknown column bug — region/zone are simply
+# never reachable in one join, and the model has no way to know that without
+# being told explicitly, table by table, with the correct CAST direction.
+def _build_geography_prompt(table_cols):
+    """Emits a mandatory 2-hop join chain for region/zone. These are NEVER
+    reachable in a single join from sales_data or customer_master — omitting
+    this let the model guess an alias like `cm.zone` (MySQL error 1054)."""
+    g = GEOGRAPHY_CHAIN
+    norm_tables = {t: {_norm_ident(c) for c in cols} for t, cols in table_cols.items()}
+
+    cust_tbl = None
+    for t, ncols in norm_tables.items():
+        if "customer" in t.lower() and _norm_ident(g["customer_fk"]) in ncols:
+            cust_tbl = t
+            break
+    if not cust_tbl or g["territory_table"] not in table_cols or g["region_table"] not in table_cols:
+        return ""
+
+    return (
+        f"\n\nGEOGRAPHY CHAIN (MANDATORY — region/zone are NEVER columns on "
+        f"`{cust_tbl}` or the fact table; both joins below are required, in order):\n"
+        f"1. JOIN `{g['territory_table']}` ON "
+        f"CAST(`{cust_tbl}`.`{g['customer_fk']}` AS CHAR) = `{g['territory_table']}`.`{g['territory_key']}`\n"
+        f"2. JOIN `{g['region_table']}` ON "
+        f"`{g['territory_table']}`.`{g['region_fk']}` = CAST(`{g['region_table']}`.`{g['region_key']}` AS CHAR)\n"
+        f"   -- always CAST the BIGINT side to CHAR; never CAST the text side to "
+        f"UNSIGNED (silently coerces non-numeric values to 0 and breaks the join).\n"
+        f"`region`, `zone`, `region_name` exist ONLY on `{g['region_table']}`, reachable "
+        f"only after both joins above. `{cust_tbl}` and any alias of it (e.g. `cm`) "
+        f"NEVER owns `zone` or `region` — referencing them there is INVALID."
+    )
 
 
 def _detect_group_columns(question, biz):
@@ -1566,6 +1707,7 @@ def session_rag_chat_controller(get_connection_func):
     history    = data.get("chat_history", [])
     user_id    = data.get("user_id")
     visit_number = data.get("visit_number")
+    sql_query = None
 
     if not session_id:
         return jsonify({"status":"failed","statusCode":400,
@@ -1682,7 +1824,8 @@ def session_rag_chat_controller(get_connection_func):
             "answer":              res.get("answer", ""),
             "suggested_questions": res.get("suggested_questions",[]),
             "visualizations":      visualizations,
-            "visit_number":        visit_number
+            "visit_number":        visit_number,
+            "sql_query":           sql_query
         }), 200
 
     # Understand + Retrieve
@@ -1795,6 +1938,56 @@ def session_rag_chat_controller(get_connection_func):
 # - FAN-OUT: a dimension table must be joined on its key so each fact row matches
 #   at most one dimension row. Joining a product attribute on the wrong key (e.g.
 #   Customer) multiplies rows and inflates SUM — never do it.
+BUSINESS DEFINITIONS
+- Dealer = Customer
+- Sales = SUM(invoice_value)
+- Revenue = SUM(invoice_value)
+- Volume = SUM(qty)
+- Net Sales = SUM(invoice_value) - SUM(total_discount)
+- Invoice Count = COUNT(DISTINCT invoice_number)
+- Product = Material
+- Product Category ("Tyre", "Tube", "Flap") = ALWAYS LEFT JOIN `category_master` on `sku_master.category = category_master.category_code` and select `category_name`. Do NOT just select the category code from `sku_master`.
+- Construction / "tyre type" / "tube type" ("RADIAL", "BIAS") = ALWAYS LEFT JOIN `construction_master` on `sku_master.construction = construction_master.construction_code` and select `construction_description`.
+- Vehicle / "vehicle type" / "vehicle category" ("TRUCK", "CAR") = ALWAYS LEFT JOIN `tyre_type_master` on `sku_master.tyre_type = tyre_type_master.tyre_type_code` and select `tyre_type_name`. This is DIFFERENT from CATEGORY.
+- These attributes are PRODUCT attributes keyed by Material (`sku_master`). First LEFT JOIN `sku_master` to fact, then LEFT JOIN these master tables to `sku_master`. Never join them directly on Customer.
+- "category-wise" / "by category" / "product category wise" / "per category" => GROUP BY `CATEGORY`, NOT Material
+- "product-wise" / "by product" => GROUP BY Material
+- Top Dealer = Dealer ranked by Sales descending
+- Worst Dealer = Dealer ranked by Sales ascending
+- Best Performing Dealer = Dealer ranked by Sales descending
+- Lowest Performing Dealer = Dealer ranked by Sales ascending
+- Top Product = Product ranked by Sales descending
+- Worst Product = Product ranked by Sales ascending
+- Region Performance = SUM(invoice_value) grouped by region
+- Zone Performance = SUM(invoice_value) grouped by zone
+- Average Realization = SUM(invoice_value) / NULLIF(SUM(qty),0)
+
+
+
+PERFORMER RESOLUTION
+
+- The word "performer" does NOT imply Dealer.
+- Determine the ranking entity ONLY from the user's wording.
+- If the user explicitly says "dealer", rank dealers.
+- If the user explicitly says "customer", rank customers.
+- If the user explicitly says "product", rank products.
+- If the user explicitly says "region", rank regions.
+- If the user explicitly says "zone", rank zones.
+- If the user only says "performer" without specifying an entity, default to Customer. Only use Dealer, Product, Region, Zone, etc. when the user explicitly mentions them.
+- NEVER rewrite "performer" as "dealer" unless the user explicitly uses the word "dealer".
+
+AUTHORITATIVE SCHEMA MAP PRECEDENCE
+- If the user message contains an "AUTHORITATIVE SCHEMA MAP", a "GEOGRAPHY CHAIN",
+  a "GROUP-BY MAPPING", or a "HIERARCHY DRILL-DOWN" block, those are RESOLVED
+  FROM THE REAL SCHEMA and OVERRIDE these generic definitions for table names,
+  column ownership, joins, filters and group-by. Follow them exactly.
+- REGION / ZONE ARE NEVER A SINGLE JOIN: if the user asks about region or zone,
+  you MUST follow the GEOGRAPHY CHAIN block exactly — it requires TWO joins
+  (customer -> territory_master -> region_master). Never reference `region` or
+  `zone` on `customer_master` or any alias of it (e.g. `cm.zone` is INVALID).
+- FAN-OUT: a dimension table must be joined on its key so each fact row matches
+  at most one dimension row. Joining a product attribute on the wrong key (e.g.
+  Customer) multiplies rows and inflates SUM — never do it.
 
 
 # METRIC PRIORITY
@@ -1853,6 +2046,20 @@ def session_rag_chat_controller(get_connection_func):
 #    ) as top_entities ON t.entity = top_entities.entity
 #    GROUP BY t.entity, month
 #    ORDER BY top_entities.total_sales DESC, month;
+7. If the question asks for Top N entities (e.g., dealers, customers) month-wise or trend:
+   NEVER use `IN (SELECT ... LIMIT N)` because MySQL does not support LIMIT inside IN subqueries.
+   Instead, you MUST use a LEFT JOIN with a derived table:
+   
+   SELECT t.entity, DATE_FORMAT(STR_TO_DATE(t.date_col, '%Y-%m-%d'), '%Y-%m') as month, SUM(t.metric) as total_sales
+   FROM `table` t
+   LEFT JOIN (
+       SELECT entity FROM `table`
+       GROUP BY entity
+       ORDER BY SUM(metric) DESC
+       LIMIT N
+   ) as top_entities ON t.entity = top_entities.entity
+   GROUP BY t.entity, month
+   ORDER BY top_entities.total_sales DESC, month;
    
 #    Adjust the DATE_FORMAT and STR_TO_DATE depending on the actual date format in the table.
 
@@ -1865,6 +2072,15 @@ def session_rag_chat_controller(get_connection_func):
 #    GROUP BY
 #    ORDER BY
 #    HAVING
+8. Use:
+   SUM()
+   COUNT()
+   AVG()
+   MIN()
+   MAX()
+   GROUP BY (CRITICAL: Every non-aggregated column in the SELECT clause MUST be present in the GROUP BY clause to prevent `only_full_group_by` errors.)
+   ORDER BY
+   HAVING
 
 # 9. If SQL execution is possible:
 #    SQL results are always more authoritative than retrieved context.
@@ -1876,6 +2092,8 @@ def session_rag_chat_controller(get_connection_func):
 # 12. Never hallucinate business results.
 
 # 13. PRESERVE EXACT DECIMALS: Never round monetary values in SQL unless explicitly asked. Return the exact sum with decimals intact.
+13. PRESERVE EXACT DECIMALS: Never round monetary values in SQL unless explicitly asked. Return the exact sum with decimals intact.
+14. NEGATIVE VALUES: NEVER add `> 0` or `>= 0` filters to sales or invoice columns unless the user explicitly asks to "exclude returns" or "only show positive sales". If a dealer's total sales are negative (e.g. -19022.00), that is a valid exact figure and must be included.
 
 # COLUMN HYGIENE
 # - All numeric columns (sales, invoice_value, quantity, discount, tax) are strictly typed as DECIMAL or BIGINT in the database.
@@ -1904,6 +2122,26 @@ def session_rag_chat_controller(get_connection_func):
 #       ORDER BY grp, metric DESC;
 # - Use a single global ORDER BY ... LIMIT N ONLY when the question has NO
 #   per-group qualifier (plain "top N customers").
+- "Top N customers per category", "category wise top N", "best N per region",
+  "top N dealers for each zone" all mean: rank WITHIN each group and keep N rows
+  from EVERY group. NEVER answer these with a single global ORDER BY ... LIMIT N
+  (that returns only the N biggest pairs overall, not N per group).
+- Use a window function partitioned by the group:
+      WITH agg AS (
+        SELECT `<group_col>` AS grp, `<entity_col>` AS entity,
+               SUM(`<value_col>`) AS metric
+        FROM `<fact>` LEFT JOIN `<dim>` ON ...
+        GROUP BY `<group_col>`, `<entity_col>`
+      ),
+      ranked AS (
+        SELECT grp, entity, metric,
+               ROW_NUMBER() OVER (PARTITION BY grp ORDER BY metric DESC) AS rn
+        FROM agg
+      )
+      SELECT grp, entity, metric FROM ranked WHERE rn <= N
+      ORDER BY grp, metric DESC;
+- Use a single global ORDER BY ... LIMIT N ONLY when the question has NO
+  per-group qualifier (plain "top N customers").
 
 # PLAIN TOP-N vs WINDOWED TOP-N
 # - A plain "top N" / "worst N" with NO per-group qualifier needs only
@@ -1930,6 +2168,75 @@ def session_rag_chat_controller(get_connection_func):
 #   exactly (it tells you the filter column/value and the group-by level, both
 #   resolved to real tables). JOIN across tables via the LIKELY JOIN KEYS when the
 #   filter level and group level live on different tables.
+JOINS AND MISSING DIMENSIONS (CRITICAL)
+- ALWAYS use `LEFT JOIN` for ANY join to a dimension table (e.g., `customer_master`, `sku_master`, `category_master`, etc.). NEVER use an `INNER JOIN` or `JOIN` anywhere in the query when fetching dimension data, even when joining from a CTE!
+- NEVER use an `INNER JOIN` (or plain `JOIN`) that might drop valid records just because the dimension data is missing.
+- When selecting ANY name from a dimension table (whether inside a CTE or in the final MAIN query), you MUST wrap it in `COALESCE` to prevent nulls in the JSON output. 
+  Example: `SELECT COALESCE(cm.Cname, 'N/A') AS dealer_name`
+- SUPER CRITICAL BUG FIX: When grouping or selecting after a LEFT JOIN, ALWAYS use the foreign key from the FACT table (e.g., `sales_data.customer`), NEVER the primary key from the DIMENSION table (e.g., `customer_master.KUNNR`). Grouping by the dimension key will lump all unmatched records into a single NULL bucket! This applies to ALL dimension tables.
+
+MULTI-LEVEL BREAKDOWN ("Top/Worst N along with their X-wise breakup")
+ENTITY RESOLUTION FOR BREAKDOWN QUERIES
+
+- In queries of the form:
+  "Top/Bottom/Worst N performers along with <dimension>-wise sales breakup"
+
+  the "<dimension>-wise" phrase specifies ONLY the breakdown dimension.
+
+- NEVER infer the ranking entity from the breakdown dimension.
+
+- "product category-wise", "product construction-wise", "vehicle-wise", "region-wise", etc. describe ONLY how to split the selected entities after ranking.
+- EXCEPTION: If the user explicitly asks for "Top/Worst N <Entity> wise sales" WITHOUT another ranking entity (e.g., "worst 2 construction type wise sales"), it means you must rank the <Entity> itself. Just GROUP BY the <Entity>, ORDER BY sales, and LIMIT N. DO NOT use ROW_NUMBER() or PARTITION BY unless explicitly asked to find "per <Entity>".
+
+- The ranking entity must be resolved independently:
+    - dealer -> Dealer
+    - customer -> Customer
+    - product -> Product
+    - region -> Region
+    - zone -> Zone
+    - performer -> Customer (default)
+
+Example:
+"Worst 2 performers along with their product construction wise sales breakup"
+
+Correct interpretation:
+1. Rank Customers by SUM(invoice_value) ASC.
+2. Select the Bottom 2 Customers.
+3. Break down each selected Customer by Product Construction.
+
+Incorrect interpretation:
+Rank Products because "product construction" appears in the question.
+
+- When asked to find the Top N or Worst N entities overall AND THEN show their breakdown (e.g., "worst 2 performers along with their product category wise sales breakup"):
+  1. FIRST, create a CTE to calculate the total aggregate (SUM) per entity and LIMIT to Top/Worst N.
+     Example: `WITH top_entities AS (SELECT entity, SUM(metric) as total FROM fact GROUP BY entity ORDER BY total DESC LIMIT N)`
+  2. THEN, create a breakdown CTE that joins the first CTE back to the fact/dimensions. YOU MUST include the `total` from the first CTE in this second CTE so it can be used for sorting later.
+     Example: `breakdown AS (SELECT wp.entity, wp.total, dim.category, SUM(fact.metric) as category_sales FROM top_entities wp LEFT JOIN fact ... GROUP BY wp.entity, wp.total, dim.category)`
+  3. FINALLY, in the main query, select the columns from the breakdown CTE.
+  4. CRITICAL: In the final main query, you MUST `ORDER BY` the `total` column (e.g. `ORDER BY breakdown.total DESC`) so that the overall Top N / Worst N sequence is preserved, followed by the category sales!
+  5. NEVER rank individual unaggregated rows using ROW_NUMBER() without summing first.
+  6. Prefer simple `ORDER BY ... LIMIT N` for direct Top/Worst queries. Avoid complex window functions like `ROW_NUMBER()` unless a nested breakdown is strictly required.
+  7. CRITICAL: MySQL 8 supports `LIMIT` inside `WITH` CTEs. DO NOT comment out the `LIMIT N` clause inside the CTE. Use `LIMIT N` directly (e.g. `LIMIT 2` and NOT `-- LIMIT 2`).
+
+HIERARCHY DRILL-DOWN
+- The product data has a hierarchy (e.g. CATEGORY -> CONSTRUCTION -> VEHICLE_TYPE
+  -> ... -> MATERIAL), from broad to specific.
+- When the user NAMES A VALUE at one level (e.g. "tyre", "radial", "truck") and
+  asks for "top/worst N <something> of/within it" or any breakdown, treat the
+  named value as a FILTER (WHERE that_level = 'value') and GROUP BY the NEXT
+  level DOWN, ranking by the metric (default Sales = SUM(invoice_value)).
+  Example: "top 3 performing tyre categories" =>
+      WHERE `category` = 'Tyre'
+      GROUP BY `construction`            -- the next level below CATEGORY
+      ORDER BY SUM(`Invoice_Value`) DESC, `construction` ASC
+      LIMIT 3
+  Never GROUP BY the same level you filtered on (that returns just one row).
+- If the user explicitly names the child level ("...constructions",
+  "...vehicle types"), GROUP BY exactly that level.
+- If a HIERARCHY DRILL-DOWN block is provided in the user message, follow it
+  exactly (it tells you the filter column/value and the group-by level, both
+  resolved to real tables). JOIN across tables via the LIKELY JOIN KEYS when the
+  filter level and group level live on different tables.
 
 # RESERVED WORDS — NEVER USE AS ALIASES
 # - `RANK`, `ROW_NUMBER`, `ORDER`, `GROUP`, `DESC`, `ASC`, `ROWS`, `RANGE`,
@@ -1963,6 +2270,7 @@ def session_rag_chat_controller(get_connection_func):
 # }
 # """
         sql_user = f"Schemas available:\n{schema_context}\n\nOriginal Question: {question}\n\nCanonical Query (Structured Intent):\n{canonical_query_str}"
+        sql_user += "\n\nCRITICAL FINAL RULE: NEVER SELECT or GROUP BY `customer_master.KUNNR` or any other dimension's Primary Key! You MUST SELECT and GROUP BY the Fact Table's Foreign Key (e.g. `sales_data.customer`) instead. Selecting dimension keys causes unmatched rows to lump together as NULLs."
         schema_grounding, col_to_tables = _build_schema_grounding(schema_chunks)
         table_cols_map = _parse_schema_chunks(schema_chunks)
         if schema_grounding:
@@ -1975,11 +2283,17 @@ def session_rag_chat_controller(get_connection_func):
         try:
             biz = _build_business_map(table_cols_map, workspace_id)
             biz_prompt = _business_prompt(biz)
+            # [PATCH] Geography chain is resolved and injected separately —
+            # region/zone are never part of DIMENSIONS or biz_prompt.
+            geo_prompt = _build_geography_prompt(table_cols_map)
             if biz_prompt:
                 sql_user += f"\n\n{biz_prompt}"
                 print(f"[BIZMAP] fact={biz['fact']} measure={biz['measure']} "
                       f"dims={[(d['label'], d['table']) for d in biz['dims']]} "
                       f"levels={biz['levels']}")
+            if geo_prompt:
+                sql_user += geo_prompt
+                print("[GEOMAP] geography chain injected")
 
             values_by_col = _parse_value_index(schema_chunks)
             drill = _detect_drilldown(question, values_by_col, biz)
@@ -2204,7 +2518,8 @@ def session_rag_chat_controller(get_connection_func):
             "answer": res.get("answer", "Here is the visualization for your request."),
             "follow_up_questions": fuq,
             "visualizations": visualizations,
-            "visit_number": visit_number
+            "visit_number": visit_number,
+            "sql_query": sql_query
         }), 200
 
 
@@ -2237,7 +2552,8 @@ def session_rag_chat_controller(get_connection_func):
                 "key_findings": res.get("key_findings",[])
             },
             "follow_up_questions": fuq,
-            "visit_number": visit_number
+            "visit_number": visit_number,
+            "sql_query": sql_query
         }), 200
 
     # Answer
@@ -2272,6 +2588,199 @@ def session_rag_chat_controller(get_connection_func):
         _answer_msg += "\n\nCRITICAL INSTRUCTION FOR VISUALIZATIONS: Because this is an aggregation query, your 'visualizations' array MUST ONLY contain a 'table' (type='table'). DO NOT generate 'line_chart', 'bar_chart', or any other charts. DO NOT hallucinate dates or months!"
 
     res = _mistral(system_prompt, _answer_msg)
+Retrieved data (read ALL carefully):
+{context}
+
+{hist}Business Question: "{question}"
+
+Detected intent: {understanding['intent']}
+Relevant tables: {understanding['table_hints']}
+
+{multi_hint}
+DEEP ANALYSIS PROTOCOL:
+
+1. Exhaustively scan every piece of data.
+
+2. If SQL execution results are present, SQL Results are the ONLY source of truth.
+
+3. If SQL Results are present:
+
+   * Use only the rows and columns returned by SQL.
+   * Do not invent additional fields.
+   * Do not invent customer names.
+   * Do not invent dealer names.
+   * Do not invent dates.
+   * Do not invent transaction counts.
+   * Do not invent averages.
+   * Do not invent percentages.
+   * Do not invent churn risk.
+   * Do not invent engagement metrics.
+   * Do not invent business explanations.
+
+4. Never infer reasons, causes, operational issues, market conditions, pricing issues, supply chain issues, customer behavior, customer intent, customer satisfaction, loyalty, churn risk, promotional response, business strategy, or recommendations unless those values explicitly exist in the SQL result.
+
+5. If SQL returns:
+
+   * customer
+   * invoice_value
+   * qty
+
+Then answer only from those fields.
+
+6. If a field is not present in SQL Results, state that the information is not available.
+
+7. Never convert customer IDs into names unless SQL explicitly returns a name column.
+
+8. PRESERVE SORT ORDER: When presenting lists, rankings, or tables in the answer text, you MUST preserve the EXACT row order returned by the SQL Results. NEVER sort or re-order the items alphabetically or otherwise.
+
+   * John Smith
+   * Emily Davis
+   * Customer 1003
+   * Customer 1005
+     or any other names not present in SQL results.
+
+9. Never create:
+
+   * last purchase date
+   * average transaction value
+   * engagement score
+   * churn probability
+   * campaign response
+   * inactivity period
+     unless explicitly returned by SQL.
+
+10. Answer strictly from SQL Results and retrieved context.
+
+11. Accuracy is more important than completeness.
+
+12. If SQL Results exist, ignore any conflicting RAG content.
+
+SQL RESULT PRIORITY RULE
+
+When SQL Results are present:
+
+SQL Results > Retrieved Context > General Reasoning
+
+Always trust SQL Results.
+Never override SQL Results with assumptions.
+
+
+SQL ROW PRESERVATION RULE (MANDATORY)
+
+
+If SQL Results contain N rows, you MUST preserve all N rows.
+
+
+Never omit, discard, merge, summarize, or ignore any returned SQL row.
+
+
+Rows with NULL values or placeholder values such as:
+- Customer Name Not Available
+- NULL
+- Unknown
+
+
+are still valid SQL rows and MUST be included exactly as returned.
+
+
+Never replace an existing SQL row with statements like:
+"No data available" or "Only one record found"
+unless the SQL itself returned only one row.
+
+
+All tables, visualizations, and textual summaries must faithfully represent every SQL row returned by the database.
+
+8. Do NOT include "(source:...)" tags in the answer text.
+9. {followup_ins}
+
+VISUALIZATION RULES:
+
+If the question involves comparison, distribution, ranking, trends, or category breakdown,
+generate up to 3 visualizations.
+
+--- AGGREGATION VISUALIZATION RULES (MANDATORY CONTRACT) ---
+If the question involves aggregate data:
+
+1. Always include a Table visualization.
+
+2. If the data contains a time dimension
+   (month, date, quarter, year),
+   also include a Line Chart.
+
+3. For ranking or Top/Bottom questions without time,
+   return only a Table
+   (optional Bar Chart if useful).
+
+4. Never generate a Line Chart when no time dimension exists.
+--- TREND DETECTION & LINE CHART RULES (MANDATORY CONTRACT) ---
+If the question is trend-related (contains: trend, growth, decline, increase, decrease, over time, monthly, quarterly, yearly, seasonality, pattern, historical analysis, performance over time, month-on-month, MoM, YoY):
+1. Visualization Type MUST be Line Chart ("type": "line_chart").
+2. X-Axis (xKey) MUST be a Date/Month/Year field. IMPORTANT: Date values MUST be aggregated and formatted by month (e.g., 'Jan 2024' or 'January') on the X-Axis.
+3. Y-Axis (yKey) MUST be a Numeric Measure.
+4. MUST include "seriesKey": "series" at the visualization root level.
+5. NEVER return multiple category fields like "category": "Tube", "construction": "RADIAL" separately for a line chart. Instead, combine them into a single "series" key.
+   - Example (CATEGORY + CONSTRUCTION): "series": "Tube - RADIAL"
+   - Example (CATEGORY + CONSTRUCTION + VEHICLE TYPE): "series": "Tyre - RADIAL - Truck"
+   - Example (VEHICLE TYPE ONLY): "series": "Truck"
+6. NEVER use Pie Chart or Table as primary visualization for trend queries.
+7. NEVER auto-detect legend. Always use seriesKey.
+8. Every row in "data" MUST contain the exact key "series" (matching seriesKey) and the xKey and yKey.
+9. CRITICAL: For any time-series data or trend charts, the items inside the "data" array MUST be sorted strictly in chronological order (e.g., Jan, Feb, Mar or April, May, June) so the graph renders correctly from left to right.
+------------------------------------------
+
+CRITICAL INSTRUCTIONS FOR ALL VISUALIZATIONS:
+1. The object keys inside the "data" array MUST exactly match what you specify for "xKey" and "yKey".
+2. Only include categories/points that ACTUALLY EXIST in the data. Do NOT invent missing categories with 0 values.
+3. PRESERVE SORT ORDER: When building the "data" array (especially for tables), you MUST preserve the EXACT row order returned by the SQL Results. NEVER sort or re-order the rows alphabetically or otherwise.
+
+Supported visualization types:
+
+1️⃣ Bar Chart
+
+{{
+"type":"bar_chart",
+"title":"...",
+"xKey":"...",
+"yKey":"...",
+"data":[
+ {{"category":"A","value":100}},
+ {{"category":"B","value":200}}
+]
+}}
+
+2️⃣ Pie Chart
+
+{{
+"type":"pie_chart",
+"title":"...",
+"data":[
+ {{"name":"Category A","value":120}},
+ {{"name":"Category B","value":80}}
+]
+}}
+
+3️⃣ Table
+
+{{
+"type":"table",
+"title":"...",
+"columns":[
+ {{"key":"columnKey","label":"Column Label"}}
+],
+"data":[
+ {{"columnKey":"value"}}
+]
+}}
+
+Return ALL visualizations inside the "visualizations" array.
+You may return multiple charts or tables if useful.
+
+
+
+
+Return ONLY valid JSON (answer must be a plain text string):
+{{"answer":"...","follow_up_questions":[], "visualizations":[]}}
+""")
 
     if not res:
         return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
@@ -4825,3 +5334,6 @@ def session_rag_chat_controller(get_connection_func):
 #         "visit_number": visit_number
 #     }), 200
 
+        "visit_number": visit_number,
+        "sql_query": sql_query
+    }), 200

@@ -1,6 +1,7 @@
 import json
 import pymysql
 from database.config import MYSQL_CONFIG
+from helper.workspace_wise_store_procedures import run_stored_procedures
 import math
 
 def clean_row(row, col_types=None):
@@ -688,6 +689,12 @@ def apply_external_sync(user_id, connection_id, session_id, table):
 
     with db_conn.cursor() as cursor:
         cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{user_db_name}`")
+
+    # Create stored procedures for this database
+    try:
+        run_stored_procedures(user_db_name)
+    except Exception as e:
+        print(f"Error creating stored procedures for {user_db_name}: {e}")
 
     db_conn.close()
 

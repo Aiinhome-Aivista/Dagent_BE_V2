@@ -3,9 +3,11 @@ from controllers.dashboard_visuals import year_wise_sales_comparison_controller
 from controllers.dashboard_visuals import sales_by_zone_data_controller
 from controllers.dashboard_visuals import tyre_sales_data_controller
 from controllers.dashboard_visuals import dashboard_filters_controller
+from controllers.sales_dashboard import get_sales_revenue_data_controller, get_sales_by_account_category_controller, get_non_billed_accounts_controller, get_overdue_pct_controller, get_exposure_pct_controller
 import os
 os.environ["PYTHONWARNINGS"] = "ignore"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["MPLBACKEND"] = "Agg" # Force Matplotlib headless mode globally
 import logging
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -104,6 +106,12 @@ from controllers.workspace_prompt_controller import (
     get_all_workspace_prompts,
     delete_workspace_prompt
 )
+from controllers.scheduled_reports_controller import (
+    add_schedule_controller, get_schedules_controller, 
+    update_schedule_controller, delete_schedule_controller
+)
+from helper.report_mailer import check_and_send_scheduled_reports
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from flask_socketio import SocketIO
 app = Flask(__name__)
@@ -590,6 +598,70 @@ def year_wise_sales_comparison():
 def available_years():
     return available_years_controller(get_db_connection)    
 
+from controllers.category_sales import get_category_sales_controller
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5005, debug=True, use_reloader=False)
+@app.route("/category-sales", methods=["GET"])
+def category_sales():
+    return get_category_sales_controller(get_db_connection)
+
+@app.route("/sales-revenue", methods=["GET", "POST"])
+def sales_revenue():
+    return get_sales_revenue_data_controller(get_db_connection)
+
+@app.route("/sales-by-account-category", methods=["GET", "POST"])
+def sales_by_account_category():
+    return get_sales_by_account_category_controller(get_db_connection)
+
+@app.route("/non-billed-accounts-pct", methods=["GET", "POST"])
+def non_billed_accounts_pct():
+    return get_non_billed_accounts_controller(get_db_connection)
+
+@app.route("/overdue-pct", methods=["GET", "POST"])
+def overdue_pct():
+    return get_overdue_pct_controller(get_db_connection)
+
+@app.route("/exposure-pct", methods=["GET", "POST"])
+def exposure_pct():
+    return get_exposure_pct_controller(get_db_connection)
+
+from controllers.export_report_controller import export_domestic_sales_report_controller, export_domestic_sales_preview_controller
+
+@app.route("/export-domestic-sales-report", methods=["GET", "POST"])
+def export_domestic_sales_report():
+    return export_domestic_sales_report_controller(get_db_connection)
+
+@app.route("/export-domestic-sales-preview", methods=["GET", "POST"])
+def export_domestic_sales_preview():
+    return export_domestic_sales_preview_controller(get_db_connection)
+
+# ==========================================
+# Report Recipients API
+# ==========================================
+
+
+# ==========================================
+# Scheduled Reports API
+# ==========================================
+@app.route("/api/scheduled-reports", methods=["GET"])
+def get_scheduled_reports():
+    return get_schedules_controller()
+
+@app.route("/api/scheduled-reports", methods=["POST"])
+def add_scheduled_report():
+    return add_schedule_controller()
+
+@app.route("/api/scheduled-reports/<int:schedule_id>", methods=["PUT"])
+def update_scheduled_report(schedule_id):
+    return update_schedule_controller(schedule_id)
+
+@app.route("/api/scheduled-reports/<int:schedule_id>", methods=["DELETE"])
+def delete_scheduled_report(schedule_id):
+    return delete_schedule_controller(schedule_id)
+
+if __name__ == '__main__':
+    # Start APScheduler
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
+    scheduler.start()
+
+    app.run(host="0.0.0.0", port=3019, debug=True, use_reloader=False)

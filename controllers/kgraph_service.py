@@ -176,7 +176,15 @@ def build_sql_rules(kg):
     if kg["synonyms"]:
         out.append("WORD -> COLUMN (map user wording to the EXACT column; longer phrase wins):")
         for s in sorted(kg["synonyms"], key=lambda x: -(x.get("phrase_len") or 0)):
-            out.append(f"  \"{s['business_term']}\" -> `{s['target_column']}` (on `{s['target_table']}`)")
+            t_tbl = s['target_table']
+            t_col = s['target_column']
+            # FORCE FACT TABLE FOREIGN KEYS to prevent NULL-lumping!
+            if t_tbl == "customer_master" and t_col == "KUNNR":
+                t_tbl, t_col = "sales_data", "customer"
+            elif t_tbl == "sku_master" and t_col == "MATNR":
+                t_tbl, t_col = "sales_data", "material"
+            
+            out.append(f"  \"{s['business_term']}\" -> `{t_col}` (on `{t_tbl}`)")
 
     # Metrics
     if kg["metrics"]:
@@ -211,6 +219,13 @@ def _syn_spans(question, kg):
         if any(not (en <= ts or st >= te) for ts, te in taken):
             continue
         taken.append((st, en))
+        
+        # FORCE FACT TABLE FOREIGN KEYS
+        if t == "customer_master" and c == "KUNNR":
+            t, c = "sales_data", "customer"
+        elif t == "sku_master" and c == "MATNR":
+            t, c = "sales_data", "material"
+            
         if (t, c) not in seen:
             seen.add((t, c))
             out.append((t, c, p))
@@ -225,6 +240,7 @@ def resolve_grouping(question, kg):
     lines = ["\n\nGROUP-BY MAPPING (use these EXACT columns for the breakdown):"]
     for (t, c, p) in named:
         lines.append(f"- '{p}' -> GROUP BY `{t}`.`{c}` (JOIN `{t}` per the JOIN KEYS).")
+    lines.append("  CRITICAL: If the mapped column is a dimension table's primary key (like customer_master.KUNNR), you MUST GROUP BY the corresponding foreign key in the FACT table instead (like sales_data.customer) to prevent unmatched records from being lumped into a single NULL bucket!")
     return "\n".join(lines)
 
 

@@ -32,7 +32,7 @@ from sqlalchemy.types import DECIMAL, BigInteger, Date, Text
 # ──────────────────────────────────────────────────────────────────────────
 CHUNK_SIZE          = 300_000
 SAMPLE_ROWS         = 50_000          # rows used to infer column types
-NUMERIC_THRESHOLD   = 0.80            # ≥80% of non-blank values parse as number
+NUMERIC_THRESHOLD   = 0.99            # ≥99% of non-blank values parse as number (strict to protect text data)
 DATE_THRESHOLD      = 0.80            # ≥80% of non-blank values parse as a date
 MONEY_PRECISION     = 30              # DECIMAL(precision, scale) for numeric cols
 MONEY_SCALE         = 8
@@ -78,21 +78,24 @@ def _clean_numeric(series: pd.Series) -> pd.Series:
                    'None': np.nan, '-': np.nan, 'null': np.nan, 'NULL': np.nan})
     return pd.to_numeric(x, errors='coerce')
 
-
 def _best_date_format(series: pd.Series):
     """Return (format, parse_ratio) for the best-matching date format, or (None, 0)."""
     nonblank = series.dropna().astype(str).str.strip()
     nonblank = nonblank[(nonblank != '') & (nonblank.str.lower() != 'nan')]
     if nonblank.empty:
         return None, 0.0
-    sample = nonblank.head(2000)
+    # Sample from UNIQUE values, not raw row order — a chronologically
+    # sorted, dense file (many rows per day) can otherwise never surface
+    # day-of-month values >12 in the first N raw rows, hiding the exact
+    # signal needed to tell day-first from month-first formats apart.
+    unique_vals = pd.Series(nonblank.unique())
+    sample = unique_vals.head(2000)
     best_fmt, best_ratio = None, 0.0
     for fmt in DATE_FORMATS:
         ratio = pd.to_datetime(sample, format=fmt, errors='coerce').notna().mean()
         if ratio > best_ratio:
             best_fmt, best_ratio = fmt, float(ratio)
     return best_fmt, best_ratio
-
 
 def _infer_schema(sample: pd.DataFrame) -> dict:
     """Map each (already-sanitized) column name -> dict(kind, fmt)."""
@@ -108,15 +111,14 @@ def _infer_schema(sample: pd.DataFrame) -> dict:
                 # --------------------------------------------------
         # BUSINESS COLUMN OVERRIDES (HIGHEST PRIORITY)
         # --------------------------------------------------
-
-        DATE_COLUMNS = {
-            "invoice_date",
-            "billing_date",
-            "posting_date",
-            "created_date",
-            "updated_date",
-            "date"
-        }
+        if "date" in col_lower:
+            fmt, date_ratio = _best_date_format(nonblank)
+            if date_ratio < DATE_THRESHOLD:
+                fmt = None   # low confidence — fall back to the lenient
+                             # generic dayfirst parser in _apply_schema
+                             # instead of forcing a barely-matching format
+            schema[col] = {"kind": "date", "fmt": fmt}
+            continue
 
         INT_COLUMNS = {
             "qty",
@@ -144,10 +146,6 @@ def _infer_schema(sample: pd.DataFrame) -> dict:
             "round_off",
             "fraight"
         }
-
-        if col_lower in DATE_COLUMNS:
-            schema[col] = {"kind": "date", "fmt": None}
-            continue
 
         if col_lower in INT_COLUMNS:
             schema[col] = {"kind": "int", "fmt": None}
@@ -208,18 +206,18 @@ def _apply_schema(chunk: pd.DataFrame, schema: dict) -> pd.DataFrame:
             #     format=spec['fmt'], errors='coerce'
             # ).dt.date
             
-            if spec["fmt"]:
+            if spec.get("fmt"):
                 chunk[col] = pd.to_datetime(
                     chunk[col].astype(str).str.strip(),
                     format=spec["fmt"],
                     errors="coerce"
-                ).dt.date
+                ).dt.strftime('%Y-%m-%d')
             else:
                 chunk[col] = pd.to_datetime(
                     chunk[col].astype(str).str.strip(),
                     errors="coerce",
                     dayfirst=True
-                ).dt.date
+                ).dt.strftime('%Y-%m-%d')
     return chunk
 
 
@@ -263,6 +261,10 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
         for t in existing_tables:
             cols_res = conn.execute(text(f"SHOW COLUMNS FROM `{t}`"))
             schema_map[t] = set([row[0] for row in cols_res])
+
+    import os
+    # Sort file_paths by original filename (ignoring UUID prefix) so base files come first
+    file_paths.sort(key=lambda p: os.path.basename(p).split('_', 1)[-1] if '_' in os.path.basename(p) else os.path.basename(p))
 
     for path in file_paths:
         print(f"\n🚀 Starting processing for file: {path}")

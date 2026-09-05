@@ -5,3 +5,6 @@ uploads
 __pycache__
 graphs
 chroma_store
+*.xlsx
+/lib
+*.zip
