@@ -43,17 +43,11 @@ from collections import defaultdict
 # pyrefly: ignore [missing-import]
 from flask import request, jsonify
 from database.config import MISTRAL_API_KEY, MISTRAL_MODEL, MYSQL_CONFIG
-<<<<<<< HEAD
 from database.prompt_loader import get_prompt
 from controllers.kgraph_service import (
-    load_kgraph, build_sql_rules, resolve_grouping, detect_drilldown, validate_sql)
-<<<<<<< HEAD
-=======
-
->>>>>>> 3b47b201b42242ea4d683af906f605952e6b0195
-=======
+    load_kgraph, build_sql_rules, resolve_grouping, detect_drilldown, validate_sql
+)
 from helper.email_action_handler import is_email_action_request, execute_email_action
->>>>>>> 2bd1d69a302f5816b317e8791cca833c6f6a275c
 # ChromaDB persistent storage — vectors survive server restarts
 CHROMA_PERSIST_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_store"
@@ -1149,6 +1143,24 @@ def _validate_column_refs(sql, table_cols):
     `wd`.`dealer` are correctly ignored — we cannot and should not validate
     derived columns."""
     if not sql or not table_cols:
+        return []
+    lower_cols = {t: {c.lower() for c in cols} for t, cols in table_cols.items()}
+    base_tables = set(table_cols.keys())
+    violations = {}
+
+    # Backticked  `table`.`column`
+    for m in re.finditer(r"`([^`]+)`\s*\.\s*`([^`]+)`", sql):
+        q, c = m.group(1), m.group(2)
+        if q in base_tables and c.lower() not in lower_cols[q]:
+            violations[(q, c)] = True
+
+    # Unbackticked  table.column  (qualifier still must be a real base table)
+    for m in re.finditer(r"\b(\w+)\s*\.\s*(\w+)\b", sql):
+        q, c = m.group(1), m.group(2)
+        if q in base_tables and c.lower() not in lower_cols[q]:
+            violations[(q, c)] = True
+
+    return list(violations.keys())
 # ─────────────────────────────────────────────
 # VISUALIZATION SUPPORT
 # ─────────────────────────────────────────────
@@ -1905,56 +1917,56 @@ Return ONLY: {{"suggested_questions":["What ...?","What ...?","What ...?"]}}
 # - FAN-OUT: a dimension table must be joined on its key so each fact row matches
 #   at most one dimension row. Joining a product attribute on the wrong key (e.g.
 #   Customer) multiplies rows and inflates SUM — never do it.
-BUSINESS DEFINITIONS
-- Dealer = Customer
-- Sales = SUM(invoice_value)
-- Revenue = SUM(invoice_value)
-- Volume = SUM(qty)
-- Net Sales = SUM(invoice_value) - SUM(total_discount)
-- Invoice Count = COUNT(DISTINCT invoice_number)
-- Product = Material
-- Product Category ("Tyre", "Tube", "Flap") = ALWAYS LEFT JOIN `category_master` on `sku_master.category = category_master.category_code` and select `category_name`. Do NOT just select the category code from `sku_master`.
-- Construction / "tyre type" / "tube type" ("RADIAL", "BIAS") = ALWAYS LEFT JOIN `construction_master` on `sku_master.construction = construction_master.construction_code` and select `construction_description`.
-- Vehicle / "vehicle type" / "vehicle category" ("TRUCK", "CAR") = ALWAYS LEFT JOIN `tyre_type_master` on `sku_master.tyre_type = tyre_type_master.tyre_type_code` and select `tyre_type_name`. This is DIFFERENT from CATEGORY.
-- These attributes are PRODUCT attributes keyed by Material (`sku_master`). First LEFT JOIN `sku_master` to fact, then LEFT JOIN these master tables to `sku_master`. Never join them directly on Customer.
-- "category-wise" / "by category" / "product category wise" / "per category" => GROUP BY `CATEGORY`, NOT Material
-- "product-wise" / "by product" => GROUP BY Material
-- Top Dealer = Dealer ranked by Sales descending
-- Worst Dealer = Dealer ranked by Sales ascending
-- Best Performing Dealer = Dealer ranked by Sales descending
-- Lowest Performing Dealer = Dealer ranked by Sales ascending
-- Top Product = Product ranked by Sales descending
-- Worst Product = Product ranked by Sales ascending
-- Region Performance = SUM(invoice_value) grouped by region
-- Zone Performance = SUM(invoice_value) grouped by zone
-- Average Realization = SUM(invoice_value) / NULLIF(SUM(qty),0)
+# BUSINESS DEFINITIONS
+# - Dealer = Customer
+# - Sales = SUM(invoice_value)
+# - Revenue = SUM(invoice_value)
+# - Volume = SUM(qty)
+# - Net Sales = SUM(invoice_value) - SUM(total_discount)
+# - Invoice Count = COUNT(DISTINCT invoice_number)
+# - Product = Material
+# - Product Category ("Tyre", "Tube", "Flap") = ALWAYS LEFT JOIN `category_master` on `sku_master.category = category_master.category_code` and select `category_name`. Do NOT just select the category code from `sku_master`.
+# - Construction / "tyre type" / "tube type" ("RADIAL", "BIAS") = ALWAYS LEFT JOIN `construction_master` on `sku_master.construction = construction_master.construction_code` and select `construction_description`.
+# - Vehicle / "vehicle type" / "vehicle category" ("TRUCK", "CAR") = ALWAYS LEFT JOIN `tyre_type_master` on `sku_master.tyre_type = tyre_type_master.tyre_type_code` and select `tyre_type_name`. This is DIFFERENT from CATEGORY.
+# - These attributes are PRODUCT attributes keyed by Material (`sku_master`). First LEFT JOIN `sku_master` to fact, then LEFT JOIN these master tables to `sku_master`. Never join them directly on Customer.
+# - "category-wise" / "by category" / "product category wise" / "per category" => GROUP BY `CATEGORY`, NOT Material
+# - "product-wise" / "by product" => GROUP BY Material
+# - Top Dealer = Dealer ranked by Sales descending
+# - Worst Dealer = Dealer ranked by Sales ascending
+# - Best Performing Dealer = Dealer ranked by Sales descending
+# - Lowest Performing Dealer = Dealer ranked by Sales ascending
+# - Top Product = Product ranked by Sales descending
+# - Worst Product = Product ranked by Sales ascending
+# - Region Performance = SUM(invoice_value) grouped by region
+# - Zone Performance = SUM(invoice_value) grouped by zone
+# - Average Realization = SUM(invoice_value) / NULLIF(SUM(qty),0)
 
 
 
-PERFORMER RESOLUTION
+# PERFORMER RESOLUTION
 
-- The word "performer" does NOT imply Dealer.
-- Determine the ranking entity ONLY from the user's wording.
-- If the user explicitly says "dealer", rank dealers.
-- If the user explicitly says "customer", rank customers.
-- If the user explicitly says "product", rank products.
-- If the user explicitly says "region", rank regions.
-- If the user explicitly says "zone", rank zones.
-- If the user only says "performer" without specifying an entity, default to Customer. Only use Dealer, Product, Region, Zone, etc. when the user explicitly mentions them.
-- NEVER rewrite "performer" as "dealer" unless the user explicitly uses the word "dealer".
+# - The word "performer" does NOT imply Dealer.
+# - Determine the ranking entity ONLY from the user's wording.
+# - If the user explicitly says "dealer", rank dealers.
+# - If the user explicitly says "customer", rank customers.
+# - If the user explicitly says "product", rank products.
+# - If the user explicitly says "region", rank regions.
+# - If the user explicitly says "zone", rank zones.
+# - If the user only says "performer" without specifying an entity, default to Customer. Only use Dealer, Product, Region, Zone, etc. when the user explicitly mentions them.
+# - NEVER rewrite "performer" as "dealer" unless the user explicitly uses the word "dealer".
 
-AUTHORITATIVE SCHEMA MAP PRECEDENCE
-- If the user message contains an "AUTHORITATIVE SCHEMA MAP", a "GEOGRAPHY CHAIN",
-  a "GROUP-BY MAPPING", or a "HIERARCHY DRILL-DOWN" block, those are RESOLVED
-  FROM THE REAL SCHEMA and OVERRIDE these generic definitions for table names,
-  column ownership, joins, filters and group-by. Follow them exactly.
-- REGION / ZONE ARE NEVER A SINGLE JOIN: if the user asks about region or zone,
-  you MUST follow the GEOGRAPHY CHAIN block exactly — it requires TWO joins
-  (customer -> territory_master -> region_master). Never reference `region` or
-  `zone` on `customer_master` or any alias of it (e.g. `cm.zone` is INVALID).
-- FAN-OUT: a dimension table must be joined on its key so each fact row matches
-  at most one dimension row. Joining a product attribute on the wrong key (e.g.
-  Customer) multiplies rows and inflates SUM — never do it.
+# AUTHORITATIVE SCHEMA MAP PRECEDENCE
+# - If the user message contains an "AUTHORITATIVE SCHEMA MAP", a "GEOGRAPHY CHAIN",
+#   a "GROUP-BY MAPPING", or a "HIERARCHY DRILL-DOWN" block, those are RESOLVED
+#   FROM THE REAL SCHEMA and OVERRIDE these generic definitions for table names,
+#   column ownership, joins, filters and group-by. Follow them exactly.
+# - REGION / ZONE ARE NEVER A SINGLE JOIN: if the user asks about region or zone,
+#   you MUST follow the GEOGRAPHY CHAIN block exactly — it requires TWO joins
+#   (customer -> territory_master -> region_master). Never reference `region` or
+#   `zone` on `customer_master` or any alias of it (e.g. `cm.zone` is INVALID).
+# - FAN-OUT: a dimension table must be joined on its key so each fact row matches
+#   at most one dimension row. Joining a product attribute on the wrong key (e.g.
+#   Customer) multiplies rows and inflates SUM — never do it.
 
 
 # METRIC PRIORITY
@@ -2013,20 +2025,20 @@ AUTHORITATIVE SCHEMA MAP PRECEDENCE
 #    ) as top_entities ON t.entity = top_entities.entity
 #    GROUP BY t.entity, month
 #    ORDER BY top_entities.total_sales DESC, month;
-7. If the question asks for Top N entities (e.g., dealers, customers) month-wise or trend:
-   NEVER use `IN (SELECT ... LIMIT N)` because MySQL does not support LIMIT inside IN subqueries.
-   Instead, you MUST use a LEFT JOIN with a derived table:
+# 7. If the question asks for Top N entities (e.g., dealers, customers) month-wise or trend:
+#    NEVER use `IN (SELECT ... LIMIT N)` because MySQL does not support LIMIT inside IN subqueries.
+#    Instead, you MUST use a LEFT JOIN with a derived table:
    
-   SELECT t.entity, DATE_FORMAT(STR_TO_DATE(t.date_col, '%Y-%m-%d'), '%Y-%m') as month, SUM(t.metric) as total_sales
-   FROM `table` t
-   LEFT JOIN (
-       SELECT entity FROM `table`
-       GROUP BY entity
-       ORDER BY SUM(metric) DESC
-       LIMIT N
-   ) as top_entities ON t.entity = top_entities.entity
-   GROUP BY t.entity, month
-   ORDER BY top_entities.total_sales DESC, month;
+#    SELECT t.entity, DATE_FORMAT(STR_TO_DATE(t.date_col, '%Y-%m-%d'), '%Y-%m') as month, SUM(t.metric) as total_sales
+#    FROM `table` t
+#    LEFT JOIN (
+#        SELECT entity FROM `table`
+#        GROUP BY entity
+#        ORDER BY SUM(metric) DESC
+#        LIMIT N
+#    ) as top_entities ON t.entity = top_entities.entity
+#    GROUP BY t.entity, month
+#    ORDER BY top_entities.total_sales DESC, month;
    
 #    Adjust the DATE_FORMAT and STR_TO_DATE depending on the actual date format in the table.
 
@@ -2039,15 +2051,15 @@ AUTHORITATIVE SCHEMA MAP PRECEDENCE
 #    GROUP BY
 #    ORDER BY
 #    HAVING
-8. Use:
-   SUM()
-   COUNT()
-   AVG()
-   MIN()
-   MAX()
-   GROUP BY (CRITICAL: Every non-aggregated column in the SELECT clause MUST be present in the GROUP BY clause to prevent `only_full_group_by` errors.)
-   ORDER BY
-   HAVING
+# 8. Use:
+#    SUM()
+#    COUNT()
+#    AVG()
+#    MIN()
+#    MAX()
+#    GROUP BY (CRITICAL: Every non-aggregated column in the SELECT clause MUST be present in the GROUP BY clause to prevent `only_full_group_by` errors.)
+#    ORDER BY
+#    HAVING
 
 # 9. If SQL execution is possible:
 #    SQL results are always more authoritative than retrieved context.
@@ -2059,8 +2071,8 @@ AUTHORITATIVE SCHEMA MAP PRECEDENCE
 # 12. Never hallucinate business results.
 
 # 13. PRESERVE EXACT DECIMALS: Never round monetary values in SQL unless explicitly asked. Return the exact sum with decimals intact.
-13. PRESERVE EXACT DECIMALS: Never round monetary values in SQL unless explicitly asked. Return the exact sum with decimals intact.
-14. NEGATIVE VALUES: NEVER add `> 0` or `>= 0` filters to sales or invoice columns unless the user explicitly asks to "exclude returns" or "only show positive sales". If a dealer's total sales are negative (e.g. -19022.00), that is a valid exact figure and must be included.
+# 13. PRESERVE EXACT DECIMALS: Never round monetary values in SQL unless explicitly asked. Return the exact sum with decimals intact.
+# 14. NEGATIVE VALUES: NEVER add `> 0` or `>= 0` filters to sales or invoice columns unless the user explicitly asks to "exclude returns" or "only show positive sales". If a dealer's total sales are negative (e.g. -19022.00), that is a valid exact figure and must be included.
 
 # COLUMN HYGIENE
 # - All numeric columns (sales, invoice_value, quantity, discount, tax) are strictly typed as DECIMAL or BIGINT in the database.
@@ -2089,26 +2101,26 @@ AUTHORITATIVE SCHEMA MAP PRECEDENCE
 #       ORDER BY grp, metric DESC;
 # - Use a single global ORDER BY ... LIMIT N ONLY when the question has NO
 #   per-group qualifier (plain "top N customers").
-- "Top N customers per category", "category wise top N", "best N per region",
-  "top N dealers for each zone" all mean: rank WITHIN each group and keep N rows
-  from EVERY group. NEVER answer these with a single global ORDER BY ... LIMIT N
-  (that returns only the N biggest pairs overall, not N per group).
-- Use a window function partitioned by the group:
-      WITH agg AS (
-        SELECT `<group_col>` AS grp, `<entity_col>` AS entity,
-               SUM(`<value_col>`) AS metric
-        FROM `<fact>` LEFT JOIN `<dim>` ON ...
-        GROUP BY `<group_col>`, `<entity_col>`
-      ),
-      ranked AS (
-        SELECT grp, entity, metric,
-               ROW_NUMBER() OVER (PARTITION BY grp ORDER BY metric DESC) AS rn
-        FROM agg
-      )
-      SELECT grp, entity, metric FROM ranked WHERE rn <= N
-      ORDER BY grp, metric DESC;
-- Use a single global ORDER BY ... LIMIT N ONLY when the question has NO
-  per-group qualifier (plain "top N customers").
+# - "Top N customers per category", "category wise top N", "best N per region",
+#   "top N dealers for each zone" all mean: rank WITHIN each group and keep N rows
+#   from EVERY group. NEVER answer these with a single global ORDER BY ... LIMIT N
+#   (that returns only the N biggest pairs overall, not N per group).
+# - Use a window function partitioned by the group:
+#       WITH agg AS (
+#         SELECT `<group_col>` AS grp, `<entity_col>` AS entity,
+#                SUM(`<value_col>`) AS metric
+#         FROM `<fact>` LEFT JOIN `<dim>` ON ...
+#         GROUP BY `<group_col>`, `<entity_col>`
+#       ),
+#       ranked AS (
+#         SELECT grp, entity, metric,
+#                ROW_NUMBER() OVER (PARTITION BY grp ORDER BY metric DESC) AS rn
+#         FROM agg
+#       )
+#       SELECT grp, entity, metric FROM ranked WHERE rn <= N
+#       ORDER BY grp, metric DESC;
+# - Use a single global ORDER BY ... LIMIT N ONLY when the question has NO
+#   per-group qualifier (plain "top N customers").
 
 # PLAIN TOP-N vs WINDOWED TOP-N
 # - A plain "top N" / "worst N" with NO per-group qualifier needs only
@@ -2135,75 +2147,75 @@ AUTHORITATIVE SCHEMA MAP PRECEDENCE
 #   exactly (it tells you the filter column/value and the group-by level, both
 #   resolved to real tables). JOIN across tables via the LIKELY JOIN KEYS when the
 #   filter level and group level live on different tables.
-JOINS AND MISSING DIMENSIONS (CRITICAL)
-- ALWAYS use `LEFT JOIN` for ANY join to a dimension table (e.g., `customer_master`, `sku_master`, `category_master`, etc.). NEVER use an `INNER JOIN` or `JOIN` anywhere in the query when fetching dimension data, even when joining from a CTE!
-- NEVER use an `INNER JOIN` (or plain `JOIN`) that might drop valid records just because the dimension data is missing.
-- When selecting ANY name from a dimension table (whether inside a CTE or in the final MAIN query), you MUST wrap it in `COALESCE` to prevent nulls in the JSON output. 
-  Example: `SELECT COALESCE(cm.Cname, 'N/A') AS dealer_name`
-- SUPER CRITICAL BUG FIX: When grouping or selecting after a LEFT JOIN, ALWAYS use the foreign key from the FACT table (e.g., `sales_data.customer`), NEVER the primary key from the DIMENSION table (e.g., `customer_master.KUNNR`). Grouping by the dimension key will lump all unmatched records into a single NULL bucket! This applies to ALL dimension tables.
+# JOINS AND MISSING DIMENSIONS (CRITICAL)
+# - ALWAYS use `LEFT JOIN` for ANY join to a dimension table (e.g., `customer_master`, `sku_master`, `category_master`, etc.). NEVER use an `INNER JOIN` or `JOIN` anywhere in the query when fetching dimension data, even when joining from a CTE!
+# - NEVER use an `INNER JOIN` (or plain `JOIN`) that might drop valid records just because the dimension data is missing.
+# - When selecting ANY name from a dimension table (whether inside a CTE or in the final MAIN query), you MUST wrap it in `COALESCE` to prevent nulls in the JSON output. 
+#   Example: `SELECT COALESCE(cm.Cname, 'N/A') AS dealer_name`
+# - SUPER CRITICAL BUG FIX: When grouping or selecting after a LEFT JOIN, ALWAYS use the foreign key from the FACT table (e.g., `sales_data.customer`), NEVER the primary key from the DIMENSION table (e.g., `customer_master.KUNNR`). Grouping by the dimension key will lump all unmatched records into a single NULL bucket! This applies to ALL dimension tables.
 
-MULTI-LEVEL BREAKDOWN ("Top/Worst N along with their X-wise breakup")
-ENTITY RESOLUTION FOR BREAKDOWN QUERIES
+# MULTI-LEVEL BREAKDOWN ("Top/Worst N along with their X-wise breakup")
+# ENTITY RESOLUTION FOR BREAKDOWN QUERIES
 
-- In queries of the form:
-  "Top/Bottom/Worst N performers along with <dimension>-wise sales breakup"
+# - In queries of the form:
+#   "Top/Bottom/Worst N performers along with <dimension>-wise sales breakup"
 
-  the "<dimension>-wise" phrase specifies ONLY the breakdown dimension.
+#   the "<dimension>-wise" phrase specifies ONLY the breakdown dimension.
 
-- NEVER infer the ranking entity from the breakdown dimension.
+# - NEVER infer the ranking entity from the breakdown dimension.
 
-- "product category-wise", "product construction-wise", "vehicle-wise", "region-wise", etc. describe ONLY how to split the selected entities after ranking.
-- EXCEPTION: If the user explicitly asks for "Top/Worst N <Entity> wise sales" WITHOUT another ranking entity (e.g., "worst 2 construction type wise sales"), it means you must rank the <Entity> itself. Just GROUP BY the <Entity>, ORDER BY sales, and LIMIT N. DO NOT use ROW_NUMBER() or PARTITION BY unless explicitly asked to find "per <Entity>".
+# - "product category-wise", "product construction-wise", "vehicle-wise", "region-wise", etc. describe ONLY how to split the selected entities after ranking.
+# - EXCEPTION: If the user explicitly asks for "Top/Worst N <Entity> wise sales" WITHOUT another ranking entity (e.g., "worst 2 construction type wise sales"), it means you must rank the <Entity> itself. Just GROUP BY the <Entity>, ORDER BY sales, and LIMIT N. DO NOT use ROW_NUMBER() or PARTITION BY unless explicitly asked to find "per <Entity>".
 
-- The ranking entity must be resolved independently:
-    - dealer -> Dealer
-    - customer -> Customer
-    - product -> Product
-    - region -> Region
-    - zone -> Zone
-    - performer -> Customer (default)
+# - The ranking entity must be resolved independently:
+#     - dealer -> Dealer
+#     - customer -> Customer
+#     - product -> Product
+#     - region -> Region
+#     - zone -> Zone
+#     - performer -> Customer (default)
 
-Example:
-"Worst 2 performers along with their product construction wise sales breakup"
+# Example:
+# "Worst 2 performers along with their product construction wise sales breakup"
 
-Correct interpretation:
-1. Rank Customers by SUM(invoice_value) ASC.
-2. Select the Bottom 2 Customers.
-3. Break down each selected Customer by Product Construction.
+# Correct interpretation:
+# 1. Rank Customers by SUM(invoice_value) ASC.
+# 2. Select the Bottom 2 Customers.
+# 3. Break down each selected Customer by Product Construction.
 
-Incorrect interpretation:
-Rank Products because "product construction" appears in the question.
+# Incorrect interpretation:
+# Rank Products because "product construction" appears in the question.
 
-- When asked to find the Top N or Worst N entities overall AND THEN show their breakdown (e.g., "worst 2 performers along with their product category wise sales breakup"):
-  1. FIRST, create a CTE to calculate the total aggregate (SUM) per entity and LIMIT to Top/Worst N.
-     Example: `WITH top_entities AS (SELECT entity, SUM(metric) as total FROM fact GROUP BY entity ORDER BY total DESC LIMIT N)`
-  2. THEN, create a breakdown CTE that joins the first CTE back to the fact/dimensions. YOU MUST include the `total` from the first CTE in this second CTE so it can be used for sorting later.
-     Example: `breakdown AS (SELECT wp.entity, wp.total, dim.category, SUM(fact.metric) as category_sales FROM top_entities wp LEFT JOIN fact ... GROUP BY wp.entity, wp.total, dim.category)`
-  3. FINALLY, in the main query, select the columns from the breakdown CTE.
-  4. CRITICAL: In the final main query, you MUST `ORDER BY` the `total` column (e.g. `ORDER BY breakdown.total DESC`) so that the overall Top N / Worst N sequence is preserved, followed by the category sales!
-  5. NEVER rank individual unaggregated rows using ROW_NUMBER() without summing first.
-  6. Prefer simple `ORDER BY ... LIMIT N` for direct Top/Worst queries. Avoid complex window functions like `ROW_NUMBER()` unless a nested breakdown is strictly required.
-  7. CRITICAL: MySQL 8 supports `LIMIT` inside `WITH` CTEs. DO NOT comment out the `LIMIT N` clause inside the CTE. Use `LIMIT N` directly (e.g. `LIMIT 2` and NOT `-- LIMIT 2`).
+# - When asked to find the Top N or Worst N entities overall AND THEN show their breakdown (e.g., "worst 2 performers along with their product category wise sales breakup"):
+#   1. FIRST, create a CTE to calculate the total aggregate (SUM) per entity and LIMIT to Top/Worst N.
+#      Example: `WITH top_entities AS (SELECT entity, SUM(metric) as total FROM fact GROUP BY entity ORDER BY total DESC LIMIT N)`
+#   2. THEN, create a breakdown CTE that joins the first CTE back to the fact/dimensions. YOU MUST include the `total` from the first CTE in this second CTE so it can be used for sorting later.
+#      Example: `breakdown AS (SELECT wp.entity, wp.total, dim.category, SUM(fact.metric) as category_sales FROM top_entities wp LEFT JOIN fact ... GROUP BY wp.entity, wp.total, dim.category)`
+#   3. FINALLY, in the main query, select the columns from the breakdown CTE.
+#   4. CRITICAL: In the final main query, you MUST `ORDER BY` the `total` column (e.g. `ORDER BY breakdown.total DESC`) so that the overall Top N / Worst N sequence is preserved, followed by the category sales!
+#   5. NEVER rank individual unaggregated rows using ROW_NUMBER() without summing first.
+#   6. Prefer simple `ORDER BY ... LIMIT N` for direct Top/Worst queries. Avoid complex window functions like `ROW_NUMBER()` unless a nested breakdown is strictly required.
+#   7. CRITICAL: MySQL 8 supports `LIMIT` inside `WITH` CTEs. DO NOT comment out the `LIMIT N` clause inside the CTE. Use `LIMIT N` directly (e.g. `LIMIT 2` and NOT `-- LIMIT 2`).
 
-HIERARCHY DRILL-DOWN
-- The product data has a hierarchy (e.g. CATEGORY -> CONSTRUCTION -> VEHICLE_TYPE
-  -> ... -> MATERIAL), from broad to specific.
-- When the user NAMES A VALUE at one level (e.g. "tyre", "radial", "truck") and
-  asks for "top/worst N <something> of/within it" or any breakdown, treat the
-  named value as a FILTER (WHERE that_level = 'value') and GROUP BY the NEXT
-  level DOWN, ranking by the metric (default Sales = SUM(invoice_value)).
-  Example: "top 3 performing tyre categories" =>
-      WHERE `category` = 'Tyre'
-      GROUP BY `construction`            -- the next level below CATEGORY
-      ORDER BY SUM(`Invoice_Value`) DESC, `construction` ASC
-      LIMIT 3
-  Never GROUP BY the same level you filtered on (that returns just one row).
-- If the user explicitly names the child level ("...constructions",
-  "...vehicle types"), GROUP BY exactly that level.
-- If a HIERARCHY DRILL-DOWN block is provided in the user message, follow it
-  exactly (it tells you the filter column/value and the group-by level, both
-  resolved to real tables). JOIN across tables via the LIKELY JOIN KEYS when the
-  filter level and group level live on different tables.
+# HIERARCHY DRILL-DOWN
+# - The product data has a hierarchy (e.g. CATEGORY -> CONSTRUCTION -> VEHICLE_TYPE
+#   -> ... -> MATERIAL), from broad to specific.
+# - When the user NAMES A VALUE at one level (e.g. "tyre", "radial", "truck") and
+#   asks for "top/worst N <something> of/within it" or any breakdown, treat the
+#   named value as a FILTER (WHERE that_level = 'value') and GROUP BY the NEXT
+#   level DOWN, ranking by the metric (default Sales = SUM(invoice_value)).
+#   Example: "top 3 performing tyre categories" =>
+#       WHERE `category` = 'Tyre'
+#       GROUP BY `construction`            -- the next level below CATEGORY
+#       ORDER BY SUM(`Invoice_Value`) DESC, `construction` ASC
+#       LIMIT 3
+#   Never GROUP BY the same level you filtered on (that returns just one row).
+# - If the user explicitly names the child level ("...constructions",
+#   "...vehicle types"), GROUP BY exactly that level.
+# - If a HIERARCHY DRILL-DOWN block is provided in the user message, follow it
+#   exactly (it tells you the filter column/value and the group-by level, both
+#   resolved to real tables). JOIN across tables via the LIKELY JOIN KEYS when the
+#   filter level and group level live on different tables.
 
 # RESERVED WORDS — NEVER USE AS ALIASES
 # - `RANK`, `ROW_NUMBER`, `ORDER`, `GROUP`, `DESC`, `ASC`, `ROWS`, `RANGE`,
@@ -2571,51 +2583,6 @@ Return ONLY:
         _answer_msg += "\n\nCRITICAL INSTRUCTION FOR VISUALIZATIONS: Because this is an aggregation query, your 'visualizations' array MUST ONLY contain a 'table' (type='table'). DO NOT generate 'line_chart', 'bar_chart', or any other charts. DO NOT hallucinate dates or months!"
 
     res = _mistral(system_prompt, _answer_msg)
-Retrieved data (read ALL carefully):
-Retrieved data chunks (read ALL carefully):
-{context}
-
-{hist}Business Question: "{question}"
-
-Detected intent: {understanding['intent']}
-Relevant tables: {understanding['table_hints']}
-
-{multi_hint}
-DEEP ANALYSIS PROTOCOL:
-1. Exhaustively scan every chunk — extract ALL relevant business facts. NEVER swap data between different years, rows, or categories.
-2. STRICT CONTEXT MATCHING: Ensure that any number you output exactly matches the year or category it was found with in the chunks.
-3. Counts/Totals → [COUNT] chunks are authoritative (e.g. "Number of recipe_users: 12").
-4. Complete lists → [COUNT] "All values of column:" lines.
-5. User/entity activity → [JOIN] chunks show cross-table relationships.
-6. Time patterns → compare timestamps in [ROW] chunks to find trends.
-7. Business logic → reason about WHY data looks the way it does.
-8. Write a COMPREHENSIVE, analyst-grade answer:
-   - Start with the direct answer to the question.
-   - Compare available years objectively. Avoid sweeping claims like "clear downward trend" unless explicitly verified across all requested years.
-   - Use the word "Actual" (not "projected" or "estimated") for actual cost/expenditure values from the data, regardless of the year.
-   - Do NOT explicitly state "No data for X was found" if a specific year is missing. Just provide the comparison for the years that are available in the context.
-   - Use bullet points (•) for lists of items.
-   - Use plain text paragraphs for explanations and reasoning.
-9. Do NOT include "(source:...)" tags in the answer text.
-10. {followup_ins}
-
-VISUALIZATION RULES:
-If the question involves comparison, distribution, ranking, trends, or category breakdown,
-generate up to 3 visualizations from: bar_chart, line_chart, pie_chart, table.
-Also generate at least 4 to 6 KPIs (if data supports it) to provide context.
-
-For KPIs:
-{{"type":"kpi","title":"...","value":"...","description":"...","trend":"up|down|neutral"}}
-
-For Charts:
-bar_chart: {{"type":"bar_chart","title":"...","xKey":"...","yKey":"...","data":[{{"<xKey>":"A","<yKey>":100}}]}}
-line_chart: {{"type":"line_chart","title":"...","xKey":"...","yKey":"...","data":[{{"<xKey>":"A","<yKey>":100}}]}}
-pie_chart: {{"type":"pie_chart","title":"...","data":[{{"name":"A","value":100}}]}}
-table:     {{"type":"table","title":"...","columns":[{{"key":"k","label":"L"}}],"data":[]}}
-
-Return ONLY valid JSON (answer must be a plain text string):
-{{"answer":"...","follow_up_questions":["{ftype} ...?","{ftype} ...?","{ftype} ...?"],"visualizations":[]}}
-""")
     if not res:
         return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
 
@@ -5177,12 +5144,8 @@ Return ONLY valid JSON (answer must be a plain text string):
 #         "answer": clean_answer,
 #         "follow_up_questions": fuq,
 #         "visualizations": visualizations,
-#         "visit_number": visit_number
-#     }), 20
+#         "visit_number": visit_number,
+#         "sql_query": sql_query,
+#         "chat_id": active_chat_id
+#     }), 200
 
-        "visit_number": visit_number,
-        "sql_query": sql_query,
-    
-        "visualizations":      visualizations,
-        "chat_id":             active_chat_id
-    }), 200
