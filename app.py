@@ -21,7 +21,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from urllib.parse import quote_plus
 from sqlalchemy import create_engine
-from controllers.auth_controller import login , register_user_controller
+from controllers.auth_controller import login , register_user_controller, admin_login_auth
 from controllers.external_db import connect_external_db, apply_external_sync, apply_bulk_sync
 from controllers.external_sync_controller import sync_external_csv
 from controllers.tracker import get_tracker_data
@@ -285,11 +285,16 @@ def update_active_sessions_route():
 # EXPERT / ADMIN ROUTES
 # =======================
 
-#admin, expert, superadmin login  
+#admin, expert, superadmin login (Staff Table)
 @app.route("/admin_expert_login", methods=["POST"])
 def staff_login():
     """Route for Super Admin, Admin, and Expert Login"""
     return staff_login_controller()
+
+# Admin login (Users Table)
+@app.route("/admin_login", methods=["POST"])
+def admin_login_route():
+    return admin_login_auth()
 
 #superadmin can ceate multiple admin and expert 
 @app.route('/admin_expert_registration', methods=['POST'])
