@@ -11,6 +11,7 @@ from sqlalchemy import create_engine , text
 from apscheduler.schedulers.background import BackgroundScheduler
 from database.csv_processor import process_csv_job
 from database.sql_processor import detect_sql_dialect, parse_mysql_or_pg, parse_mssql, process_sql_job
+from database.doc_processor import process_doc_job
 from database.config import MYSQL_CONFIG
 
 
@@ -23,6 +24,21 @@ scheduler = BackgroundScheduler()
 
 if not scheduler.running:
     scheduler.start()
+
+def is_workspace_processing(workspace_db_name):
+    """
+    Checks if there are any active document or CSV processing jobs 
+    for the given workspace database in the APScheduler.
+    """
+    if not workspace_db_name:
+        return False
+        
+    for job in scheduler.get_jobs():
+        # Both process_doc_job and process_csv_job receive allocated_db_name as their second argument (args[1])
+        if job.args and len(job.args) > 1 and job.args[1] == workspace_db_name:
+            return True
+    return False
+
 
 # =========================================================
 # 1. HELPER: DETECTOR & PARSERS (Moved to database/sql_processor.py)
@@ -234,19 +250,19 @@ def upload_chunk_controller(get_db_connection):
         cursor = db_conn.cursor(dictionary=True)
 
         cursor.execute("""
-            SELECT new_user_db
-            FROM users
-            WHERE id=%s
-        """, (user_id,))
+            SELECT workspace_db
+            FROM workspaces
+            WHERE session_id=%s
+        """, (session_id,))
 
         user_data = cursor.fetchone()
-        allocated_db_name = user_data["new_user_db"]
+        allocated_db_name = user_data["workspace_db"] if user_data else None
 
         # 🔹 INSERT INTO connection_history
         history_name = f"Chunk Upload: {filename} to allocated DB ({allocated_db_name})"
 
-        db_type_hist = 'sql_chunk_upload' if filename.lower().endswith('.sql') else 'csv_chunk_upload'
-        db_type_cred = 'sql_upload' if filename.lower().endswith('.sql') else 'csv_upload'
+        db_type_hist = 'sql_chunk_upload' if filename.lower().endswith('.sql') else 'doc_chunk_upload' if filename.lower().endswith(('.pdf', '.doc', '.docx')) else 'csv_chunk_upload'
+        db_type_cred = 'sql_upload' if filename.lower().endswith('.sql') else 'doc_upload' if filename.lower().endswith(('.pdf', '.doc', '.docx')) else 'csv_upload'
 
         cursor.execute("""
             INSERT INTO connection_history
@@ -269,9 +285,16 @@ def upload_chunk_controller(get_db_connection):
         cursor.close()
         db_conn.close()
 
-        # The background processing (scheduler.add_job) has been removed from here.
-        # Data will now only be inserted into the database when the user explicitly 
-        # clicks the 'Continue to Import' button which triggers import_csv_controller.
+        # Trigger background job for PDF/DOC/TXT files
+        if filename.lower().endswith(('.pdf', '.txt', '.doc', '.docx', '.md')):
+            job = scheduler.add_job(
+                func=process_doc_job,
+                args=[merged_path, allocated_db_name, MYSQL_CONFIG.get("host"), MYSQL_CONFIG.get("user"), MYSQL_CONFIG.get("password"), MYSQL_CONFIG.get("port", 3306)],
+                trigger='date',
+                id=str(uuid.uuid4()),
+                replace_existing=True
+            )
+            print(f"Scheduled Document processing job: {job.id}")
 
         import shutil
         shutil.rmtree(session_folder)
@@ -314,19 +337,18 @@ def upload_csv_controller(get_db_connection):
                 "message": "Access denied for workspace"
             }), 403
 
-        # Fetch user DB
         cursor.execute("""
-            SELECT new_user_db
-            FROM users
-            WHERE id=%s
-        """, (user_id,))
+            SELECT workspace_db
+            FROM workspaces
+            WHERE session_id=%s
+        """, (session_id,))
 
         user_data = cursor.fetchone()
 
-        if not user_data:
-            return jsonify({"status":"error","message":"User DB missing"}),404
+        if not user_data or not user_data["workspace_db"]:
+            return jsonify({"status":"error","message":"Workspace DB missing"}),404
 
-        allocated_db_name = user_data["new_user_db"]
+        allocated_db_name = user_data["workspace_db"]
 
         # DB server credentials
         db_user = MYSQL_CONFIG.get("user")

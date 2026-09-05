@@ -22,6 +22,54 @@ def connect_external_db():
 
     result = sync_external_database(user_id, connection_id, session_id)
 
+    # For doc_upload, the frontend never calls apply_bulk_sync, and apply_bulk_sync skips it anyway.
+    # We must insert it into external_db_sync_log here so it appears in /session-sources.
+    try:
+        import pymysql
+        from database.config import MYSQL_CONFIG
+        conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
+        with conn.cursor() as cur:
+            cur.execute("SELECT db_type, credential FROM database_credential WHERE connection_id=%s AND user_id=%s", (connection_id, user_id))
+            cred_row = cur.fetchone()
+            if cred_row and cred_row[0] in ['doc_upload', 'doc_chunk_upload']:
+                db_type = cred_row[0]
+                import json
+                cred_data = json.loads(cred_row[1])
+                filename = cred_data.get("files", [""])[0] if cred_data.get("files") else "document"
+                
+                cur.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s", (session_id,))
+                ws_row = cur.fetchone()
+                user_db = ws_row[0] if ws_row else ""
+                
+                cur.execute("SELECT email FROM users WHERE id=%s", (user_id,))
+                user_row = cur.fetchone()
+                username = user_row[0].split("@")[0] if user_row else "unknown"
+                
+                import os
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                file_path = os.path.join(base_dir, "uploads", filename)
+                try:
+                    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                except Exception:
+                    file_size_mb = 0.0
+
+                new_tables = result.get("new_tables", [])
+                size_per_table = file_size_mb / max(1, len(new_tables))
+                
+                for t in new_tables:
+                    # check if already exists
+                    cur.execute("SELECT id FROM external_db_sync_log WHERE session_id=%s AND table_name=%s", (session_id, t))
+                    if not cur.fetchone():
+                        cur.execute("""
+                            INSERT INTO external_db_sync_log 
+                            (user_id, session_id, username, external_database, new_user_db, table_name, action_type, rows_affected, data_size_mb)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (user_id, session_id, username, filename, user_db, t, "NEW_TABLE", 0, size_per_table))
+                conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Error auto-syncing doc_upload: {e}")
+
     if not result["situations"] and not result["new_tables"]:
         return jsonify({
             "status": True,

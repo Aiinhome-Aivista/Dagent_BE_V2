@@ -36,7 +36,7 @@ def get_all_users_controller(get_db_connection):
         cursor.execute("""
             SELECT u.id, u.name, u.email, u.created_at
             FROM users u
-            WHERE u.role_id = 1
+            WHERE u.role_id = 2
             ORDER BY u.name ASC
         """)
         users = cursor.fetchall()
@@ -96,7 +96,7 @@ def create_workspace_controller(get_db_connection):
         # Only Admin (role_id = 2) can create workspaces, unless it's a default workspace
         is_default = workspace_name.startswith("default_")
         
-        if user['role_id'] != 2 and not is_default:
+        if user['role_id'] != 1 and not is_default:
             cursor.close()
             db_conn.close()
             return jsonify({
@@ -246,7 +246,7 @@ def assign_workspace_users_controller(get_db_connection):
                 "message": f"Invalid admin: User ID {admin_id} does not exist."
             }), 404
 
-        if admin_user['role_id'] != 2:
+        if admin_user['role_id'] != 1:
             cursor.close()
             db_conn.close()
             return jsonify({
@@ -418,7 +418,7 @@ def remove_workspace_user_controller(get_db_connection):
         cursor.execute("SELECT id, role_id FROM users WHERE id = %s", (admin_id,))
         admin_user = cursor.fetchone()
 
-        if not admin_user or admin_user['role_id'] != 2:
+        if not admin_user or admin_user['role_id'] != 1:
             cursor.close()
             db_conn.close()
             return jsonify({
@@ -718,7 +718,7 @@ def get_connection_history_controller(get_db_connection):
 
         # Formatting 1: Add Connections
         for row in raw_history:
-            if row['db_type'] not in ['mysql', 'mssql', 'web_search', 'google_sheets', 'csv_upload', 'csv_chunk_upload','snowflake', 'postgresql', 'postgres', 'sql_upload', 'sql_chunk_upload', 'ftp']:
+            if row['db_type'] not in ['mysql', 'mssql', 'web_search', 'google_sheets', 'csv_upload', 'csv_chunk_upload','snowflake', 'postgresql', 'postgres', 'sql_upload', 'sql_chunk_upload', 'doc_upload', 'doc_chunk_upload', 'ftp']:
                 continue
 
             date_str = row['created_at'].strftime("%Y-%m-%dT%H:%M:%SZ") if row['created_at'] else ""
@@ -730,9 +730,10 @@ def get_connection_history_controller(get_db_connection):
                 action_str = f"Configured {row['connection_name']}" 
                 display_name = row['connection_name']
                 
-            elif row['db_type'] in ['csv_upload', 'csv_chunk_upload', 'sql_upload', 'sql_chunk_upload']:
+            elif row['db_type'] in ['csv_upload', 'csv_chunk_upload', 'sql_upload', 'sql_chunk_upload', 'doc_upload', 'doc_chunk_upload']:
                 raw_name = row.get('connection_name', '')
                 is_sql = row['db_type'] in ['sql_upload', 'sql_chunk_upload'] or '.sql' in raw_name.lower()
+                is_doc = row['db_type'] in ['doc_upload', 'doc_chunk_upload'] or any(ext in raw_name.lower() for ext in ['.pdf', '.doc', '.docx'])
                 if is_sql:
                     if "Uploaded Dump: " in raw_name and " to " in raw_name:
                         file_names = raw_name.split("Uploaded Dump: ")[1].split(" to ")[0]
@@ -743,6 +744,13 @@ def get_connection_history_controller(get_db_connection):
                     else:
                         action_str = "Uploaded SQL Dump"
                     display_name = "SQL Data"
+                elif is_doc:
+                    if "Chunk Upload: " in raw_name and " to " in raw_name:
+                        file_names = raw_name.split("Chunk Upload: ")[1].split(" to ")[0]
+                        action_str = f"Uploaded Document: {file_names}"
+                    else:
+                        action_str = raw_name.split(" to allocated DB")[0] if " to allocated DB" in raw_name else raw_name
+                    display_name = "Document Data"
                 else:
                     if " to allocated DB" in raw_name:
                         action_str = raw_name.split(" to allocated DB")[0] # Leaves "Uploaded 2 CSV(s)"
@@ -762,8 +770,8 @@ def get_connection_history_controller(get_db_connection):
                     cred_dict = json.loads(row['credential'])
                     extracted_topic = cred_dict.get('topic', "")
                     
-                    # IF it's a CSV upload, dig into the JSON to find the actual file names
-                    if row['db_type'] == 'csv_upload':
+                    # IF it's a CSV or Doc upload, dig into the JSON to find the actual file names
+                    if row['db_type'] in ['csv_upload', 'doc_upload']:
                         # Look for common keys your upload function might have saved them under
                         files = cred_dict.get('files', []) or cred_dict.get('file_names', []) or cred_dict.get('file', '')
                         
@@ -1241,7 +1249,7 @@ def create_user_controller(get_db_connection):
         )
         admin = cursor.fetchone()
 
-        if not admin or admin["role_id"] != 2:
+        if not admin or admin["role_id"] != 1:
             return jsonify({
                 "status": "error",
                 "message": "Access denied. Only admin can create users."
@@ -1263,7 +1271,7 @@ def create_user_controller(get_db_connection):
         # --- 3. INSERT USER ---
         insert_query = """
             INSERT INTO users (name, email, password, role_id)
-            VALUES (%s, %s, %s, 1)
+            VALUES (%s, %s, %s, 2)
         """
 
         cursor.execute(insert_query, (name, email, password))

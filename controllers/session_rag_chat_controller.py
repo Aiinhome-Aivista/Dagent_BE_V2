@@ -1,22 +1,55 @@
 
 # pyrefly: ignore [missing-import]
+# controllers/session_rag_chat_controller.py
+# ADVANCED HYBRID RAG
+#
+# Architecture:
+#   1. Query Understanding  — extract intent, entities, table hints
+#   2. Hybrid Retrieval     — BM25 keyword + semantic vector search + metadata filter
+#   3. Re-ranking           — cross-encoder reranking (ms-marco-MiniLM-L-6-v2)
+#   4. Answer Generation    — strict grounding, deep business analysis
+#
+# Optimizations applied:
+#   - Global SentenceTransformer model (loaded once at startup)
+#   - Global CrossEncoder model (loaded once at startup)
+#   - Embedding cache for repeated queries
+#   - Batch embedding for multiple queries
+#   - Duplicate chunk deduplication before ranking
+#   - Cross-encoder reranking top-40 → keep best 20
+#   - MAX_CTX_CHARS reduced to 15000 for faster LLM
+#   - Auto chat history save after every answer
+
+# controllers/session_rag_chat_controller.py
+# ADVANCED HYBRID RAG
+#
+# Architecture:
+#   1. Query Understanding  — extract intent, entities, table hints
+#   2. Hybrid Retrieval     — BM25 keyword + semantic vector search + metadata filter
+#   3. Re-ranking           — cross-encoder reranking (ms-marco-MiniLM-L-6-v2)
+#   4. Answer Generation    — strict grounding, deep business analysis
+#
+# Optimizations applied:
+#   - Global SentenceTransformer model (loaded once at startup)
+#   - Global CrossEncoder model (loaded once at startup)
+#   - Embedding cache for repeated queries
+#   - Batch embedding for multiple queries
+#   - Duplicate chunk deduplication before ranking
+#   - Cross-encoder reranking top-40 → keep best 20
+#   - MAX_CTX_CHARS reduced to 15000 for faster LLM
+#   - Auto chat history save after every answer
+
 import re, json, time, hashlib, math, requests, mysql.connector, threading, os
-try:
-    import psycopg2
-    import psycopg2.extras
-    PSYCOPG2_AVAILABLE = True
-except ImportError:
-    PSYCOPG2_AVAILABLE = False
-    print("[RAG] psycopg2 not installed — PostgreSQL support disabled")
 from collections import defaultdict
 # pyrefly: ignore [missing-import]
 from flask import request, jsonify
-from controllers.intent_router import classify_intent
-from controllers.query_branches import execute_hybrid
 from database.config import MISTRAL_API_KEY, MISTRAL_MODEL, MYSQL_CONFIG
+<<<<<<< HEAD
 from database.prompt_loader import get_prompt
 from controllers.kgraph_service import (
     load_kgraph, build_sql_rules, resolve_grouping, detect_drilldown, validate_sql)
+=======
+
+>>>>>>> 3b47b201b42242ea4d683af906f605952e6b0195
 # ChromaDB persistent storage — vectors survive server restarts
 CHROMA_PERSIST_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_store"
@@ -24,10 +57,10 @@ CHROMA_PERSIST_DIR = os.path.join(
 os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
 
 MISTRAL_URL        = "https://api.mistral.ai/v1/chat/completions"
-MAX_ROWS           = 200
-TOP_K              = 80
+MAX_ROWS           = 300
+TOP_K              = 400
 CACHE_TTL          = 600
-MAX_CTX_CHARS      = 15000
+MAX_CTX_CHARS      = 50000
 
 _CACHE   = {}
 _CLIENTS = {}
@@ -44,49 +77,29 @@ def _advance_turn(session_id):
     _TURN_COUNTER[session_id] = _TURN_COUNTER.get(session_id, 0) + 1
 
 def _followup_instruction(ftype):
-
-    if ftype.lower() == "what":
-        count = 5
-    elif ftype.lower() == "where":
-        count = 3
-    elif ftype.lower() == "why":
-        count = 3
-    else:
-        count = 3
-
-    questions = ",\n".join([f'"{ftype} ...?"' for _ in range(count)])
-
-    return f"""
-Generate exactly {count} intelligent follow-up questions based on the previous answer.
-
-STRICT RULES:
-1. Questions must be high-level BUSINESS INSIGHT questions.
-2. Questions must be directly related to the returned data.
-
-Do not assume:
-- causes
-- risks
-- opportunities
-- business strategy
-- customer behaviour
-- operational issues
-
-Only ask questions supported by the data.
-3. Questions must encourage deeper analysis, strategic thinking, or early problem detection.
-4. DO NOT mention table names, database names, column names, or technical terms.
-5. Questions should sound like executive/business analyst questions.
-6. Each question must start with "{ftype}".
-
-Return ONLY:
-
-"follow_up_questions":[
-{questions}
-]
-"""
+    instructions = {
+        "What": (
+            "follow_up_questions: Generate exactly 5 questions, ALL starting with 'What '. "
+            "Focus on WHAT specific data, values, counts, or details exist in the business data."
+        ),
+        "Where": (
+            "follow_up_questions: Generate exactly 5 questions, ALL starting with 'Where '. "
+            "Focus on WHERE data comes from, where patterns exist, where in the database."
+        ),
+        "Why": (
+            "follow_up_questions: Generate exactly 5 questions, ALL starting with 'Why '. "
+            "Focus on WHY patterns exist, why certain data looks the way it does, business reasoning."
+        )
+    }
+    return instructions.get(ftype, instructions["What"])
 
 GRAPH_KW  = {"graph","chart","plot","visualize","visualise","bar","pie","line","histogram","scatter"}
 REPORT_KW = {"report","summary report","generate report","make a report","create a report","write a report"}
 GREET_RE  = re.compile(r'^\s*(hi+|hello+|hey+|howdy|greetings|sup|yo+|hiya|good\s*(morning|afternoon|evening|night)|what\'?s\s*up)\s*[!?.]*\s*$', re.I)
+
+def _is_graph(q):  return bool(set(q.lower().split()) & GRAPH_KW)
+def _is_report(q): return any(k in q.lower() for k in REPORT_KW)
+def _is_greet(q):  return bool(GREET_RE.match(q.strip()))
 
 
 # ══════════════════════════════════════════════════════
@@ -204,14 +217,11 @@ def _load_all(session_id, get_fn):
 
 
 def _load_analysis_report(session_id, get_fn):
-
     chunks = []
     local = cur = None
     try:
         local = _local_conn(get_fn)
         cur   = local.cursor(dictionary=True)
-
-        # ── 1. saved_web_results: grouped by topic (richer than _load_web) ──
         cur.execute(
             """SELECT topic, title, url, brief FROM saved_web_results
                WHERE session_id=%s ORDER BY topic""",
@@ -219,7 +229,6 @@ def _load_analysis_report(session_id, get_fn):
         )
         web_rows = cur.fetchall()
         if web_rows:
-            # Group by topic
             from collections import defaultdict as _dd
             by_topic = _dd(list)
             for r in web_rows:
@@ -231,9 +240,7 @@ def _load_analysis_report(session_id, get_fn):
                     if item.get("brief"):
                         lines.append(f"  Brief: {str(item['brief'])[:400]}")
                 chunks.append(_chunk("\n".join(lines), kind="analysis_web", table=topic))
-            print(f"[RAG] analysis_web: {len(by_topic)} topics from saved_web_results")
-
-        # ── 2. external_db_sync_log: DB + table metadata summary ──
+            print(f"[RAG] analysis_web: {len(by_topic)} topics")
         cur.execute(
             """SELECT DISTINCT external_database, new_user_db, table_name
                FROM external_db_sync_log
@@ -248,8 +255,8 @@ def _load_analysis_report(session_id, get_fn):
             for r in sync_rows:
                 by_db[r["external_database"]].append(r)
             for ext_db, rows in by_db.items():
-                new_db  = rows[0]["new_user_db"]
-                tables  = [r["table_name"] for r in rows if r["table_name"]]
+                new_db = rows[0]["new_user_db"]
+                tables = [r["table_name"] for r in rows if r["table_name"]]
                 text = (
                     f"[ANALYSIS_DB_META] Database analyzed: {ext_db} "
                     f"(stored as: {new_db})\n"
@@ -257,58 +264,30 @@ def _load_analysis_report(session_id, get_fn):
                     f"Total tables: {len(tables)}"
                 )
                 chunks.append(_chunk(text, kind="analysis_db_meta", db=new_db))
-            print(f"[RAG] analysis_db_meta: {len(by_db)} databases from sync_log")
-
+            print(f"[RAG] analysis_db_meta: {len(by_db)} databases")
     except Exception as e:
         print(f"[RAG] analysis_report load error: {e}")
     finally:
         if cur:   cur.close()
         if local: local.close()
-
     return chunks
 
 
 def _load_db(session_id, get_fn):
-    """
-    Loads DB chunks for RAG — supports both MySQL and PostgreSQL.
-    For PostgreSQL:
-      - If schema was specified during connection → only that schema's tables
-      - If no schema → all non-system schemas (public + any custom ones)
-    """
     chunks = []
     local = cur = None
-
-    # ── 1. Fetch all DB credentials for this session ──
     try:
         local = _local_conn(get_fn)
         cur   = local.cursor(dictionary=True)
-
-        # MySQL/MSSQL: get allocated db name from sync log
-        cur.execute("""
-            SELECT DISTINCT new_user_db
-            FROM external_db_sync_log
-            WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db!=''
-        """, (session_id,))
-        sync_rows = cur.fetchall()
-
-        # PostgreSQL: credentials stored in database_credential
-        cur.execute("""
-            SELECT credential, db_type
-            FROM database_credential
-            WHERE session_id=%s AND db_type IN ('postgresql', 'postgres')
-            ORDER BY connection_id DESC
-        """, (session_id,))
-        pg_cred_rows = cur.fetchall()
-
+        cur.execute("""SELECT DISTINCT new_user_db FROM external_db_sync_log
+                       WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db!=''""",
+                    (session_id,))
+        dbs = [r["new_user_db"] for r in cur.fetchall()]
     finally:
         if cur:   cur.close()
         if local: local.close()
 
-    # ── 2. MySQL / MSSQL (sync log approach — existing logic) ──
-    mysql_dbs = [r["new_user_db"] for r in sync_rows
-                 if r.get("db_type", "mysql") not in ("postgresql", "postgres")]
-
-    for db in mysql_dbs:
+    for db in dbs:
         if not re.match(r'^\w+$', db): continue
         conn = c2 = None
         try:
@@ -327,30 +306,75 @@ def _load_db(session_id, get_fn):
                     c2.execute(f"SELECT * FROM `{t}` LIMIT %s", (MAX_ROWS,))
                     rows = c2.fetchall()
                     if not rows: continue
-                    all_rows[t] = rows
-                    cols = list(rows[0].keys())
-                    chunks.append(_chunk(
-                        f"[SCHEMA] db:{db} table:{t} columns:{','.join(cols)} total_rows:{len(rows)}",
-                        db=db, table=t, kind="schema"))
-                    lines = [
-                        f"[COUNT] db:{db} table:{t} has {len(rows)} rows total.",
-                        f"Number of {t}: {len(rows)}",
-                        f"Total {t} count: {len(rows)}"
-                    ]
-                    for col in cols[:10]:
-                        vals = list(dict.fromkeys(
-                            str(r[col]) for r in rows if r[col] is not None and str(r[col]).strip()))
-                        if vals:
-                            lines.append(f"All values of {col} in {t}: {', '.join(vals[:40])}")
-                    chunks.append(_chunk("\n".join(lines), db=db, table=t, kind="count"))
-                    for i, row in enumerate(rows, 1):
-                        parts = " | ".join(f"{k}:{v}" for k,v in row.items()
-                                           if v is not None and str(v).strip())
-                        chunks.append(_chunk(f"[ROW] db:{db} table:{t} row{i}: {parts}",
-                                             db=db, table=t, kind="row"))
-                    print(f"[RAG] {db}.{t}: {len(rows)} rows → {len(rows)+2} chunks")
+                    
+                    if t == 'workspace_files':
+                        for r in rows:
+                            try:
+                                import json
+                                file_data = json.loads(r['file_data']) if isinstance(r.get('file_data'), str) else (r.get('file_data') or {})
+                                structured = file_data.get('structured_content')
+                                if structured:
+                                    paragraphs = structured.get('paragraphs', [])
+                                    if paragraphs:
+                                        all_rows['Document_Paragraphs'] = paragraphs
+                                    for idx, vtable in enumerate(structured.get('tables', [])):
+                                        base_vname = vtable.get('table_name', f"PDF_Table_{idx+1}")
+                                        vname = base_vname
+                                        v_counter = 1
+                                        while vname in all_rows:
+                                            vname = f"{base_vname} ({v_counter})"
+                                            v_counter += 1
+                                        vcols = vtable.get('headers', [])
+                                        
+                                        # Deduplicate headers
+                                        seen_cols = {}
+                                        dedup_cols = []
+                                        for c in vcols:
+                                            base = str(c).strip() if c else "Column"
+                                            if base in seen_cols:
+                                                seen_cols[base] += 1
+                                                dedup_cols.append(f"{base} ({seen_cols[base]})")
+                                            else:
+                                                seen_cols[base] = 1
+                                                dedup_cols.append(base)
+
+                                        vrows = []
+                                        for row_arr in vtable.get('rows', []):
+                                            row_dict = {}
+                                            for i, col in enumerate(dedup_cols):
+                                                row_dict[col] = row_arr[i] if i < len(row_arr) else ""
+                                            vrows.append(row_dict)
+                                        all_rows[vname] = vrows
+                            except Exception as e:
+                                print(f"Error parsing workspace_files json in RAG: {e}")
+                    else:
+                        all_rows[t] = rows
                 except Exception as e:
                     print(f"[RAG] skip {t}: {e}")
+
+            for t, rows in all_rows.items():
+                if not rows: continue
+                cols = list(rows[0].keys())
+                chunks.append(_chunk(
+                    f"[SCHEMA] db:{db} table:{t} columns:{','.join(cols)} total_rows:{len(rows)}",
+                    db=db, table=t, kind="schema"))
+                lines = [
+                    f"[COUNT] db:{db} table:{t} has {len(rows)} rows total.",
+                    f"Number of {t}: {len(rows)}",
+                    f"Total {t} count: {len(rows)}"
+                ]
+                for col in cols[:10]:
+                    vals = list(dict.fromkeys(
+                        str(r[col]) for r in rows if r.get(col) is not None and str(r.get(col)).strip()))
+                    if vals:
+                        lines.append(f"All values of {col} in {t}: {', '.join(vals[:40])}")
+                chunks.append(_chunk("\n".join(lines), db=db, table=t, kind="count"))
+                for i, row in enumerate(rows, 1):
+                    parts = " | ".join(f"{k}:{v}" for k,v in row.items()
+                                       if v is not None and str(v).strip())
+                    chunks.append(_chunk(f"[ROW] db:{db} table:{t} row{i}: {parts}",
+                                         db=db, table=t, kind="row"))
+                print(f"[RAG] {db}.{t}: {len(rows)} rows → {len(rows)+2} chunks")
 
             chunks += _build_joins(db, all_rows)
         except Exception as e:
@@ -358,135 +382,6 @@ def _load_db(session_id, get_fn):
         finally:
             if c2:   c2.close()
             if conn: conn.close()
-
-    # ── 3. PostgreSQL (direct connection using stored credentials) ──
-    if not PSYCOPG2_AVAILABLE:
-        if pg_cred_rows:
-            print("[RAG] PostgreSQL credentials found but psycopg2 not installed — skipping")
-        return chunks
-
-    seen_pg_dbs = set()
-    for cred_row in pg_cred_rows:
-        try:
-            cred = cred_row["credential"]
-            if isinstance(cred, str):
-                cred = json.loads(cred)
-
-            pg_host     = cred.get("host", "localhost")
-            pg_port     = int(cred.get("port", 5432))
-            pg_user     = cred.get("username", "")
-            pg_password = cred.get("password", "")
-            pg_database = cred.get("database", "")
-            pg_schema   = cred.get("schema")  # may be None/empty
-
-            # Deduplicate same DB+schema combos
-            dedup_key = f"{pg_host}:{pg_port}/{pg_database}/{pg_schema or '__all__'}"
-            if dedup_key in seen_pg_dbs:
-                continue
-            seen_pg_dbs.add(dedup_key)
-
-            print(f"[RAG] Connecting PostgreSQL: {pg_host}:{pg_port}/{pg_database} schema={pg_schema or 'ALL'}")
-
-            pg_conn = psycopg2.connect(
-                host=pg_host, port=pg_port,
-                user=pg_user, password=pg_password,
-                dbname=pg_database,
-                connect_timeout=10
-            )
-            pg_cur = pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-            # Determine which schemas to fetch
-            if pg_schema and pg_schema.strip():
-                # User specified a schema → use only that
-                schemas_to_fetch = [pg_schema.strip()]
-            else:
-                # No schema specified → fetch ALL non-system schemas
-                pg_cur.execute("""
-                    SELECT schema_name
-                    FROM information_schema.schemata
-                    WHERE schema_name NOT IN ('pg_catalog', 'information_schema',
-                                              'pg_toast', 'pg_temp_1', 'pg_toast_temp_1')
-                      AND schema_name NOT LIKE 'pg_temp_%'
-                      AND schema_name NOT LIKE 'pg_toast_temp_%'
-                    ORDER BY schema_name
-                """)
-                schemas_to_fetch = [r["schema_name"] for r in pg_cur.fetchall()]
-                print(f"[RAG] PostgreSQL schemas found: {schemas_to_fetch}")
-
-            all_rows_pg = {}
-
-            for schema in schemas_to_fetch:
-                # Get all tables in this schema
-                pg_cur.execute("""
-                    SELECT table_name
-                    FROM information_schema.tables
-                    WHERE table_schema = %s
-                      AND table_type = 'BASE TABLE'
-                    ORDER BY table_name
-                """, (schema,))
-                tables = [r["table_name"] for r in pg_cur.fetchall()]
-                print(f"[RAG] PG schema '{schema}' tables: {tables}")
-
-                for t in tables:
-                    qualified = f"{schema}.{t}"
-                    label     = f"{pg_database}.{qualified}"
-                    try:
-                        pg_cur.execute(
-                            f'SELECT * FROM "{schema}"."{t}" LIMIT %s',
-                            (MAX_ROWS,)
-                        )
-                        rows = [dict(r) for r in pg_cur.fetchall()]
-                        if not rows:
-                            continue
-
-                        # Convert non-serialisable types (dates, Decimal, etc.)
-                        for row in rows:
-                            for k, v in row.items():
-                                if v is not None and not isinstance(v, (str, int, float, bool)):
-                                    row[k] = str(v)
-
-                        all_rows_pg[qualified] = rows
-                        cols = list(rows[0].keys())
-
-                        chunks.append(_chunk(
-                            f"[SCHEMA] db:{label} table:{qualified} schema:{schema} "
-                            f"columns:{','.join(cols)} total_rows:{len(rows)}",
-                            db=pg_database, table=qualified, kind="schema"))
-
-                        lines = [
-                            f"[COUNT] db:{label} table:{qualified} has {len(rows)} rows total.",
-                            f"Number of {t}: {len(rows)}",
-                            f"Total {t} count: {len(rows)}"
-                        ]
-                        for col in cols[:10]:
-                            vals = list(dict.fromkeys(
-                                str(r[col]) for r in rows
-                                if r[col] is not None and str(r[col]).strip()))
-                            if vals:
-                                lines.append(f"All values of {col} in {t}: {', '.join(vals[:40])}")
-                        chunks.append(_chunk("\n".join(lines), db=pg_database, table=qualified, kind="count"))
-
-                        for i, row in enumerate(rows, 1):
-                            parts = " | ".join(
-                                f"{k}:{v}" for k, v in row.items()
-                                if v is not None and str(v).strip()
-                            )
-                            chunks.append(_chunk(
-                                f"[ROW] db:{label} schema:{schema} table:{t} row{i}: {parts}",
-                                db=pg_database, table=qualified, kind="row"))
-
-                        print(f"[RAG] PG {label}: {len(rows)} rows → {len(rows)+2} chunks")
-
-                    except Exception as e:
-                        print(f"[RAG] PG skip {qualified}: {e}")
-                        pg_conn.rollback()
-
-            pg_cur.close()
-            pg_conn.close()
-
-        except Exception as e:
-            print(f"[RAG] PostgreSQL connect error: {e}")
-
     return chunks
 
 
@@ -629,21 +524,7 @@ def _build_store(session_id, get_fn):
         # Batch encode using global model + cache
         embeds = _encode_texts(texts)
 
-        # Fetch workspace_chroma_collection from DB
         col_name = "s_" + hashlib.md5(session_id.encode()).hexdigest()[:12]
-        try:
-            conn = get_fn()
-            cur = conn.cursor(dictionary=True)
-            cur.execute("SELECT workspace_chroma_collection FROM workspaces WHERE session_id = %s", (session_id,))
-            row = cur.fetchone()
-            if row and row.get("workspace_chroma_collection"):
-                col_name = row["workspace_chroma_collection"]
-        except Exception as e:
-            print(f"[RAG] Error fetching workspace_chroma_collection: {e}")
-        finally:
-            if 'cur' in locals() and cur: cur.close()
-            if 'conn' in locals() and conn: conn.close()
-
         if session_id not in _CLIENTS:
             _CLIENTS[session_id] = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
         client = _CLIENTS[session_id]
@@ -778,9 +659,9 @@ def _retrieve(all_chunks, bm25_idx, col, question, understanding):
         if i not in forced: candidate_indices.append(i)
         if len(candidate_indices) >= TOP_K: break
 
-    # OPTIMIZATION 5: Cross-encoder reranking top-40 → keep best 20
-    RERANK_TOP  = 40
-    RERANK_KEEP = 20
+    # OPTIMIZATION 5: Cross-encoder reranking top-300 → keep best 250
+    RERANK_TOP  = 300
+    RERANK_KEEP = 250
     rerank_pool = candidate_indices[:RERANK_TOP]
 
     if len(rerank_pool) > RERANK_KEEP:
@@ -811,6 +692,41 @@ def _retrieve(all_chunks, bm25_idx, col, question, understanding):
 # AUTO CHAT HISTORY SAVE
 # ══════════════════════════════════════════════════════
 
+# One-time flag — server startup এ একবার UNIQUE drop করবে
+_UNIQUE_FIXED = False
+
+def _ensure_no_unique_on_chat_id(get_fn):
+    """chat_id column এ UNIQUE constraint থাকলে drop করো (once per server start)."""
+    global _UNIQUE_FIXED
+    if _UNIQUE_FIXED:
+        return
+    conn = cur = None
+    try:
+        conn = get_fn()
+        cur  = conn.cursor()
+        # Check if UNIQUE index named 'chat_id' exists
+        cur.execute("""
+            SELECT INDEX_NAME FROM information_schema.STATISTICS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME   = 'session_chat_history'
+              AND INDEX_NAME   = 'chat_id'
+              AND NON_UNIQUE   = 0
+            LIMIT 1
+        """)
+        row = cur.fetchone()
+        if row:
+            cur.execute("ALTER TABLE session_chat_history DROP INDEX chat_id")
+            conn.commit()
+            print("[History] ✓ UNIQUE index on chat_id dropped — multiple rows per chat_id now allowed")
+        _UNIQUE_FIXED = True
+    except Exception as e:
+        print(f"[History] unique-fix skipped: {e}")
+        _UNIQUE_FIXED = True  # Don't retry on error
+    finally:
+        if cur:  cur.close()
+        if conn: conn.close()
+
+
 _HISTORY_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS session_chat_history (
     id                  INT AUTO_INCREMENT PRIMARY KEY,
@@ -818,62 +734,202 @@ CREATE TABLE IF NOT EXISTS session_chat_history (
     user_id             INT          NOT NULL,
     turn_index          INT          NOT NULL DEFAULT 0,
     visit_number        INT          NOT NULL DEFAULT 1,
+    local_turn_index    INT          NOT NULL DEFAULT 0,
     question            TEXT         NOT NULL,
     answer              LONGTEXT     NOT NULL,
     follow_up_questions JSON         DEFAULT NULL,
-    visualizations      JSON         DEFAULT NULL,
     intent              VARCHAR(50)  DEFAULT NULL,
     mode                VARCHAR(30)  DEFAULT 'answer',
+    login_token         VARCHAR(255) DEFAULT NULL,
+    chat_id             VARCHAR(64)  DEFAULT NULL,
+    visualizations      JSON         DEFAULT NULL,
     created_at          DATETIME     DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_session      (session_id),
     INDEX idx_user         (user_id),
-    INDEX idx_session_user (session_id, user_id)
-);
+    INDEX idx_session_user (session_id, user_id),
+    INDEX idx_chat_id      (chat_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
-def _save_history(get_fn, session_id, user_id, question, answer, follow_ups, intent, mode, visualizations=None, visit_number=1):
-    if not user_id: return
+# SQL to drop UNIQUE constraint on chat_id if it exists (run once)
+_FIX_UNIQUE_SQL = """
+ALTER TABLE session_chat_history
+DROP INDEX chat_id
+"""
+
+# ══════════════════════════════════════════════════
+# CHAT_ID MANAGER
+# ══════════════════════════════════════════════════
+
+def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id):
+    """
+    CASE A — source_chat_id আছে + same day → same chat_id continue
+    CASE B — source_chat_id আছে + different day → new chat_id + copy source history
+    CASE C — source_chat_id নেই + today's chat exists → continue today's chat
+    CASE C — source_chat_id নেই + no today's chat → brand new chat_id
+    """
+    import uuid
+    from datetime import date
+
     conn = cur = None
     try:
         conn = get_fn()
         cur  = conn.cursor(dictionary=True)
         cur.execute(_HISTORY_TABLE_SQL)
+        today = date.today()
+
+        if source_chat_id:
+            cur.execute("""
+                SELECT chat_id, created_at FROM session_chat_history
+                WHERE chat_id = %s AND user_id = %s
+                ORDER BY id DESC LIMIT 1
+            """, (source_chat_id, int(user_id)))
+            src = cur.fetchone()
+
+            if not src:
+                new_id = uuid.uuid4().hex[:32]
+                print(f"[ChatID] source not found → new {new_id[:8]}...")
+                return new_id, True
+
+            if src["created_at"].date() == today:
+                # CASE A
+                print(f"[ChatID] CASE A same day → {source_chat_id[:8]}...")
+                return source_chat_id, False
+
+            # CASE B — new day
+            new_id = uuid.uuid4().hex[:32]
+            print(f"[ChatID] CASE B new day → {new_id[:8]}... (from {source_chat_id[:8]}...)")
+            cur.execute("""
+                SELECT session_id, user_id, question, answer,
+                       follow_up_questions, intent, mode, login_token, visualizations
+                FROM session_chat_history
+                WHERE chat_id = %s AND user_id = %s ORDER BY turn_index ASC
+            """, (source_chat_id, int(user_id)))
+            for i, r in enumerate(cur.fetchall()):
+                cur.execute("""
+                    INSERT INTO session_chat_history
+                        (session_id,user_id,turn_index,visit_number,local_turn_index,
+                         question,answer,follow_up_questions,intent,mode,
+                         login_token,chat_id,visualizations,created_at)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                """, (r["session_id"] or session_id, int(user_id), i, 1, i,
+                      r["question"], r["answer"], r["follow_up_questions"],
+                      r["intent"], r["mode"], r["login_token"],
+                      new_id, r["visualizations"]))
+            conn.commit()
+            print(f"[ChatID] copied history → {new_id[:8]}...")
+            return new_id, True
+
+        # CASE C — no source_chat_id
         cur.execute("""
-            SELECT COALESCE(MAX(turn_index), -1) AS last_turn
-            FROM session_chat_history
-            WHERE session_id = %s AND user_id = %s
-        """, (session_id, int(user_id)))
-        row        = cur.fetchone()
-        turn_index = (row["last_turn"] + 1) if row else 0
-        cur.execute("""
-            INSERT INTO session_chat_history
-                (session_id, user_id, turn_index, visit_number, question, answer,
-                 follow_up_questions, visualizations, intent, mode)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (session_id, int(user_id), turn_index, visit_number, question, answer,
-              json.dumps(follow_ups) if follow_ups else None,
-              json.dumps(visualizations) if visualizations else None,
-              intent or None, mode))
-        conn.commit()
+            SELECT chat_id FROM session_chat_history
+            WHERE session_id = %s AND user_id = %s AND DATE(created_at) = %s
+            ORDER BY id DESC LIMIT 1
+        """, (session_id, int(user_id), today.isoformat()))
+        today_row = cur.fetchone()
+
+        if today_row:
+            print(f"[ChatID] CASE C today exists → {today_row['chat_id'][:8]}...")
+            return today_row["chat_id"], False
+
+        new_id = uuid.uuid4().hex[:32]
+        print(f"[ChatID] CASE C brand new → {new_id[:8]}...")
+        return new_id, True
+
     except Exception as e:
-        print(f"[History] save error: {e}")
+        print(f"[ChatID] error: {e}")
+        return uuid.uuid4().hex[:32], True
     finally:
         if cur:  cur.close()
         if conn: conn.close()
 
 
-# ══════════════════════════════════════════════════════
-# MISTRAL
-# ══════════════════════════════════════════════════════
+def _save_history(get_fn, session_id, user_id, question, answer,
+                  follow_ups, intent, mode,
+                  login_token=None, visualizations=None, chat_id=None):
+    if not user_id: return
+    from datetime import datetime
+    _ensure_no_unique_on_chat_id(get_fn)  # drop UNIQUE once if needed
+    conn = cur = None
+    try:
+        conn = get_fn()
+        cur  = conn.cursor(dictionary=True)
+
+        eid  = chat_id or session_id
+
+        cur.execute("""
+            SELECT turn_index, visit_number, local_turn_index, created_at, login_token
+            FROM session_chat_history
+            WHERE chat_id = %s AND user_id = %s
+            ORDER BY id DESC LIMIT 1
+        """, (eid, int(user_id)))
+        last = cur.fetchone()
+
+        if last:
+            turn   = last["turn_index"] + 1
+            diff   = datetime.now() - last["created_at"]
+            new_v  = (login_token is not None and last["login_token"] != login_token) or diff.total_seconds() > 3600
+            visit  = last["visit_number"] + (1 if new_v else 0)
+            local  = 0 if new_v else last["local_turn_index"] + 1
+        else:
+            turn = visit = local = 0
+
+        cur.execute("""
+            INSERT INTO session_chat_history
+                (session_id,user_id,turn_index,visit_number,local_turn_index,
+                 question,answer,follow_up_questions,intent,mode,
+                 login_token,chat_id,visualizations)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (session_id, int(user_id), turn, visit, local,
+              question, answer,
+              json.dumps(follow_ups)     if follow_ups     else None,
+              intent or None, mode, login_token, eid,
+              json.dumps(visualizations) if visualizations else None))
+        conn.commit()
+        print(f"✅ [History] turn={turn} visit={visit} local={local} chat={eid[:8]}...")
+    except Exception as e:
+        print(f"❌ [History] save error: {e}")
+    finally:
+        if cur:  cur.close()
+        if conn: conn.close()
+
+# ══════════════════════════════════════════════════
+# SYSTEM PROMPT
+# ══════════════════════════════════════════════════
+
+SYS = """You are a senior data analyst and database expert with deep analytical reasoning capabilities.
+You have access to the user's actual database records as retrieved chunks.
+
+Chunk types:
+  [SCHEMA]           — table structure, column names, total row count
+  [COUNT]            — exact row counts AND all distinct values per column — PRIMARY source for counts/lists
+  [ROW]              — individual database records with all field values
+  [JOIN]             — pre-computed cross-table joins: user X has N records in table Y with details
+  [WEB]              — saved web content (raw)
+  [ANALYSIS_WEB]     — web research grouped by topic with titles and summaries
+  [ANALYSIS_DB_META] — database metadata: which databases and tables were analyzed
+
+DEEP ANALYSIS RULES:
+1. Read EVERY chunk exhaustively before forming your answer. Pay STRICT ATTENTION to the exact year, date, or context associated with each value.
+2. STRICT DATA INTEGRITY: DO NOT hallucinate or swap values between different rows, years, or entities. Ensure absolute alignment.
+3. For COUNT questions: find [COUNT] chunk with "Number of X: N" — this is authoritative.
+4. For LIST questions: find [COUNT] chunk "All values of column_name:" — gives complete list.
+5. For JOIN/relationship questions: find [JOIN] chunks — they show cross-table activity per user.
+6. For WHY questions: analyze patterns, dates, sequences, frequencies across chunks to infer reasons.
+7. For TREND questions: compare timestamps, sequences, values across [ROW] chunks.
+8. For COMPARISON questions: pull data from multiple tables and compare side by side.
+9. For DEEP questions: combine ROW + JOIN + COUNT chunks to give comprehensive multi-part answers.
+10. NEVER say "I could not find" if ANY relevant data exists — dig deeper into chunks.
+11. Always answer in full sentences with specifics — no vague responses.
+12. DO NOT include source citations in the answer text — keep answer clean.
+13. follow_up_questions MUST follow the EXACT format specified in the user prompt.
+14. Respond ONLY in valid JSON."""
 
 from model.llm_client import call_llm_chat
 
-def _mistral(system, user, retries=2, temperature=0.15):
-    # Trim from the middle if too long, preserving both context start and prompt instructions at the end
-    if len(user) > 28000:
-        half = 13500
-        user = user[:half] + "\n\n[...context trimmed for token limit...]\n\n" + user[-half:]
-        print(f"[LLM] prompt trimmed")
+def _mistral(system, user, retries=2):
+    if len(user) > 60000:
+        print("[LLM] prompt is very large, but proceeding without arbitrary truncation to preserve JSON instructions.")
         
     messages = [
         {"role":"system","content":system},
@@ -882,18 +938,9 @@ def _mistral(system, user, retries=2, temperature=0.15):
     
     for attempt in range(retries + 1):
         try:
-            response = call_llm_chat(messages, json_mode=True, temperature=temperature)
+            response = call_llm_chat(messages, json_mode=True, temperature=0.15)
             if response:
-                if response.startswith("[LLM Error]"):
-                    raise Exception(response)
-                cleaned = response.strip()
-                if cleaned.startswith("```json"):
-                    cleaned = cleaned[7:]
-                elif cleaned.startswith("```"):
-                    cleaned = cleaned[3:]
-                if cleaned.endswith("```"):
-                    cleaned = cleaned[:-3]
-                return json.loads(cleaned.strip())
+                return json.loads(response)
             return None
         except Exception as e:
             print(f"[LLM] error attempt {attempt+1}: {e}")
@@ -908,94 +955,6 @@ def _history(raw):
     lines = [f"{str(t.get('role','user')).capitalize()}: {str(t.get('content',''))}"
              for t in raw[-6:] if isinstance(t, dict)]
     return ("Chat history:\n" + "\n".join(lines) + "\n\n") if lines else ""
-
-
-def _is_graph(q):  return bool(set(q.lower().split()) & GRAPH_KW)
-def _is_report(q): return any(k in q.lower() for k in REPORT_KW)
-def _is_greet(q):  return bool(GREET_RE.match(q.strip()))
-
-ANALYTICAL_KW = {"top", "highest", "average", "total", "trend", "dashboard", "how many", "sum", "vs", "compare", "lowest", "distribution", "revenue", "sales", "discount", "count", "maximum", "minimum", "profit", "ratio", "fastest", "declining", "percentage"}
-def _is_analytical(q): return bool(set(q.lower().split()) & ANALYTICAL_KW) or "how many" in q.lower()
-
-# ─────────────────────────────────────────────
-# VISUALIZATION SUPPORT
-# ─────────────────────────────────────────────
-
-def _normalize_visualizations(viz_list):
-
-    if not isinstance(viz_list, list):
-        return []
-
-    normalized = []
-
-    for v in viz_list:
-
-        if not isinstance(v, dict):
-            continue
-
-        vtype = str(v.get("type","")).lower()
-
-        if vtype in ("bar","barchart","bar-chart"):
-            vtype = "bar_chart"
-
-        elif vtype in ("line","linechart"):
-            vtype = "line_chart"
-
-        elif vtype in ("pie","piechart"):
-            vtype = "pie_chart"
-
-        elif vtype in ("table","grid"):
-            vtype = "table"
-
-        item = {
-            "type": vtype,
-            "title": v.get("title","")
-        }
-
-        # if vtype in ("bar_chart","line_chart"):
-
-        #     item["xKey"] = v.get("xKey","")
-        #     item["yKey"] = v.get("yKey","")
-        #     item["data"] = v.get("data",[])
-
-        if vtype in ("bar_chart","line_chart"):
-
-            item["xKey"] = v.get("xKey","")
-            item["yKey"] = v.get("yKey","")
-            item["seriesKey"] = v.get("seriesKey","")
-            item["data"] = v.get("data",[])
-
-        elif vtype == "pie_chart":
-
-            item["data"] = v.get("data",[])
-
-        elif vtype == "table":
-
-            item["columns"] = v.get("columns",[])
-            item["data"] = v.get("data",[])
-
-        normalized.append(item)
-
-    return normalized
-
-def _safe_visualizations(vizs):
-
-    safe = []
-
-    for v in vizs:
-
-        if not isinstance(v, dict):
-            continue
-
-        if not v.get("type"):
-            continue
-
-        if not v.get("title"):
-            continue
-
-        safe.append(v)
-
-    return safe
 
 
 def _to_str(val):
@@ -1186,24 +1145,33 @@ def _validate_column_refs(sql, table_cols):
     `wd`.`dealer` are correctly ignored — we cannot and should not validate
     derived columns."""
     if not sql or not table_cols:
+# ─────────────────────────────────────────────
+# VISUALIZATION SUPPORT
+# ─────────────────────────────────────────────
+
+def _normalize_visualizations(viz_list):
+    if not isinstance(viz_list, list):
         return []
-    lower_cols = {t: {c.lower() for c in cols} for t, cols in table_cols.items()}
-    base_tables = set(table_cols.keys())
-    violations = {}
-
-    # Backticked  `table`.`column`
-    for m in re.finditer(r"`([^`]+)`\s*\.\s*`([^`]+)`", sql):
-        q, c = m.group(1), m.group(2)
-        if q in base_tables and c.lower() not in lower_cols[q]:
-            violations[(q, c)] = True
-
-    # Unbackticked  table.column  (qualifier still must be a real base table)
-    for m in re.finditer(r"\b(\w+)\s*\.\s*(\w+)\b", sql):
-        q, c = m.group(1), m.group(2)
-        if q in base_tables and c.lower() not in lower_cols[q]:
-            violations[(q, c)] = True
-
-    return list(violations.keys())
+    normalized = []
+    for v in viz_list:
+        if not isinstance(v, dict): continue
+        vtype = str(v.get("type","")).lower()
+        if vtype in ("bar","barchart","bar-chart"):   vtype = "bar_chart"
+        elif vtype in ("line","linechart"):            vtype = "line_chart"
+        elif vtype in ("pie","piechart"):              vtype = "pie_chart"
+        elif vtype in ("table","grid"):                vtype = "table"
+        item = {"type": vtype, "title": v.get("title","")}
+        if vtype in ("bar_chart","line_chart"):
+            item["xKey"] = v.get("xKey","")
+            item["yKey"] = v.get("yKey","")
+            item["data"] = v.get("data",[])
+        elif vtype == "pie_chart":
+            item["data"] = v.get("data",[])
+        elif vtype == "table":
+            item["columns"] = v.get("columns",[])
+            item["data"]    = v.get("data",[])
+        normalized.append(item)
+    return normalized
 
 
 def _column_ref_correction(violations, col_to_tables):
@@ -1699,49 +1667,28 @@ def _grouping_hint(question, biz):
 # ══════════════════════════════════════════════════════
 # MAIN CONTROLLER
 # ══════════════════════════════════════════════════════
+def _safe_visualizations(vizs):
+    return [v for v in vizs if isinstance(v,dict) and v.get("type") and v.get("title")]
 
 def session_rag_chat_controller(get_connection_func):
     data       = request.json or {}
-    session_id = (data.get("session_id") or "").strip()
-    question   = (data.get("question")   or "").strip()
-    history    = data.get("chat_history", [])
-    user_id    = data.get("user_id")
-    visit_number = data.get("visit_number")
-    sql_query = None
+    session_id     = (data.get("session_id")     or "").strip()
+    question       = (data.get("question")       or "").strip()
+    history        = data.get("chat_history", [])
+    user_id        = data.get("user_id")
+    login_token    = data.get("login_token")
+    source_chat_id = (data.get("source_chat_id") or "").strip() or None
 
     if not session_id:
         return jsonify({"status":"failed","statusCode":400,
                         "message":"session_id is required"}), 400
 
-    v_raw = visit_number
-    calc_new_visit = False
-    if not v_raw or str(v_raw).lower() in ["new", "session_visit_new"]:
-        calc_new_visit = True
-        visit_number = 1
-    else:
-        try:
-            visit_number = int(str(v_raw).replace("session_visit_", ""))
-        except:
-            calc_new_visit = True
-            visit_number = 1
-
-    if calc_new_visit:
-        conn = cur = None
-        try:
-            conn = get_connection_func()
-            cur  = conn.cursor(dictionary=True)
-            cur.execute("""
-                SELECT COALESCE(MAX(visit_number), 0) AS max_v
-                FROM session_chat_history
-                WHERE session_id = %s AND user_id = %s
-            """, (session_id, int(user_id) if user_id else 0))
-            row = cur.fetchone()
-            visit_number = (row["max_v"] + 1) if row else 1
-        except Exception as e:
-            visit_number = 1
-        finally:
-            if cur: cur.close()
-            if conn: conn.close()
+    # ── Resolve active chat_id ──────────────────────────────────
+    active_chat_id = None
+    if user_id:
+        active_chat_id, _ = _resolve_chat_id(
+            get_connection_func, session_id, user_id, source_chat_id
+        )
 
     workspace_id = None
     sql_results = []
@@ -1777,8 +1724,8 @@ def session_rag_chat_controller(get_connection_func):
             res = _mistral(
                 "Respond ONLY in valid JSON.",
                 f"Data summary:\n{sample}\n\n"
-                "Generate exactly 5 questions. Q1 starts with 'What ', Q2 starts with 'Where ', Q3 starts with 'Why '. "
-                "Use natural, human-readable language. DO NOT mention internal system names, folder names, or long raw database table names (like 'd__project_backend...'). Use terms like 'the data' or 'the records' instead. "
+                "Generate exactly 3 questions. Q1 starts with 'What ', Q2 starts with 'Where ', Q3 starts with 'Why '. "
+                "Use actual table names and values from the data. "
                 'Return ONLY: {"suggested_questions":["What ...?","Where ...?","Why ...?"]}'
             )
             if res: suggested = res.get("suggested_questions", [])
@@ -1786,7 +1733,7 @@ def session_rag_chat_controller(get_connection_func):
             "status":"success","statusCode":200,
             "answer":"Hi! I'm your advanced business intelligence assistant. I have full access to your session databases. Ask me anything about your business data!",
             "follow_up_questions": suggested,
-            "visit_number": visit_number
+            "chat_id": active_chat_id
         }), 200
 
     # Build/get store
@@ -1801,8 +1748,8 @@ def session_rag_chat_controller(get_connection_func):
                         "session_id":session_id,
                         "message":"No data found for this session."}), 200
 
-    # Suggest / Default Report mode
-    if not question or question.startswith("default_"):
+    # Suggest mode
+    if not question:
         count_chunks = [c["text"] for c in all_chunks if c["kind"]=="count"]
         sample = "\n".join(count_chunks)[:15000]
         _default_tpl = get_prompt(workspace_id, 'rag_chat_default') or ''
@@ -1812,24 +1759,29 @@ def session_rag_chat_controller(get_connection_func):
             .replace('{len_chunks}', str(len(all_chunks)))
         )
         res = _mistral(system_prompt, _default_msg)
+        res = _mistral(SYS, f"""
+Business data summary ({len(all_chunks)} total chunks):
+{sample}
+
+This is a business intelligence assistant. Generate exactly 5 "What" questions about the actual business data above.
+ALL 5 questions MUST start with "What ".
+Focus on business-relevant insights: counts, values, names, metrics.
+Reference actual table names, column names, and values from the data.
+
+Return ONLY: {{"suggested_questions":["What ...?","What ...?","What ...?"]}}
+""")
         if not res:
             return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
-            
-        viz = res.get("visualizations", [])
-        visualizations = _safe_visualizations(_normalize_visualizations(viz))
-
         return jsonify({
             "status":              "success",
             "statusCode":          200,
-            "answer":              res.get("answer", ""),
             "suggested_questions": res.get("suggested_questions",[]),
-            "visualizations":      visualizations,
-            "visit_number":        visit_number,
-            "sql_query":           sql_query
+            "chat_id":             active_chat_id
         }), 200
 
     # Understand + Retrieve
     understanding = _understand(question, all_chunks)
+    context       = _retrieve(all_chunks, bm25_idx, col, question, understanding)
     hist          = _history(history)
     print(f"[RAG] intent={understanding['intent']} tables={understanding['table_hints']} entities={understanding['entities']}")
 
@@ -2483,46 +2435,44 @@ HIERARCHY DRILL-DOWN
             .replace('{followup_ins}', followup_ins)
         )
         res = _mistral(system_prompt, _graph_msg)
+        res = _mistral(SYS, f"""
+Retrieved business data:
+{context}
+
+{hist}Chart request: "{question}"
+
+Extract actual numeric/categorical values ONLY from the chunks.
+{followup_ins}
+Return ONLY:
+{{
+  "chart_type":"bar"|"line"|"pie"|"scatter",
+  "title":"...",
+  "labels":[...],
+  "datasets":[{{"label":"...","data":[...]}}],
+  "source_note":"...",
+  "follow_up_questions":["{ftype} ...?","{ftype} ...?","{ftype} ...?"]
+}}
+""")
         if not res:
             return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
-
         _advance_turn(session_id)
-
-        fuq_raw = res.get("follow_up_questions",[])
-        fuq = []
-        if isinstance(fuq_raw, list):
-            for q in fuq_raw:
-                if isinstance(q, dict) and "question" in q:
-                    fuq.append(q["question"])
-                elif isinstance(q, str):
-                    fuq.append(q)
-                    
-        visualizations = _safe_visualizations(_normalize_visualizations(res.get("visualizations", [])))
-
-        _save_history(
-            get_connection_func,
-            session_id,
-            user_id,
-            question,
-            json.dumps(res.get("datasets",[])),
-            fuq,
-            understanding["intent"],
-            "graph",
-            visualizations=visualizations,
-            visit_number=visit_number
-        )
-
+        fuq = res.get("follow_up_questions",[])
+        _save_history(get_connection_func, session_id, user_id,
+                      question, json.dumps(res.get("datasets",[])), fuq, understanding["intent"], "graph",
+                      login_token=login_token, chat_id=active_chat_id)
         return jsonify({
-            "status": "success",
+            "status":     "success",
             "statusCode": 200,
-            "answer": res.get("answer", "Here is the visualization for your request."),
+            "chart_data": {
+                "chart_type":  res.get("chart_type"),
+                "title":       res.get("title",""),
+                "labels":      res.get("labels",[]),
+                "datasets":    res.get("datasets",[]),
+                "source_note": res.get("source_note","")
+            },
             "follow_up_questions": fuq,
-            "visualizations": visualizations,
-            "visit_number": visit_number,
-            "sql_query": sql_query
+            "chat_id": active_chat_id
         }), 200
-
-
 
     # Report
     if _is_report(question):
@@ -2537,12 +2487,31 @@ HIERARCHY DRILL-DOWN
             .replace('{followup_ins}', followup_ins)
         )
         res = _mistral(system_prompt, _report_msg)
+        res = _mistral(SYS, f"""
+You are a senior business analyst. Write a comprehensive report from the business data below.
+Retrieved data:
+{context}
+
+{hist}Report request: "{question}"
+
+Write an analytical business report using ONLY the chunks above.
+Be specific — use actual numbers, names, values from the data.
+{followup_ins}
+Return ONLY:
+{{
+  "report_title":"...",
+  "sections":[{{"heading":"...","content":"..."}}],
+  "key_findings":["Finding 1","Finding 2","Finding 3"],
+  "follow_up_questions":["{ftype} ...?","{ftype} ...?","{ftype} ...?"]
+}}
+""")
         if not res:
             return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
         _advance_turn(session_id)
         fuq = res.get("follow_up_questions",[])
         _save_history(get_connection_func, session_id, user_id,
-                      question, res.get("report_title",""), fuq, understanding["intent"], "report", visit_number=visit_number)
+                      question, res.get("report_title",""), fuq, understanding["intent"], "report",
+                      login_token=login_token, chat_id=active_chat_id)
         return jsonify({
             "status":     "success",
             "statusCode": 200,
@@ -2552,8 +2521,7 @@ HIERARCHY DRILL-DOWN
                 "key_findings": res.get("key_findings",[])
             },
             "follow_up_questions": fuq,
-            "visit_number": visit_number,
-            "sql_query": sql_query
+            "chat_id": active_chat_id
         }), 200
 
     # Answer
@@ -2589,6 +2557,7 @@ HIERARCHY DRILL-DOWN
 
     res = _mistral(system_prompt, _answer_msg)
 Retrieved data (read ALL carefully):
+Retrieved data chunks (read ALL carefully):
 {context}
 
 {hist}Business Question: "{question}"
@@ -2598,190 +2567,40 @@ Relevant tables: {understanding['table_hints']}
 
 {multi_hint}
 DEEP ANALYSIS PROTOCOL:
-
-1. Exhaustively scan every piece of data.
-
-2. If SQL execution results are present, SQL Results are the ONLY source of truth.
-
-3. If SQL Results are present:
-
-   * Use only the rows and columns returned by SQL.
-   * Do not invent additional fields.
-   * Do not invent customer names.
-   * Do not invent dealer names.
-   * Do not invent dates.
-   * Do not invent transaction counts.
-   * Do not invent averages.
-   * Do not invent percentages.
-   * Do not invent churn risk.
-   * Do not invent engagement metrics.
-   * Do not invent business explanations.
-
-4. Never infer reasons, causes, operational issues, market conditions, pricing issues, supply chain issues, customer behavior, customer intent, customer satisfaction, loyalty, churn risk, promotional response, business strategy, or recommendations unless those values explicitly exist in the SQL result.
-
-5. If SQL returns:
-
-   * customer
-   * invoice_value
-   * qty
-
-Then answer only from those fields.
-
-6. If a field is not present in SQL Results, state that the information is not available.
-
-7. Never convert customer IDs into names unless SQL explicitly returns a name column.
-
-8. PRESERVE SORT ORDER: When presenting lists, rankings, or tables in the answer text, you MUST preserve the EXACT row order returned by the SQL Results. NEVER sort or re-order the items alphabetically or otherwise.
-
-   * John Smith
-   * Emily Davis
-   * Customer 1003
-   * Customer 1005
-     or any other names not present in SQL results.
-
-9. Never create:
-
-   * last purchase date
-   * average transaction value
-   * engagement score
-   * churn probability
-   * campaign response
-   * inactivity period
-     unless explicitly returned by SQL.
-
-10. Answer strictly from SQL Results and retrieved context.
-
-11. Accuracy is more important than completeness.
-
-12. If SQL Results exist, ignore any conflicting RAG content.
-
-SQL RESULT PRIORITY RULE
-
-When SQL Results are present:
-
-SQL Results > Retrieved Context > General Reasoning
-
-Always trust SQL Results.
-Never override SQL Results with assumptions.
-
-
-SQL ROW PRESERVATION RULE (MANDATORY)
-
-
-If SQL Results contain N rows, you MUST preserve all N rows.
-
-
-Never omit, discard, merge, summarize, or ignore any returned SQL row.
-
-
-Rows with NULL values or placeholder values such as:
-- Customer Name Not Available
-- NULL
-- Unknown
-
-
-are still valid SQL rows and MUST be included exactly as returned.
-
-
-Never replace an existing SQL row with statements like:
-"No data available" or "Only one record found"
-unless the SQL itself returned only one row.
-
-
-All tables, visualizations, and textual summaries must faithfully represent every SQL row returned by the database.
-
-8. Do NOT include "(source:...)" tags in the answer text.
-9. {followup_ins}
+1. Exhaustively scan every chunk — extract ALL relevant business facts. NEVER swap data between different years, rows, or categories.
+2. STRICT CONTEXT MATCHING: Ensure that any number you output exactly matches the year or category it was found with in the chunks.
+3. Counts/Totals → [COUNT] chunks are authoritative (e.g. "Number of recipe_users: 12").
+4. Complete lists → [COUNT] "All values of column:" lines.
+5. User/entity activity → [JOIN] chunks show cross-table relationships.
+6. Time patterns → compare timestamps in [ROW] chunks to find trends.
+7. Business logic → reason about WHY data looks the way it does.
+8. Write a COMPREHENSIVE, analyst-grade answer:
+   - Start with the direct answer to the question.
+   - Compare available years objectively. Avoid sweeping claims like "clear downward trend" unless explicitly verified across all requested years.
+   - Use the word "Actual" (not "projected" or "estimated") for actual cost/expenditure values from the data, regardless of the year.
+   - Do NOT explicitly state "No data for X was found" if a specific year is missing. Just provide the comparison for the years that are available in the context.
+   - Use bullet points (•) for lists of items.
+   - Use plain text paragraphs for explanations and reasoning.
+9. Do NOT include "(source:...)" tags in the answer text.
+10. {followup_ins}
 
 VISUALIZATION RULES:
-
 If the question involves comparison, distribution, ranking, trends, or category breakdown,
-generate up to 3 visualizations.
+generate up to 3 visualizations from: bar_chart, line_chart, pie_chart, table.
+Also generate at least 4 to 6 KPIs (if data supports it) to provide context.
 
---- AGGREGATION VISUALIZATION RULES (MANDATORY CONTRACT) ---
-If the question involves aggregate data:
+For KPIs:
+{{"type":"kpi","title":"...","value":"...","description":"...","trend":"up|down|neutral"}}
 
-1. Always include a Table visualization.
-
-2. If the data contains a time dimension
-   (month, date, quarter, year),
-   also include a Line Chart.
-
-3. For ranking or Top/Bottom questions without time,
-   return only a Table
-   (optional Bar Chart if useful).
-
-4. Never generate a Line Chart when no time dimension exists.
---- TREND DETECTION & LINE CHART RULES (MANDATORY CONTRACT) ---
-If the question is trend-related (contains: trend, growth, decline, increase, decrease, over time, monthly, quarterly, yearly, seasonality, pattern, historical analysis, performance over time, month-on-month, MoM, YoY):
-1. Visualization Type MUST be Line Chart ("type": "line_chart").
-2. X-Axis (xKey) MUST be a Date/Month/Year field. IMPORTANT: Date values MUST be aggregated and formatted by month (e.g., 'Jan 2024' or 'January') on the X-Axis.
-3. Y-Axis (yKey) MUST be a Numeric Measure.
-4. MUST include "seriesKey": "series" at the visualization root level.
-5. NEVER return multiple category fields like "category": "Tube", "construction": "RADIAL" separately for a line chart. Instead, combine them into a single "series" key.
-   - Example (CATEGORY + CONSTRUCTION): "series": "Tube - RADIAL"
-   - Example (CATEGORY + CONSTRUCTION + VEHICLE TYPE): "series": "Tyre - RADIAL - Truck"
-   - Example (VEHICLE TYPE ONLY): "series": "Truck"
-6. NEVER use Pie Chart or Table as primary visualization for trend queries.
-7. NEVER auto-detect legend. Always use seriesKey.
-8. Every row in "data" MUST contain the exact key "series" (matching seriesKey) and the xKey and yKey.
-9. CRITICAL: For any time-series data or trend charts, the items inside the "data" array MUST be sorted strictly in chronological order (e.g., Jan, Feb, Mar or April, May, June) so the graph renders correctly from left to right.
-------------------------------------------
-
-CRITICAL INSTRUCTIONS FOR ALL VISUALIZATIONS:
-1. The object keys inside the "data" array MUST exactly match what you specify for "xKey" and "yKey".
-2. Only include categories/points that ACTUALLY EXIST in the data. Do NOT invent missing categories with 0 values.
-3. PRESERVE SORT ORDER: When building the "data" array (especially for tables), you MUST preserve the EXACT row order returned by the SQL Results. NEVER sort or re-order the rows alphabetically or otherwise.
-
-Supported visualization types:
-
-1️⃣ Bar Chart
-
-{{
-"type":"bar_chart",
-"title":"...",
-"xKey":"...",
-"yKey":"...",
-"data":[
- {{"category":"A","value":100}},
- {{"category":"B","value":200}}
-]
-}}
-
-2️⃣ Pie Chart
-
-{{
-"type":"pie_chart",
-"title":"...",
-"data":[
- {{"name":"Category A","value":120}},
- {{"name":"Category B","value":80}}
-]
-}}
-
-3️⃣ Table
-
-{{
-"type":"table",
-"title":"...",
-"columns":[
- {{"key":"columnKey","label":"Column Label"}}
-],
-"data":[
- {{"columnKey":"value"}}
-]
-}}
-
-Return ALL visualizations inside the "visualizations" array.
-You may return multiple charts or tables if useful.
-
-
-
+For Charts:
+bar_chart: {{"type":"bar_chart","title":"...","xKey":"...","yKey":"...","data":[{{"<xKey>":"A","<yKey>":100}}]}}
+line_chart: {{"type":"line_chart","title":"...","xKey":"...","yKey":"...","data":[{{"<xKey>":"A","<yKey>":100}}]}}
+pie_chart: {{"type":"pie_chart","title":"...","data":[{{"name":"A","value":100}}]}}
+table:     {{"type":"table","title":"...","columns":[{{"key":"k","label":"L"}}],"data":[]}}
 
 Return ONLY valid JSON (answer must be a plain text string):
-{{"answer":"...","follow_up_questions":[], "visualizations":[]}}
+{{"answer":"...","follow_up_questions":["{ftype} ...?","{ftype} ...?","{ftype} ...?"],"visualizations":[]}}
 """)
-
     if not res:
         return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
 
@@ -2789,7 +2608,14 @@ Return ONLY valid JSON (answer must be a plain text string):
     clean_answer = re.sub(r'\s*\(source:[^)]*\)', '', clean_answer).strip()
     clean_answer = re.sub(r'\s*\[source:[^\]]*\]', '', clean_answer).strip()
 
-    fuq = res.get("follow_up_questions", [])
+    raw_fuq = res.get("follow_up_questions", [])
+    fuq = []
+    if isinstance(raw_fuq, list):
+        for q in raw_fuq:
+            if isinstance(q, dict):
+                fuq.append(str(q.get("question", list(q.values())[0] if q else "")))
+            else:
+                fuq.append(str(q))
 
     visualizations = _safe_visualizations(
         _normalize_visualizations(res.get("visualizations", []))
@@ -2830,14 +2656,19 @@ Return ONLY valid JSON (answer must be a plain text string):
             if isinstance(v["data"][0], dict):
                 v["columns"] = [{"key": k, "label": str(k).replace("_", " ").title()} for k in v["data"][0].keys()]
 
+    if "table" in question.lower():
+        visualizations = [v for v in visualizations if v.get("type") == "table"]
+
     _advance_turn(session_id)
     _save_history(get_connection_func, session_id, user_id,
-                  question, clean_answer, fuq, understanding["intent"], "answer", visualizations=visualizations, visit_number=visit_number)
+                  question, clean_answer, fuq, understanding["intent"], "answer",
+                  login_token=login_token, visualizations=visualizations,
+                  chat_id=active_chat_id)
 
     return jsonify({
-        "status": "success",
-        "statusCode": 200,
-        "answer": clean_answer,
+        "status":              "success",
+        "statusCode":          200,
+        "answer":              clean_answer,
         "follow_up_questions": fuq,
         "visualizations": visualizations,
         "visit_number": visit_number
@@ -5332,8 +5163,11 @@ Return ONLY valid JSON (answer must be a plain text string):
 #         "follow_up_questions": fuq,
 #         "visualizations": visualizations,
 #         "visit_number": visit_number
-#     }), 200
+#     }), 20
 
         "visit_number": visit_number,
-        "sql_query": sql_query
+        "sql_query": sql_query,
+    
+        "visualizations":      visualizations,
+        "chat_id":             active_chat_id
     }), 200

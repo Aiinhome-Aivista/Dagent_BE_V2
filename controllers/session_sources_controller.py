@@ -70,13 +70,13 @@ def session_sources_controller(get_connection_func):
         """, (session_id,))
         db_rows = cursor.fetchall()
 
-        # Deduplicate by tables so multiple files writing to the same table only show the latest
+        # Deduplicate by external_database name to ensure all unique uploaded files are listed
         unique_dbs = {}
         for r in db_rows:
-            t_key = r["tables"]
-            # Keep the latest sync
-            if t_key not in unique_dbs or r["last_sync"] > unique_dbs[t_key]["last_sync"]:
-                unique_dbs[t_key] = r
+            db_key = r["external_database"]
+            # Keep the latest sync if there are multiple entries for the same file
+            if db_key not in unique_dbs or r["last_sync"] > unique_dbs[db_key]["last_sync"]:
+                unique_dbs[db_key] = r
                 
         db_rows_deduped = list(unique_dbs.values())
 
