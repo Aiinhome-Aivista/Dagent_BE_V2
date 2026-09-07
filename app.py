@@ -268,8 +268,7 @@ def register():
 
 @app.route('/login', methods=['POST'])
 def login_route():
-    # Pass the original pymysql connection function (get_connection) to the controller
-    return login_controller(get_db_connection)
+    return login()
 
 
 # 🆕 NEW ROUTE HERE
