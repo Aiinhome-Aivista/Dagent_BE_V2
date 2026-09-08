@@ -353,7 +353,7 @@ def get_workspace_users_controller(get_db_connection):
                 FROM workspace_users wu
                 JOIN users u ON wu.user_id = u.id
                 LEFT JOIN workspaces w ON wu.workspace_id = w.id
-                WHERE wu.workspace_id = %s
+                WHERE wu.workspace_id = %s AND u.role_id != 1
                 ORDER BY wu.assigned_at ASC
             """
             cursor.execute(query, (workspace_id,))
@@ -363,6 +363,7 @@ def get_workspace_users_controller(get_db_connection):
                 FROM workspace_users wu
                 JOIN users u ON wu.user_id = u.id
                 LEFT JOIN workspaces w ON wu.workspace_id = w.id
+                WHERE u.role_id != 1
                 ORDER BY wu.assigned_at ASC
             """
             cursor.execute(query)

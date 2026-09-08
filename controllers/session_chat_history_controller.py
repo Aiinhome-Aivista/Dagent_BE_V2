@@ -497,7 +497,7 @@ def save_chat_history(get_connection_func):
             # Update the very first turn of this visit
             cursor.execute("""
                 UPDATE session_chat_history
-                SET question=%s, answer=%s, follow_up_questions=%s, visualizations=%s, intent=%s, mode=%s, updated_at=CURRENT_TIMESTAMP
+                SET question=%s, answer=%s, follow_up_questions=%s, visualizations=%s, intent=%s, mode=%s
                 WHERE session_id=%s AND user_id=%s AND visit_number=%s AND turn_index=0
             """, (
                 question,
@@ -545,12 +545,10 @@ def save_chat_history(get_connection_func):
             mode
         ))
         
-        # Explicitly update the updated_at timestamp of the default question (turn_index=0) for this session visit
-        cursor.execute("""
-            UPDATE session_chat_history
-            SET updated_at = CURRENT_TIMESTAMP
-            WHERE session_id = %s AND user_id = %s AND visit_number = %s AND turn_index = 0
-        """, (session_id, int(user_id), visit_number))
+        # Explicitly update the created_at timestamp or just touch it (we will skip updated_at since it's not in schema)
+        # Note: If we just want to update a timestamp without schema change, we shouldn't do it if there's no column.
+        # Removing the UPDATE query to prevent Unknown column error.
+
 
         conn.commit()
         new_id = cursor.lastrowid
