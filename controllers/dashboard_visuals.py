@@ -671,10 +671,25 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
         add_join("customer_master", "cm", "s.`customer` = cm.`KUNNR`")
         add_join("territory_master", "tm", "cm.`territory` = tm.`territory_code`")
         add_join("region_master", "rm", "tm.`region_code` = rm.`region`")
-        add_join("sku_master", "sm", "s.`material` = sm.`MATNR`")
-        add_join("tyre_type_master", "ttm", "sm.`tyre_type` = ttm.`tyre_type_code`")
-        add_join("category_master", "catm", "sm.`category` = catm.`category_code`")
-        add_join("construction_master", "consm", "sm.`construction` = consm.`construction_code`")
+        sm_table = None
+        if "material_master" in synced_lower:
+            sm_table = synced_lower["material_master"]
+            add_join("material_master", "sm", "s.`material` = sm.`MATNR`")
+        elif "sku_master" in synced_lower:
+            sm_table = synced_lower["sku_master"]
+            add_join("sku_master", "sm", "s.`material` = sm.`MATNR`")
+            
+        if sm_table:
+            sm_cols = table_columns.get(sm_table, {})
+            tyre_col = check_match(sm_cols, ["tyre_type", "tyretype"])
+            if tyre_col:
+                add_join("tyre_type_master", "ttm", f"sm.`{tyre_col}` = ttm.`tyre_type_code`")
+            cat_col = check_match(sm_cols, ["category"])
+            if cat_col:
+                add_join("category_master", "catm", f"sm.`{cat_col}` = catm.`category_code`")
+            cons_col = check_match(sm_cols, ["construction"])
+            if cons_col:
+                add_join("construction_master", "consm", f"sm.`{cons_col}` = consm.`construction_code`")
             
         from_clause += " " + " ".join(joins)
 
@@ -686,7 +701,8 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
             "tyre_type_master": "ttm",
             "category_master": "catm",
             "construction_master": "consm",
-            "sku_master": "sm"
+            "sku_master": "sm",
+            "material_master": "sm"
         }
         
         for req_key, opts in all_metrics.items():

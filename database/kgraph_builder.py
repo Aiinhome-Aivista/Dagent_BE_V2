@@ -284,6 +284,91 @@ _DDL = {
 }
 
 
+
+def _diff_schemas(schema, kgraph_nodes):
+    existing_tables = {n["table_name"] for n in kgraph_nodes}
+    physical_tables = set(schema.keys())
+    added = physical_tables - existing_tables
+    unchanged = existing_tables & physical_tables
+    return {"added": list(added), "unchanged": list(unchanged)}
+
+def _create_backup_snapshot(cur, conn, allocated_db_name, version_number, schema_hash, trigger_source):
+    try:
+        from controllers.kgraph_service import load_kgraph
+        current_graph = load_kgraph(allocated_db_name)
+        if not current_graph: return False
+        import json
+        snapshot_json = json.dumps(current_graph)
+        node_count = len(current_graph.get("nodes", []))
+        edge_count = len(current_graph.get("edges", []))
+        cur.execute(
+            "INSERT INTO kgraph_backup (version_number, schema_hash, trigger_source, snapshot_data, node_count, edge_count) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (version_number, schema_hash, trigger_source, snapshot_json, node_count, edge_count)
+        )
+        conn.commit()
+        return True
+    except Exception as e:
+        print("[KGRAPH] Backup snapshot failed:", e)
+        return False
+
+def restore_kgraph_backup(allocated_db_name, db_host, db_user, db_pass, db_port, version_number=None):
+    from database.db_connection import get_db_connection
+    conn = None
+    try:
+        conn = pymysql.connect(host=db_host, port=int(db_port), user=db_user, password=db_pass,
+                               database=allocated_db_name, cursorclass=pymysql.cursors.DictCursor)
+        cur = conn.cursor()
+        
+        # 1. Fetch snapshot
+        if version_number:
+            cur.execute("SELECT snapshot_data FROM kgraph_backup WHERE version_number=%s LIMIT 1", (version_number,))
+        else:
+            cur.execute("SELECT snapshot_data FROM kgraph_backup ORDER BY id DESC LIMIT 1")
+            
+        row = cur.fetchone()
+        if not row:
+            print("[KGRAPH] No backup found to restore.")
+            return False
+            
+        import json
+        snapshot = json.loads(row["snapshot_data"])
+        
+        # 2. Wipe current
+        _wipe(cur)
+        
+        # 3. Re-populate
+        for n in snapshot.get("nodes", []):
+            cur.execute("INSERT INTO kgraph_nodes(table_name,node_type,primary_key,row_count,note) VALUES(%s,%s,%s,%s,%s)",
+                (n.get("table_name"), n.get("node_type"), n.get("primary_key"), n.get("row_count"), n.get("note")))
+                
+        for e in snapshot.get("edges", []):
+            cur.execute("INSERT INTO kgraph_edges(from_table,from_column,to_table,to_column,relationship,match_ratio,verified,note) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                (e.get("from_table"), e.get("from_column"), e.get("to_table"), e.get("to_column"), e.get("relationship"), e.get("match_ratio"), e.get("verified"), e.get("note")))
+                
+        for h in snapshot.get("hierarchies", []):
+            cur.execute("INSERT INTO kgraph_hierarchy(hierarchy_name,dimension_table,level_index,column_name,cardinality,verified) VALUES(%s,%s,%s,%s,%s,%s)",
+                (h.get("hierarchy_name"), h.get("dimension_table"), h.get("level_index"), h.get("column_name"), h.get("cardinality"), h.get("verified")))
+                
+        for s in snapshot.get("synonyms", []):
+            cur.execute("INSERT INTO kgraph_synonyms(business_term,target_table,target_column,phrase_len,priority) VALUES(%s,%s,%s,%s,%s)",
+                (s.get("business_term"), s.get("target_table"), s.get("target_column"), s.get("phrase_len"), s.get("priority")))
+                
+        for m in snapshot.get("metrics", []):
+            cur.execute("INSERT INTO kgraph_metrics(term,expression,fact_table,note) VALUES(%s,%s,%s,%s)",
+                (m.get("term"), m.get("expression"), m.get("fact_table"), m.get("note")))
+                
+        cur.execute("INSERT INTO kgraph_meta(schema_hash,status,table_count,note) VALUES(%s,%s,%s,%s)",
+            (snapshot.get("schema_hash", "restored"), "ok", len(snapshot.get("nodes", [])), "Restored from backup"))
+            
+        conn.commit()
+        return True
+    except Exception as e:
+        if conn: conn.rollback()
+        print(f"[KGRAPH] Restore failed: {e}")
+        return False
+
+
 def _ensure_tables(cur):
     for ddl in _DDL.values():
         cur.execute(ddl)
@@ -301,7 +386,7 @@ def _wipe(cur):
 # ─────────────────────────────────────────────────────────────────────────────
 # Public entry point
 # ─────────────────────────────────────────────────────────────────────────────
-def build_kgraph(allocated_db_name, db_host, db_user, db_pass, db_port, force=False):
+def build_kgraph(allocated_db_name, db_host, db_user, db_pass, db_port, force=False, trigger_source="unknown"):
     t0 = time.time()
     conn = None
     try:
@@ -316,28 +401,60 @@ def build_kgraph(allocated_db_name, db_host, db_user, db_pass, db_port, force=Fa
             return {"status": "empty"}
 
         shash = _schema_hash(schema)
-        if not force:
-            try:
-                cur.execute("SELECT schema_hash, status FROM kgraph_meta "
-                            "ORDER BY id DESC LIMIT 1")
-                prev = cur.fetchone()
-                if prev and prev["schema_hash"] == shash and prev["status"] == "ok":
-                    print("[KGRAPH] schema unchanged — keeping existing graph")
-                    return {"status": "unchanged"}
-            except Exception:
-                pass
+        try:
+            cur.execute("SELECT schema_hash, status, id FROM kgraph_meta ORDER BY id DESC LIMIT 1")
+            prev = cur.fetchone()
+        except Exception:
+            prev = None
+
+        graph_exists = bool(prev and prev["status"] == "ok")
+        version_number = (prev["id"] + 1) if prev else 1
+
+        if not force and graph_exists and prev["schema_hash"] == shash:
+            print("[KGRAPH] schema unchanged — keeping existing graph")
+            return {"status": "unchanged"}
+
+        incremental_mode = False
+        diff = {"added": [], "unchanged": []}
+        
+        if graph_exists:
+            cur.execute("SELECT table_name FROM kgraph_nodes")
+            kg_nodes = cur.fetchall()
+            diff = _diff_schemas(schema, kg_nodes)
+            
+            if diff["added"]:
+                print(f"[KGRAPH] Incremental update detected. New tables: {diff['added']}")
+                incremental_mode = True
+                _create_backup_snapshot(cur, conn, allocated_db_name, version_number, prev["schema_hash"], trigger_source)
+            else:
+                print("[KGRAPH] Re-evaluating existing tables.")
+                _create_backup_snapshot(cur, conn, allocated_db_name, version_number, prev["schema_hash"], trigger_source)
 
         # ── LLM proposes the graph ──────────────────────────────────────────
         from database.prompt_loader import get_prompt
-        prompt_template = get_prompt(0, 'knowledge_graph')
-
-        if not prompt_template or not prompt_template.strip():
-            prompt_template = ("Return a STRICT JSON knowledge graph with keys fact_tables, nodes, "
-                               "edges, hierarchies, synonyms, metrics, using ONLY the columns in:\n"
-                               "{SCHEMA_JSON}")
-
-        prompt = prompt_template.replace(
-            "{SCHEMA_JSON}", json.dumps(_schema_for_prompt(schema), indent=2))
+        
+        if incremental_mode:
+            prompt_template = (
+                "You are an expert Data Architect. An existing Knowledge Graph exists, but NEW tables have been added.\n"
+                "Here are the existing unchanged tables:\n{UNCHANGED_JSON}\n\n"
+                "Here are the NEWly added tables:\n{ADDED_JSON}\n\n"
+                "Return a STRICT JSON knowledge graph with keys nodes, edges, hierarchies, synonyms, metrics.\n"
+                "ONLY return details for the NEW tables and how they relate (edges) to the existing tables.\n"
+                "Do NOT redefine the existing tables."
+            )
+            unchanged_schema = {k: v for k, v in _schema_for_prompt(schema).items() if k in diff["unchanged"]}
+            added_schema = {k: v for k, v in _schema_for_prompt(schema).items() if k in diff["added"]}
+            
+            prompt = prompt_template.replace("{UNCHANGED_JSON}", json.dumps(unchanged_schema, indent=2))
+            prompt = prompt.replace("{ADDED_JSON}", json.dumps(added_schema, indent=2))
+        else:
+            prompt_template = get_prompt(0, 'knowledge_graph')
+            if not prompt_template or not prompt_template.strip():
+                prompt_template = ("Return a STRICT JSON knowledge graph with keys fact_tables, nodes, "
+                                   "edges, hierarchies, synonyms, metrics, using ONLY the columns in:\n"
+                                   "{SCHEMA_JSON}")
+            prompt = prompt_template.replace(
+                "{SCHEMA_JSON}", json.dumps(_schema_for_prompt(schema), indent=2))
         raw = call_llm_chat([{"role": "user", "content": prompt}],
                             json_mode=True, temperature=0.0)
         graph = _parse_json(raw) or {}
@@ -376,63 +493,98 @@ def build_kgraph(allocated_db_name, db_host, db_user, db_pass, db_port, force=Fa
                                 "verified": verified_flags})
 
         # ── Persist ─────────────────────────────────────────────────────────
-        _wipe(cur)
+        
+        try:
+            # We enforce transaction
+            conn.begin()
+            
+            if not incremental_mode:
+                _wipe(cur)
+            
+            for n in graph.get("nodes", []):
+                tbl = n.get("table")
+                if tbl not in schema:
+                    continue
+                # Instead of simple insert, check if it exists so we don't duplicate on forced non-incremental run
+                cur.execute("SELECT id FROM kgraph_nodes WHERE table_name=%s", (tbl,))
+                if cur.fetchone():
+                    cur.execute("UPDATE kgraph_nodes SET row_count=%s WHERE table_name=%s", (schema[tbl]["row_count"], tbl))
+                else:
+                    cur.execute(
+                        "INSERT INTO kgraph_nodes(table_name,node_type,primary_key,row_count,note) "
+                        "VALUES(%s,%s,%s,%s,%s)",
+                        (tbl, (n.get("type") or "dimension")[:20], n.get("primary_key"),
+                         schema[tbl]["row_count"], (n.get("note") or "")[:255]))
 
-        for n in graph.get("nodes", []):
-            tbl = n.get("table")
-            if tbl not in schema:
-                continue
-            cur.execute(
-                "INSERT INTO kgraph_nodes(table_name,node_type,primary_key,row_count,note) "
-                "VALUES(%s,%s,%s,%s,%s)",
-                (tbl, (n.get("type") or "dimension")[:20], n.get("primary_key"),
-                 schema[tbl]["row_count"], (n.get("note") or "")[:255]))
+            for e in edges:
+                # Basic dedup by checking from_table + from_column -> to_table + to_column
+                cur.execute("SELECT id FROM kgraph_edges WHERE from_table=%s AND from_column=%s AND to_table=%s AND to_column=%s",
+                            (e["from_table"], e["from_column"], e["to_table"], e["to_column"]))
+                if not cur.fetchone():
+                    cur.execute(
+                        "INSERT INTO kgraph_edges(from_table,from_column,to_table,to_column,"
+                        "relationship,match_ratio,verified,note) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (e["from_table"], e["from_column"], e["to_table"], e["to_column"],
+                         e["relationship"], e["match_ratio"], e["verified"], (e["note"] or "")[:255]))
 
-        for e in edges:
-            cur.execute(
-                "INSERT INTO kgraph_edges(from_table,from_column,to_table,to_column,"
-                "relationship,match_ratio,verified,note) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
-                (e["from_table"], e["from_column"], e["to_table"], e["to_column"],
-                 e["relationship"], e["match_ratio"], e["verified"], (e["note"] or "")[:255]))
-
-        for h in hierarchies:
-            for i, col in enumerate(h["levels"]):
-                ver = 1 if (i == 0 or (i - 1) < len(h["verified"]) and h["verified"][i - 1]) else 0
-                cur.execute(
-                    "INSERT INTO kgraph_hierarchy(hierarchy_name,dimension_table,"
-                    "level_index,column_name,cardinality,verified) VALUES(%s,%s,%s,%s,%s,%s)",
-                    (h["name"][:128], h["dimension_table"], i, col,
-                     int(h["cardinality"].get(col, 0)), ver))
-
-        for s in graph.get("synonyms", []):
-            term = (s.get("term") or "").strip()
-            tbl, col = s.get("table"), s.get("column")
-            if not term or tbl not in schema:
-                continue
-            if col not in {c["name"] for c in schema[tbl]["columns"]}:
-                continue
-            cur.execute(
-                "INSERT INTO kgraph_synonyms(business_term,target_table,target_column,"
-                "phrase_len,priority) VALUES(%s,%s,%s,%s,%s)",
-                (term.lower()[:160], tbl, col, len(term), len(term.split())))
-
-        for m in graph.get("metrics", []):
-            term = (m.get("term") or "").strip()
-            expr = (m.get("expression") or "").strip()
-            if term and expr:
-                cur.execute(
-                    "INSERT INTO kgraph_metrics(term,expression,fact_table,note) "
-                    "VALUES(%s,%s,%s,%s)",
-                    (term.lower()[:160], expr, m.get("fact_table"), (m.get("note") or "")[:255]))
-
-        # Authoritative dimension values (from DB, not the LLM) for drill-down.
-        for t, meta in schema.items():
-            for c in meta["columns"]:
-                if c["values"]:
-                    for v in c["values"][:SAMPLE_VALUES_MAX]:
+            for h in hierarchies:
+                for i, col in enumerate(h["levels"]):
+                    ver = 1 if (i == 0 or (i - 1) < len(h["verified"]) and h["verified"][i - 1]) else 0
+                    # Check if exists
+                    cur.execute("SELECT id FROM kgraph_hierarchy WHERE hierarchy_name=%s AND dimension_table=%s AND level_index=%s AND column_name=%s",
+                                (h["name"][:128], h["dimension_table"], i, col))
+                    if not cur.fetchone():
                         cur.execute(
-                            "INSERT INTO kgraph_dim_values(table_name,column_name,value) "
-                            "VALUES(%s,%s,%s)", (t, c["name"], str(v)[:255]))
+                            "INSERT INTO kgraph_hierarchy(hierarchy_name,dimension_table,"
+                            "level_index,column_name,cardinality,verified) VALUES(%s,%s,%s,%s,%s,%s)",
+                            (h["name"][:128], h["dimension_table"], i, col,
+                             int(h["cardinality"].get(col, 0)), ver))
+
+            for s in graph.get("synonyms", []):
+                term = (s.get("term") or "").strip()
+                tbl, col = s.get("table"), s.get("column")
+                if not term or tbl not in schema:
+                    continue
+                if col not in {c["name"] for c in schema[tbl]["columns"]}:
+                    continue
+                cur.execute("SELECT id FROM kgraph_synonyms WHERE business_term=%s AND target_table=%s AND target_column=%s",
+                            (term.lower()[:160], tbl, col))
+                if not cur.fetchone():
+                    cur.execute(
+                        "INSERT INTO kgraph_synonyms(business_term,target_table,target_column,"
+                        "phrase_len,priority) VALUES(%s,%s,%s,%s,%s)",
+                        (term.lower()[:160], tbl, col, len(term), len(term.split())))
+
+            for m in graph.get("metrics", []):
+                term = (m.get("term") or "").strip()
+                expr = (m.get("expression") or "").strip()
+                if term and expr:
+                    cur.execute("SELECT id FROM kgraph_metrics WHERE term=%s", (term.lower()[:160],))
+                    if not cur.fetchone():
+                        cur.execute(
+                            "INSERT INTO kgraph_metrics(term,expression,fact_table,note) "
+                            "VALUES(%s,%s,%s,%s)",
+                            (term.lower()[:160], expr, m.get("fact_table"), (m.get("note") or "")[:255]))
+
+            # Authoritative dimension values (from DB, not the LLM) for drill-down.
+            # Only do this for added tables if incremental, or all if wipe
+            tables_to_sync_dims = diff["added"] if incremental_mode else list(schema.keys())
+            for t in tables_to_sync_dims:
+                meta = schema[t]
+                for c in meta["columns"]:
+                    if c["values"]:
+                        for v in c["values"][:SAMPLE_VALUES_MAX]:
+                            cur.execute("SELECT id FROM kgraph_dim_values WHERE table_name=%s AND column_name=%s AND value=%s", (t, c["name"], str(v)[:255]))
+                            if not cur.fetchone():
+                                cur.execute(
+                                    "INSERT INTO kgraph_dim_values(table_name,column_name,value) "
+                                    "VALUES(%s,%s,%s)", (t, c["name"], str(v)[:255]))
+            
+            conn.commit()
+            
+        except Exception as persist_error:
+            conn.rollback()
+            raise persist_error
 
         cur.execute("INSERT INTO kgraph_meta(schema_hash,status,table_count,note) "
                     "VALUES(%s,%s,%s,%s)",

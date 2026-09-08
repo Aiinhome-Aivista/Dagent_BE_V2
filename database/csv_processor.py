@@ -26,6 +26,7 @@ import pandas as pd
 from urllib.parse import quote_plus
 from sqlalchemy import create_engine
 from sqlalchemy.types import DECIMAL, BigInteger, Date, Text
+from database.schema_matcher import match_columns_to_existing
 
 # ──────────────────────────────────────────────────────────────────────────
 # Configuration
@@ -276,7 +277,18 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
             total_rows = max(sum(1 for _ in f) - 1, 0)
         print(f"📊 Total data rows detected: {total_rows}")
 
-        raw_name = path.split("/")[-1].rsplit('.', 1)[0]
+        # Extract clean filename without UUID prefix
+        filename = os.path.basename(path)
+        if '_' in filename:
+            parts = filename.split('_', 1)
+            # Check if first part looks like a UUID (length ~36)
+            if len(parts[0]) >= 32 and '-' in parts[0]:
+                raw_name = parts[1].rsplit('.', 1)[0]
+            else:
+                raw_name = filename.rsplit('.', 1)[0]
+        else:
+            raw_name = filename.rsplit('.', 1)[0]
+
         default_table_name = _sanitize(raw_name)[:60]
 
         # ── Pass 1: infer schema from a sample ────────────────────────────
@@ -286,22 +298,59 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
         )
         sample.columns = [_sanitize(c) for c in sample.columns]
         
-        # [NEW] Header Matching: Check if columns match any existing table
-        df_cols_set = set(sample.columns)
+        # Dynamic Schema & Header Matching: Step 1 Priority check for exact table name match
         matched_table = None
-        for t_name, t_cols_set in schema_map.items():
-            if df_cols_set == t_cols_set:
-                matched_table = t_name
-                break
-                
+        target_candidate = next((t for t in schema_map if t.lower() == default_table_name.lower()), None)
+        
+        # Step 2: Strict high-confidence schema fallback (only if exact table name doesn't exist)
+        if not target_candidate and len(sample.columns) > 0:
+            best_match = None
+            best_ratio = 0.0
+            for t_name, t_cols in schema_map.items():
+                if t_cols:
+                    intersection_count = len(set(sample.columns).intersection(t_cols))
+                    overlap_ratio = intersection_count / max(len(sample.columns), len(t_cols))
+                    if overlap_ratio >= 0.70 and overlap_ratio > best_ratio:
+                        best_ratio = overlap_ratio
+                        best_match = t_name
+            if best_match:
+                target_candidate = best_match
+
+        column_rename_map = {}
+        if target_candidate:
+            matched_table = target_candidate
+            existing_cols = list(schema_map[matched_table])
+            
+            # Match columns dynamically
+            match_res = match_columns_to_existing(sample, existing_cols)
+            mapping = match_res['column_mapping']
+            unmapped_cols = match_res['unmapped_new_cols']
+            
+            # Alter table to add unmapped new columns
+            if unmapped_cols:
+                with target_engine.begin() as alter_conn:
+                    for c in unmapped_cols:
+                        kind = _infer_schema(sample[[c]]).get(c, {}).get('kind', 'text')
+                        col_type = "TEXT"
+                        if kind == 'numeric':
+                            col_type = f"DECIMAL({MONEY_PRECISION}, {MONEY_SCALE})"
+                        elif kind == 'int':
+                            col_type = "BIGINT"
+                        elif kind == 'date':
+                            col_type = "DATE"
+                        try:
+                            alter_conn.execute(text(f"ALTER TABLE `{matched_table}` ADD COLUMN `{c}` {col_type}"))
+                        except Exception:
+                            pass
+                        schema_map[matched_table].add(c)
+                        
+            column_rename_map = {in_c: target_c for in_c, target_c in mapping.items() if target_c is not None}
+            sample = sample.rename(columns=column_rename_map)
+
         table_name = matched_table if matched_table else default_table_name
         table_exists = matched_table is not None
         target_table_name = f"temp_{table_name}" if table_exists else table_name
         
-        if table_exists and not matched_table:
-            # Fallback if names match but columns didn't (unlikely in this flow, but safe)
-            table_exists = table_name in existing_tables
-            target_table_name = f"temp_{table_name}" if table_exists else table_name
         schema = _infer_schema(sample)
         sa_dtype = _sqlalchemy_dtype(schema)
         print("🧬 Inferred column types:")
@@ -317,6 +366,8 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
             engine="python", on_bad_lines="warn",
         ):
             chunk.columns = [_sanitize(c) for c in chunk.columns]
+            if column_rename_map:
+                chunk = chunk.rename(columns=column_rename_map)
             chunk = _apply_schema(chunk, schema)
             processed_rows += len(chunk)
 

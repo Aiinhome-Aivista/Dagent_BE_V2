@@ -35,7 +35,7 @@ def get_prompt(workspace_id, prompt_type):
             row = cur.fetchone()
             if row and row.get("custom_prompt") and str(row["custom_prompt"]).strip():
                 prompt = str(row["custom_prompt"])
-                print(f"[Prompt Loader] Fetched global fallback prompt '{prompt_type}' (workspace 0)")
+                print(f"[Prompt Loader] Fetched global prompt '{prompt_type}' (workspace 0)")
             else:
                 print(f"[Prompt Loader] WARNING: No prompt found for '{prompt_type}' (workspace {workspace_id} or global)")
 

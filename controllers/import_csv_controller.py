@@ -219,6 +219,7 @@ import pymysql
 from flask import request, jsonify
 from database.config import MYSQL_CONFIG
 from database.csv_processor import _infer_schema, _apply_schema, MONEY_PRECISION, MONEY_SCALE
+from database.schema_matcher import match_columns_to_existing
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "uploads"))
@@ -310,7 +311,8 @@ def import_csv_data(get_db_connection):
         schema_map = {}
         for t in existing_tables:
             user_cursor.execute(f"SHOW COLUMNS FROM `{t}`")
-            t_cols = [r['Field'] for r in user_cursor.fetchall()]
+            # Convert to lower to avoid case-mismatches during schema subset validation
+            t_cols = [r['Field'].lower() for r in user_cursor.fetchall()]
             schema_map[t] = set(t_cols)
 
         for file in files:
@@ -327,8 +329,8 @@ def import_csv_data(get_db_connection):
             if df.empty:
                 continue
 
-            # Standardize column names: strip whitespace, replace spaces and dots with underscores
-            df.columns = df.columns.str.strip().str.replace(" ", "_").str.replace(".", "_", regex=False)
+            # Standardize column names: strip whitespace, replace spaces/dots with underscores, and convert to lowercase
+            df.columns = df.columns.str.strip().str.replace(" ", "_").str.replace(".", "_", regex=False).str.lower()
             
             # Infer schema and apply data types using csv_processor
             schema = _infer_schema(df.head(50000))
@@ -338,15 +340,73 @@ def import_csv_data(get_db_connection):
             df_cols_set = set(df.columns)
             num_columns = len(df.columns)
 
-            # Check if columns match any existing table (Smart Schema Detection)
             matched_table = None
-            for t_name, t_cols_set in schema_map.items():
-                if df_cols_set == t_cols_set:
-                    matched_table = t_name
-                    break
+            expected_table_name = file.replace(".csv", "").strip().lower()
+            
+            # Step 1: Priority check for exact table name match (case-insensitive)
+            target_table_candidate = next((t for t in schema_map if t.lower() == expected_table_name), None)
+            
+            # Step 2: Strict high-confidence schema fallback (only if exact table name doesn't exist)
+            if not target_table_candidate and len(df.columns) > 0:
+                best_match = None
+                best_ratio = 0.0
+                for t_name, t_cols in schema_map.items():
+                    if t_cols:
+                        intersection_count = len(set(df.columns).intersection(t_cols))
+                        overlap_ratio = intersection_count / max(len(df.columns), len(t_cols))
+                        # Must have at least 70% schema overlap to be considered the same table
+                        if overlap_ratio >= 0.70 and overlap_ratio > best_ratio:
+                            best_ratio = overlap_ratio
+                            best_match = t_name
+                if best_match:
+                    target_table_candidate = best_match
+                        
+            if target_table_candidate:
+                matched_table = target_table_candidate
+                existing_table_cols = list(schema_map[matched_table])
+                
+                # Fetch a sample from the existing database table to assist profile matching if needed
+                sample_db_df = None
+                try:
+                    user_cursor.execute(f"SELECT * FROM `{matched_table}` LIMIT 100")
+                    rows = user_cursor.fetchall()
+                    if rows:
+                        sample_db_df = pd.DataFrame(rows)
+                except Exception:
+                    sample_db_df = None
+                    
+                match_res = match_columns_to_existing(df, existing_table_cols, sample_db_df)
+                mapping = match_res['column_mapping']
+                unmapped_cols = match_res['unmapped_new_cols']
+                
+                # Add unmapped new columns to table via ALTER TABLE
+                if unmapped_cols:
+                    for c in unmapped_cols:
+                        kind = schema.get(c, {}).get('kind', 'text')
+                        col_type = "TEXT"
+                        if kind == 'numeric':
+                            col_type = f"DECIMAL({MONEY_PRECISION}, {MONEY_SCALE})"
+                        elif kind == 'int':
+                            col_type = "BIGINT"
+                        elif kind == 'date':
+                            col_type = "DATE"
+                            
+                        alter_query = f"ALTER TABLE `{matched_table}` ADD COLUMN `{c}` {col_type}"
+                        try:
+                            user_cursor.execute(alter_query)
+                        except pymysql.err.OperationalError as e:
+                            if e.args[0] == 1060:
+                                pass
+                            else:
+                                raise
+                        schema_map[matched_table].add(c)
+                        
+                # Rename DataFrame columns to match existing target columns for mapped headers
+                rename_dict = {in_c: target_c for in_c, target_c in mapping.items() if target_c is not None}
+                df = df.rename(columns=rename_dict)
+                df_cols_set = set(df.columns)
 
-            # If match found, use that table. Else, create new table named after file.
-            table_name = matched_table if matched_table else file.replace(".csv", "").lower()
+            table_name = matched_table if matched_table else expected_table_name
 
             if not matched_table:
                 # Create the new table
@@ -366,20 +426,11 @@ def import_csv_data(get_db_connection):
                 create_query = f"CREATE TABLE IF NOT EXISTS `{table_name}` ({cols})"
                 user_cursor.execute(create_query)
                 # Register in schema_map so subsequent files in this batch can match it
-                schema_map[table_name] = df_cols_set
+                schema_map[table_name] = set(df.columns)
 
-            # Check if this specific file was already imported in this session
-            cursor.execute("SELECT id FROM external_db_sync_log WHERE session_id=%s AND external_database=%s AND action_type='IMPORT'", (session_id, file))
-            already_imported = cursor.fetchone() is not None
-            
-            # If the table was just created, or if it is currently empty, mark it for forced import
-            user_cursor.execute(f"SELECT COUNT(*) as cnt FROM `{table_name}`")
-            if user_cursor.fetchone()['cnt'] == 0:
-                force_import_tables.add(table_name)
-                
-            # If this table is marked for forced import in this run, bypass the session log
-            if table_name in force_import_tables:
-                already_imported = False
+            # By default, we always process the file to allow incremental data uploads.
+            # Deduplication handles avoiding duplicate rows for master tables.
+            already_imported = False
             
             rows_inserted = 0
             

@@ -1312,10 +1312,10 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                             
 
     finally:import json
-import pymysql
-from database.config import MYSQL_CONFIG
-from helper.workspace_wise_store_procedures import run_stored_procedures
-import math
+# import pymysql
+# from database.config import MYSQL_CONFIG
+# from helper.workspace_wise_store_procedures import run_stored_procedures
+# import math
 
 def clean_row(row, col_types=None):
     cleaned = []

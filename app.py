@@ -129,6 +129,9 @@ from controllers.pricing_controller import (
     update_pricing_controller,
     delete_pricing_controller
 )
+from controllers.export_report_controller import export_domestic_sales_report_controller, export_domestic_sales_preview_controller
+from controllers.dashboard_visuals import graph_metrics_controller,extract_graph_data_controller, default_dashboard_metrics_controller,available_years_controller,dashboard_filters_controller,year_wise_sales_comparison_controller,sales_by_zone_data_controller,tyre_sales_data_controller
+from controllers.sales_dashboard import get_sales_revenue_data_controller, get_sales_by_account_category_controller, get_non_billed_accounts_controller, get_overdue_pct_controller, get_exposure_pct_controller
 
 from flask_socketio import SocketIO
 app = Flask(__name__)
@@ -176,6 +179,80 @@ executor = ThreadPoolExecutor(max_workers=8)
 
 # ---------------------------------- API Endpoints ---------------------------------
 
+def execute_dynamic_controller(workspace_id, prompt_type, default_controller_func, get_conn_func):
+    conn = get_conn_func()
+    if conn:
+        try:
+            cursor = conn.cursor(dictionary=True)
+            # Prioritize specific category over global
+            query = """
+                SELECT custom_prompt, data_category 
+                FROM workspace_prompts 
+                WHERE workspace_id = %s AND prompt_type = %s 
+                ORDER BY CASE WHEN data_category = 'global' THEN 1 ELSE 0 END
+                LIMIT 1
+            """
+            cursor.execute(query, (workspace_id, prompt_type))
+            res = cursor.fetchone()
+            
+            # If not found for this workspace, check global fallback (workspace_id = 0)
+            if not res:
+                cursor.execute(query, (0, prompt_type))
+                res = cursor.fetchone()
+                
+            if res and res.get('custom_prompt'):
+                code_str = res['custom_prompt']
+                cat = res.get('data_category', 'unknown')
+                
+                exec_env = {}
+                exec_env.update(globals())
+                
+                try:
+                    exec(code_str, exec_env)
+                except Exception as e:
+                    print(f"Error parsing dynamic code for {prompt_type}: {e}")
+                    raise e
+                
+                func_name = default_controller_func.__name__
+                if func_name in exec_env:
+                    print(f"Executing dynamic controller for {prompt_type} (Category: {cat})")
+                    return exec_env[func_name](get_conn_func)
+                else:
+                    print(f"Dynamic code did not define {func_name}. Falling back to default.")
+        except Exception as e:
+            import traceback
+            print(f"Error executing dynamic {prompt_type} code: {e}")
+            traceback.print_exc()
+        finally:
+            conn.close()
+            
+    # Fallback to the default filesystem controller
+    return default_controller_func(get_conn_func)
+
+def get_workspace_id_from_req(get_conn_func):
+    data = request.get_json(silent=True) or {}
+    workspace_id = data.get("workspace_id")
+    if workspace_id:
+        return workspace_id
+        
+    session_id = data.get("session_id")
+    if not session_id:
+        return None
+        
+    conn = get_conn_func()
+    if conn:
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT id FROM workspaces WHERE session_id = %s", (session_id,))
+            row = cursor.fetchone()
+            if row:
+                return row["id"]
+        except Exception as e:
+            pass
+        finally:
+            conn.close()
+    return None
+
 # Workspace Custom Prompts
 @app.route("/api/prompt-types", methods=["GET"])
 def api_get_prompt_types():
@@ -195,7 +272,8 @@ def api_get_workspace_prompts(workspace_id):
 
 @app.route("/api/workspace-prompt/<string:workspace_id>/<string:prompt_type>", methods=["GET"])
 def api_get_workspace_prompt_by_type(workspace_id, prompt_type):
-    return get_workspace_prompt_by_type(get_db_connection, workspace_id, prompt_type)
+    data_category = request.args.get('data_category', 'global')
+    return get_workspace_prompt_by_type(get_db_connection, workspace_id, prompt_type, data_category)
 
 @app.route("/api/workspace-prompts-all", methods=["GET"])
 def api_get_all_workspace_prompts():
@@ -431,6 +509,9 @@ def get_saved_credentials():
 
 @app.route("/session-chat", methods=["POST"])
 def session_chat():
+    workspace_id = get_workspace_id_from_req(get_db_connection)
+    if workspace_id is not None:
+        return execute_dynamic_controller(workspace_id, "rag_chat_controller_code", session_rag_chat_controller, get_db_connection)
     return session_rag_chat_controller(get_db_connection)
 
 @app.route('/api/apply_bulk_sync', methods=['POST']) 
@@ -446,6 +527,9 @@ from controllers.session_history_controller import get_session_analysis_history
 
 @app.route("/session-analysis", methods=["POST"])
 def session_analysis():
+    workspace_id = get_workspace_id_from_req(get_db_connection)
+    if workspace_id is not None:
+        return execute_dynamic_controller(workspace_id, "session_analysis_controller_code", session_analysis_controller, get_db_connection)
     return session_analysis_controller(get_db_connection)
 
 @app.route("/session-analysis-history", methods=["GET"])
@@ -661,8 +745,103 @@ def action_pending():
     """List all pending-approval actions for a session."""
     return action_pending_controller(get_db_connection)
 
+# ---------------------------------------------
+
+
+@app.route("/default-dashboard-metrics", methods=["POST"])
+def default_dashboard_metrics():
+    return default_dashboard_metrics_controller(get_db_connection)
+
+@app.route("/tyre-sales-data", methods=["POST"])
+def tyre_sales_data():
+    return tyre_sales_data_controller(get_db_connection)
+
+@app.route("/dashboard-filters/", methods=["GET"])
+def dashboard_filters():
+    return dashboard_filters_controller(get_db_connection)
+
+@app.route("/sales-by-zone", methods=["POST"])
+def sales_by_zone():
+    return sales_by_zone_data_controller(get_db_connection)    
+
+
+@app.route("/year-wise-sales-comparison", methods=["POST"])
+def year_wise_sales_comparison():
+    return year_wise_sales_comparison_controller(get_db_connection)
+
+@app.route("/available-years", methods=["GET"])
+def available_years():
+    return available_years_controller(get_db_connection)    
+
+from controllers.category_sales import get_category_sales_controller
+
+@app.route("/category-sales", methods=["GET"])
+def category_sales():
+    return get_category_sales_controller(get_db_connection)
+
+@app.route("/sales-revenue", methods=["GET", "POST"])
+def sales_revenue():
+    return get_sales_revenue_data_controller(get_db_connection)
+
+@app.route("/sales-by-account-category", methods=["GET", "POST"])
+def sales_by_account_category():
+    return get_sales_by_account_category_controller(get_db_connection)
+
+@app.route("/non-billed-accounts-pct", methods=["GET", "POST"])
+def non_billed_accounts_pct():
+    return get_non_billed_accounts_controller(get_db_connection)
+
+@app.route("/overdue-pct", methods=["GET", "POST"])
+def overdue_pct():
+    return get_overdue_pct_controller(get_db_connection)
+
+@app.route("/exposure-pct", methods=["GET", "POST"])
+def exposure_pct():
+    return get_exposure_pct_controller(get_db_connection)
+
+
+
+@app.route("/export-domestic-sales-report", methods=["GET", "POST"])
+def export_domestic_sales_report():
+    return export_domestic_sales_report_controller(get_db_connection)
+
+@app.route("/export-domestic-sales-preview", methods=["GET", "POST"])
+def export_domestic_sales_preview():
+    return export_domestic_sales_preview_controller(get_db_connection)
+
+
+
+# ==========================================
+# Report Recipients API
+# ==========================================
+
+
+# ==========================================
+# Scheduled Reports API
+# ==========================================
+@app.route("/api/scheduled-reports", methods=["GET"])
+def get_scheduled_reports():
+    return get_schedules_controller()
+
+@app.route("/api/scheduled-reports", methods=["POST"])
+def add_scheduled_report():
+    return add_schedule_controller()
+
+@app.route("/api/scheduled-reports/<int:schedule_id>", methods=["PUT"])
+def update_scheduled_report(schedule_id):
+    return update_schedule_controller(schedule_id)
+
+@app.route("/api/scheduled-reports/<int:schedule_id>", methods=["DELETE"])
+def delete_scheduled_report(schedule_id):
+    return delete_schedule_controller(schedule_id)
+
+
 
 if __name__ == '__main__':
+    # Start APScheduler
+    # scheduler = BackgroundScheduler()
+    # scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
+    # scheduler.start()
 
 
     app.run(host="0.0.0.0", port=3019, debug=True, use_reloader=False)

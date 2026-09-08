@@ -25,7 +25,7 @@ def get_workspace_prompts(get_db_connection, workspace_id):
     
     try:
         cursor = conn.cursor(dictionary=True)
-        query = "SELECT prompt_type, custom_prompt FROM workspace_prompts WHERE workspace_id = %s"
+        query = "SELECT prompt_type, custom_prompt, data_category FROM workspace_prompts WHERE workspace_id = %s"
         cursor.execute(query, (workspace_id,))
         prompts = cursor.fetchall()
         return jsonify({"success": True, "prompts": prompts}), 200
@@ -37,16 +37,22 @@ def get_workspace_prompts(get_db_connection, workspace_id):
             cursor.close()
         conn.close()
 
-def get_workspace_prompt_by_type(get_db_connection, workspace_id, prompt_type):
+def get_workspace_prompt_by_type(get_db_connection, workspace_id, prompt_type, data_category='global'):
     conn = get_db_connection()
     if not conn:
         return jsonify({"success": False, "message": "Database connection failed"}), 500
     
     try:
         cursor = conn.cursor(dictionary=True)
-        query = "SELECT custom_prompt FROM workspace_prompts WHERE workspace_id = %s AND prompt_type = %s"
-        cursor.execute(query, (workspace_id, prompt_type))
+        query = "SELECT custom_prompt FROM workspace_prompts WHERE workspace_id = %s AND prompt_type = %s AND data_category = %s"
+        cursor.execute(query, (workspace_id, prompt_type, data_category))
         result = cursor.fetchone()
+        
+        # Fallback to global if not found
+        if not result and data_category != 'global':
+            cursor.execute(query, (workspace_id, prompt_type, 'global'))
+            result = cursor.fetchone()
+            
         if result:
             return jsonify({"success": True, "custom_prompt": result['custom_prompt']}), 200
         else:
@@ -67,6 +73,7 @@ def set_workspace_prompt(get_db_connection):
     workspace_id = data.get('workspace_id')
     prompt_type = data.get('prompt_type')
     custom_prompt = data.get('custom_prompt')
+    data_category = data.get('data_category', 'global')
     
     if workspace_id is None or not prompt_type or not custom_prompt:
         return jsonify({"success": False, "message": "Missing required fields (workspace_id, prompt_type, custom_prompt)"}), 400
@@ -78,11 +85,11 @@ def set_workspace_prompt(get_db_connection):
     try:
         cursor = conn.cursor()
         query = """
-            INSERT INTO workspace_prompts (workspace_id, prompt_type, custom_prompt) 
-            VALUES (%s, %s, %s)
+            INSERT INTO workspace_prompts (workspace_id, prompt_type, custom_prompt, data_category) 
+            VALUES (%s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE custom_prompt = VALUES(custom_prompt)
         """
-        cursor.execute(query, (workspace_id, prompt_type, custom_prompt))
+        cursor.execute(query, (workspace_id, prompt_type, custom_prompt, data_category))
         conn.commit()
         return jsonify({"success": True, "message": "Custom prompt saved successfully"}), 200
     except Exception as e:
@@ -102,7 +109,7 @@ def get_all_workspace_prompts(get_db_connection):
     try:
         cursor = conn.cursor(dictionary=True)
         query = """
-            SELECT wp.workspace_id, w.workspace_name, wp.prompt_type, wp.custom_prompt, pt.display_name as prompt_type_label
+            SELECT wp.workspace_id, w.workspace_name, wp.prompt_type, wp.data_category, wp.custom_prompt, pt.display_name as prompt_type_label
             FROM workspace_prompts wp
             LEFT JOIN workspaces w ON wp.workspace_id = w.id
             LEFT JOIN prompt_types_master pt ON wp.prompt_type = pt.type_code
@@ -126,6 +133,7 @@ def delete_workspace_prompt(get_db_connection):
 
     workspace_id = data.get('workspace_id')
     prompt_type = data.get('prompt_type')
+    data_category = data.get('data_category', 'global')
 
     if workspace_id is None or not prompt_type:
         return jsonify({"success": False, "message": "Missing required fields (workspace_id, prompt_type)"}), 400
@@ -136,8 +144,8 @@ def delete_workspace_prompt(get_db_connection):
 
     try:
         cursor = conn.cursor()
-        query = "DELETE FROM workspace_prompts WHERE workspace_id = %s AND prompt_type = %s"
-        cursor.execute(query, (workspace_id, prompt_type))
+        query = "DELETE FROM workspace_prompts WHERE workspace_id = %s AND prompt_type = %s AND data_category = %s"
+        cursor.execute(query, (workspace_id, prompt_type, data_category))
         conn.commit()
         if cursor.rowcount == 0:
             return jsonify({"success": False, "message": "Prompt not found"}), 404

@@ -229,7 +229,12 @@ def upload_chunk_controller(get_db_connection):
     if not chunk:
         return jsonify({"status":"error","message":"chunk missing"}),400
 
-    session_folder = os.path.join(CHUNK_DIR, session_id)
+    session_folder = os.path.join(CHUNK_DIR, session_id, filename)
+    
+    if chunk_index == "0" and os.path.exists(session_folder):
+        import shutil
+        shutil.rmtree(session_folder)
+        
     os.makedirs(session_folder, exist_ok=True)
 
     chunk_path = os.path.join(session_folder, f"{chunk_index}.part")
@@ -258,9 +263,18 @@ def upload_chunk_controller(get_db_connection):
         user_data = cursor.fetchone()
         allocated_db_name = user_data["workspace_db"] if user_data else None
 
-        # 🔹 INSERT INTO connection_history
+        # 🔹 REPLACEMENT LOGIC: Delete existing history for this exact file in this session
         history_name = f"Chunk Upload: {filename} to allocated DB ({allocated_db_name})"
+        cursor.execute("""
+            SELECT id FROM connection_history 
+            WHERE session_id = %s AND connection_name = %s
+        """, (session_id, history_name))
+        existing_history = cursor.fetchall()
+        for row in existing_history:
+            cursor.execute("DELETE FROM database_credential WHERE connection_id = %s", (row['id'],))
+            cursor.execute("DELETE FROM connection_history WHERE id = %s", (row['id'],))
 
+        # 🔹 INSERT INTO connection_history
         db_type_hist = 'sql_chunk_upload' if filename.lower().endswith('.sql') else 'doc_chunk_upload' if filename.lower().endswith(('.pdf', '.doc', '.docx')) else 'csv_chunk_upload'
         db_type_cred = 'sql_upload' if filename.lower().endswith('.sql') else 'doc_upload' if filename.lower().endswith(('.pdf', '.doc', '.docx')) else 'csv_upload'
 
