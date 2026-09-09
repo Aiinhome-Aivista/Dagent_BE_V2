@@ -281,6 +281,17 @@ _DDL = {
             id INT AUTO_INCREMENT PRIMARY KEY,
             table_name VARCHAR(128), column_name VARCHAR(128), value VARCHAR(255),
             INDEX(table_name), INDEX(column_name))""",
+    "kgraph_backup": """
+        CREATE TABLE IF NOT EXISTS kgraph_backup(
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            version_number INT,
+            schema_hash VARCHAR(40),
+            trigger_source VARCHAR(64),
+            snapshot_data LONGTEXT,
+            node_count INT DEFAULT 0,
+            edge_count INT DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            INDEX(version_number))""",
 }
 
 
@@ -422,13 +433,21 @@ def build_kgraph(allocated_db_name, db_host, db_user, db_pass, db_port, force=Fa
             kg_nodes = cur.fetchall()
             diff = _diff_schemas(schema, kg_nodes)
             
+            # Always use incremental mode when an existing verified graph is present.
+            # This prevents the full graph from being wiped on schema changes.
+            incremental_mode = True
+
             if diff["added"]:
-                print(f"[KGRAPH] Incremental update detected. New tables: {diff['added']}")
-                incremental_mode = True
-                _create_backup_snapshot(cur, conn, allocated_db_name, version_number, prev["schema_hash"], trigger_source)
+                print(f"[KGRAPH] Incremental update: new tables detected = {diff['added']}")
             else:
-                print("[KGRAPH] Re-evaluating existing tables.")
-                _create_backup_snapshot(cur, conn, allocated_db_name, version_number, prev["schema_hash"], trigger_source)
+                print("[KGRAPH] Incremental update: re-evaluating existing tables without wipe.")
+
+            # Save a backup snapshot of the current graph BEFORE any modification.
+            backed_up = _create_backup_snapshot(cur, conn, allocated_db_name, version_number, prev["schema_hash"], trigger_source)
+            if backed_up:
+                print(f"[KGRAPH] Backup snapshot v{version_number} saved successfully.")
+            else:
+                print("[KGRAPH] WARNING: Backup snapshot could not be saved.")
 
         # ── LLM proposes the graph ──────────────────────────────────────────
         from database.prompt_loader import get_prompt
