@@ -1491,10 +1491,7 @@ def delete_connection_history_controller(get_db_connection):
 
 
 # delete_workspace_controller
-def delete_workspace_controller(get_db_connection):
-
-    data = request.get_json()
-    workspace_id = data.get("workspace_id")
+def delete_workspace_controller(workspace_id, get_db_connection):
 
     if not workspace_id:
         return jsonify({
