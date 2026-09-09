@@ -81,35 +81,52 @@ def login():
     cursor.execute(check_query, (user_id,))
     existing_db = cursor.fetchone()
     
-    if existing_db and existing_db["new_user_db"]:
-        cursor.close()
-        conn.close()
-        return jsonify({
-            "status": True,
-            "statuscode": 200,
-            "data": {
-                "user_id": user_id,
-                "user_database": existing_db["new_user_db"],
-                "role_id": role_id,
-                "role_name": role_name,
-                "name": user_name
-            },
-            "msg": "User database already exists"
-        }), 200
+    workspace_query = """
+        SELECT id, session_id, workspace_name, is_active, workspace_type 
+        FROM workspaces 
+        WHERE (user_id=%s OR id IN (SELECT workspace_id FROM workspace_users WHERE user_id=%s))
+        AND is_active=1 
+        LIMIT 1
+    """
+    cursor.execute(workspace_query, (user_id, user_id))
+    active_workspace = cursor.fetchone()
+    
+    if not active_workspace:
+        fallback_query = """
+            SELECT id, session_id, workspace_name, is_active, workspace_type 
+            FROM workspaces 
+            WHERE (user_id=%s OR id IN (SELECT workspace_id FROM workspace_users WHERE user_id=%s))
+            LIMIT 1
+        """
+        cursor.execute(fallback_query, (user_id, user_id))
+        active_workspace = cursor.fetchone()
+
 
     user_db = existing_db["new_user_db"] if existing_db else None
     cursor.close()
     conn.close()
+    
+    response_data = {
+        "user_id": user_id,
+        "name": user_name,
+        "role_id": role_id,
+        "role_name": role_name,
+        "user_database": user_db,
+        "active_workspace": active_workspace
+    }
+
+    if existing_db and existing_db["new_user_db"]:
+        return jsonify({
+            "status": True,
+            "statuscode": 200,
+            "data": response_data,
+            "msg": "User database already exists"
+        }), 200
+
     return jsonify({
         "status": True,
         "statuscode": 200,
-        "data": {
-            "user_id": user_id,
-            "name": user_name,
-            "role_id": role_id,
-            "role_name": role_name,
-            "user_database": user_db
-        },
+        "data": response_data,
         "msg": "Login successful"
     }), 200
 
