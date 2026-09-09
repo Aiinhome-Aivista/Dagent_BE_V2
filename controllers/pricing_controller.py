@@ -40,8 +40,8 @@ def create_pricing_plan(data):
     cursor = conn.cursor()
     query = """
     INSERT INTO pricing_plans 
-    (plan_name, data_storage, uploads, insights_queries, basic_features, download_allowed, number_of_users, custom_kpi, scheduled_email)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    (plan_name, data_storage, uploads, insights_queries, basic_features, download_allowed, number_of_users, custom_kpi, scheduled_email, audit_memory, connectors)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     values = (
         data.get("plan_name", ""),
@@ -52,7 +52,9 @@ def create_pricing_plan(data):
         data.get("download_allowed", ""),
         safe_int(data.get("number_of_users", 0)),
         data.get("custom_kpi", ""),
-        data.get("scheduled_email", "")
+        data.get("scheduled_email", ""),
+        data.get("audit_memory", ""),
+        data.get("connectors", "")
     )
     try:
         cursor.execute(query, values)
@@ -74,7 +76,7 @@ def update_pricing_plan(plan_id, data):
     UPDATE pricing_plans 
     SET plan_name = %s, data_storage = %s, uploads = %s, insights_queries = %s, 
         basic_features = %s, download_allowed = %s, number_of_users = %s, 
-        custom_kpi = %s, scheduled_email = %s
+        custom_kpi = %s, scheduled_email = %s, audit_memory = %s, connectors = %s
     WHERE id = %s
     """
     values = (
@@ -87,6 +89,8 @@ def update_pricing_plan(plan_id, data):
         safe_int(data.get("number_of_users", 0)),
         data.get("custom_kpi", ""),
         data.get("scheduled_email", ""),
+        data.get("audit_memory", ""),
+        data.get("connectors", ""),
         plan_id
     )
     try:
