@@ -75,7 +75,6 @@ def create_workspace_controller(get_db_connection):
 
     user_id = data.get('user_id')
     workspace_name = data.get('workspace_name', 'Untitled Workspace')
-    workspace_type = data.get('workspace_type', 'Generic')
 
     if not user_id:
         return jsonify({"status": "error", "message": "user_id is required"}), 400
@@ -141,7 +140,7 @@ def create_workspace_controller(get_db_connection):
             INSERT INTO workspaces (session_id, user_id, workspace_name, workspace_type, is_active)
             VALUES (%s, %s, %s, %s, 1)
         """
-        cursor.execute(insert_query, (new_session_id, user_id, workspace_name, workspace_type))
+        cursor.execute(insert_query, (new_session_id, user_id, workspace_name))
         db_conn.commit()
 
         # Fetch the auto-generated workspace ID
@@ -1110,7 +1109,7 @@ def get_user_workspaces_controller(get_db_connection):
                 w.id,
                 w.session_id,
                 w.workspace_name,
-                w.is_active, w.workspace_type
+                w.is_active
             FROM workspace_users wu
             JOIN workspaces w ON wu.workspace_id = w.id
             WHERE wu.user_id = %s
@@ -1221,7 +1220,7 @@ def get_user_workspaces_simple(get_db_connection):
 
         if user_id:
             query = """
-                SELECT id, workspace_name, workspace_name as name, session_id, workspace_type
+                SELECT id, workspace_name, workspace_name as name, session_id
                 FROM workspaces
                 WHERE user_id = %s
                 ORDER BY id DESC
@@ -1229,7 +1228,7 @@ def get_user_workspaces_simple(get_db_connection):
             cursor.execute(query, (user_id,))
         else:
             query = """
-                SELECT id, workspace_name, workspace_name as name, session_id, workspace_type
+                SELECT id, workspace_name, workspace_name as name, session_id
                 FROM workspaces
                 ORDER BY id DESC
             """

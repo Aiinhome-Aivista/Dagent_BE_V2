@@ -132,6 +132,7 @@ from controllers.pricing_controller import (
 from controllers.export_report_controller import export_domestic_sales_report_controller, export_domestic_sales_preview_controller
 from controllers.dashboard_visuals import graph_metrics_controller,extract_graph_data_controller, default_dashboard_metrics_controller,available_years_controller,dashboard_filters_controller,year_wise_sales_comparison_controller,sales_by_zone_data_controller,tyre_sales_data_controller
 from controllers.sales_dashboard import get_sales_revenue_data_controller, get_sales_by_account_category_controller, get_non_billed_accounts_controller, get_overdue_pct_controller, get_exposure_pct_controller
+from controllers.workspace_types_controller import get_workspace_types_controller, create_workspace_type_controller
 
 from flask_socketio import SocketIO
 app = Flask(__name__)
@@ -668,9 +669,17 @@ def ftp_fetch_log():
     return ftp_fetch_log_controller(get_db_connection)
 
 # Workspace Delete
-@app.route('/delete_workspace', methods=['DELETE'])
-def delete_workspace():
-    return delete_workspace_controller(get_db_connection)
+@app.route("/workspaces/<int:workspace_id>", methods=["DELETE"])
+def delete_workspace(workspace_id):
+    return delete_workspace_controller(workspace_id, get_db_connection)
+
+@app.route("/workspace-types", methods=["GET"])
+def get_workspace_types():
+    return get_workspace_types_controller(get_db_connection)
+
+@app.route("/workspace-types", methods=["POST"])
+def create_workspace_type():
+    return create_workspace_type_controller(get_db_connection)
 
 
 

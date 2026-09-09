@@ -1624,7 +1624,7 @@ def get_user_workspaces_controller(get_db_connection):
                 w.id,
                 w.session_id,
                 w.workspace_name,
-                w.is_active
+                w.is_active, w.workspace_type
             FROM workspace_users wu
             JOIN workspaces w ON wu.workspace_id = w.id
             WHERE wu.user_id = %s
