@@ -400,7 +400,14 @@ def rag_chat_controller():
                     schema_context += f"Table {t}\n"
             
             for r in session['relationships']:
-                rel_context += f"{r['table1']}.{r['column1']} ≈ {r['table2']}.{r['column2']} (Similarity: {r.get('similarity',0)})\n"
+                if isinstance(r, dict):
+                    t1 = r.get('table1', r.get('source', ''))
+                    c1 = r.get('column1', '')
+                    t2 = r.get('table2', r.get('target', ''))
+                    c2 = r.get('column2', '')
+                    rel_context += f"{t1}.{c1} ≈ {t2}.{c2} (Similarity: {r.get('similarity',0)})\n"
+                else:
+                    rel_context += f"{r}\n"
 
         prompt = f"""
         You are 'SoulBuddy', a helpful data assistant.
@@ -508,7 +515,17 @@ def rag_chat_controller():
                 schema_context += f"Table {t}: {', '.join(df.columns)}\n"
             except: pass
 
-        rel_context = "\n".join([f"{r['table1']}.{r['column1']} ≈ {r['table2']}.{r['column2']}" for r in all_relationships])
+        rel_context_lines = []
+        for r in all_relationships:
+            if isinstance(r, dict):
+                t1 = r.get('table1', r.get('source', ''))
+                c1 = r.get('column1', '')
+                t2 = r.get('table2', r.get('target', ''))
+                c2 = r.get('column2', '')
+                rel_context_lines.append(f"{t1}.{c1} ≈ {t2}.{c2}")
+            else:
+                rel_context_lines.append(str(r))
+        rel_context = "\n".join(rel_context_lines)
 
         llm_prompt = f"""
 {persona_instructions}

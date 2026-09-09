@@ -81,18 +81,19 @@ def _load_cache(session_id: str, data_hash: str, conn) -> dict | None:
 
 def _save_cache(session_id: str, data_hash: str,
                 report: str, graph_url: str,
-                topics: list, databases: list, conn) -> None:
+                topics: list, databases: list, conn, report_content: str = None) -> None:
     """Upsert cache row for this session."""
     cursor = None
     try:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO `session_analysis_cache`
-                (`session_id`, `data_hash`, `report`, `graph_url`, `topics`, `databases`)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                (`session_id`, `data_hash`, `report`, `report_content`, `graph_url`, `topics`, `databases`)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 `data_hash`  = VALUES(`data_hash`),
                 `report`     = VALUES(`report`),
+                `report_content` = VALUES(`report_content`),
                 `graph_url`  = VALUES(`graph_url`),
                 `topics`     = VALUES(`topics`),
                 `databases`  = VALUES(`databases`),
@@ -101,6 +102,7 @@ def _save_cache(session_id: str, data_hash: str,
             session_id,
             data_hash,
             report,
+            report_content,
             graph_url,
             json.dumps(topics),
             json.dumps(databases)

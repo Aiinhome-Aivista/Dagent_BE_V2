@@ -110,13 +110,14 @@ def push_to_vector_db(uploaded_files, nodes, edges, session_id):
 
     # 3. Edge relationships
     for e in edges:
-        if not all(k in e for k in ("table1", "column1", "table2", "column2")):
-            continue
-        text = (
-            f"Edge {e['table1']}.{e['column1']} ≈ "
-            f"{e['table2']}.{e['column2']} "
-            f"(similarity: {e.get('similarity', 0)})"
-        )
+        if isinstance(e, dict):
+            t1 = e.get('table1', e.get('source', ''))
+            c1 = e.get('column1', '')
+            t2 = e.get('table2', e.get('target', ''))
+            c2 = e.get('column2', '')
+            text = f"{t1}.{c1} ≈ {t2}.{c2} (Similarity: {e.get('similarity', 0)})"
+        else:
+            text = str(e)
         emb = embedding_model.encode(text).tolist()
         documents.append(text)
         embeddings.append(emb)
@@ -210,10 +211,17 @@ def generate_insights(session, more=False):
         df = pd.read_sql(f"SELECT * FROM `{t}` LIMIT 5", engine)
         schema_context += f"\nTable {t} (sample 5 rows):\n{df.to_markdown(index=False)}\n"
 
-    rel_context = "\n".join([
-        f"{r['table1']}.{r['column1']} ≈ {r['table2']}.{r['column2']}"
-        for r in session["relationships"]
-    ])
+    rel_context_lines = []
+    for r in session["relationships"]:
+        if isinstance(r, dict):
+            t1 = r.get('table1', r.get('source', ''))
+            c1 = r.get('column1', '')
+            t2 = r.get('table2', r.get('target', ''))
+            c2 = r.get('column2', '')
+            rel_context_lines.append(f"{t1}.{c1} ≈ {t2}.{c2}")
+        else:
+            rel_context_lines.append(str(r))
+    rel_context = "\n".join(rel_context_lines)
 
     insight_type = "more diverse and deeper" if more else "basic and useful"
 
