@@ -1668,7 +1668,7 @@ def session_analysis_controller(get_connection_func):
         except Exception as e:
             print(f"[Analysis] Session workspace_id fetch error: {e}")
 
-        system_prompt = get_prompt(workspace_id, 'analysis') or ""
+        system_prompt = get_prompt(workspace_id, 'session_analysis_controller_code') or ""
 
         # Fallback to default if no custom prompt
         if not system_prompt.strip():
