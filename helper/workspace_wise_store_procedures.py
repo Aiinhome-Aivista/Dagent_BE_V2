@@ -35,7 +35,7 @@ BEGIN
             END AS report_name,
             SUM(st.Value) / 1000000 AS Target
         FROM sales_target st
-        JOIN sku_master sm ON st.MATNR = sm.MATNR
+        JOIN material_master sm ON st.MATNR = sm.MATNR
         JOIN tyre_type_master tt ON sm.tyre_type = tt.tyre_type_code
         WHERE st.Month = v_target_month
          -- AND tt.tyre_type_name NOT IN ('OTR', 'Retread', 'OTR+Retread') 
@@ -58,9 +58,9 @@ BEGIN
             SUM(CASE WHEN sd.billing__doc_date BETWEEN v_curr_from AND v_curr_to THEN sd.NDP_INR ELSE 0 END) / 1000000 AS Actual,
             SUM(CASE WHEN sd.billing__doc_date = v_curr_to THEN sd.NDP_INR ELSE 0 END) / 1000000 AS Sale_For_Day
         FROM sales_data sd
-        JOIN sku_master sm ON sd.material = sm.MATNR
+        JOIN material_master sm ON sd.material = sm.MATNR
         JOIN tyre_type_master tt ON sm.tyre_type = tt.tyre_type_code
-        LEFT JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
+        LEFT JOIN distribution_channel_master dm ON sd.distribution__Channel = dm.distribution_code
     --    WHERE tt.tyre_type_name NOT IN ('OTR', 'Retread', 'OTR+Retread') 
           WHERE sm.category NOT IN ('JK', 'Vikrant', 'Challenger') 
           AND (dm.distribution_name IS NULL OR dm.distribution_name NOT IN ('OEM', 'STU', 'DEF')) 
@@ -89,7 +89,7 @@ BEGIN
             SUM(CASE WHEN sd.billing__doc_date BETWEEN v_curr_from AND v_curr_to THEN sd.NDP_INR ELSE 0 END) / 1000000 AS Actual,
             SUM(CASE WHEN sd.billing__doc_date = v_curr_to THEN sd.NDP_INR ELSE 0 END) / 1000000 AS Sale_For_Day
         FROM sales_data sd
-        JOIN distribution_mapping dm ON sd.distribution__Channel = dm.distribution_code
+        JOIN distribution_channel_master dm ON sd.distribution__Channel = dm.distribution_code
         WHERE dm.distribution_name IN ('OEM','STU','DEF')
         GROUP BY 
             CASE
@@ -197,7 +197,7 @@ BEGIN
             cm.CH_TYPE                                AS ch_type,
             cm.class                                  AS cls
         FROM sales_data sd
-        JOIN      sku_master          sm  ON sm.MATNR              = sd.material
+        JOIN      material_master          sm  ON sm.MATNR              = sd.material
         LEFT JOIN tyre_type_master    ttm ON ttm.tyre_type_code    = CAST(sm.tyre_type AS CHAR)
         LEFT JOIN construction_master cnm ON cnm.construction_code = CAST(sm.construction AS CHAR)
         LEFT JOIN customer_master     cm  ON cm.KUNNR              = sd.customer
@@ -231,7 +231,7 @@ BEGIN
             0 AS dealer, 0 AS distributor, 0 AS fleet, 
             0 AS oem_actual, 0 AS stu_actual, 0 AS def_actual
         FROM sales_target st
-        JOIN      sku_master          sm  ON sm.MATNR              = st.MATNR
+        JOIN      material_master          sm  ON sm.MATNR              = st.MATNR
         LEFT JOIN tyre_type_master    ttm ON ttm.tyre_type_code    = CAST(sm.tyre_type AS CHAR)
         LEFT JOIN construction_master cnm ON cnm.construction_code = CAST(sm.construction AS CHAR)
         WHERE st.Month = v_target_month
@@ -301,7 +301,7 @@ BEGIN
     /* ============================================================
        1. ACTUALS FACT TABLE
           Join path: sales_data
-                  -> sku_master       (exclusion filters + segment)
+                  -> material_master       (exclusion filters + segment)
                   -> tyre_type_master (4W vs 2/3W segment)
                   -> customer_master  (get territory from customer)
                   -> territory_master (get region from territory)
@@ -331,7 +331,7 @@ BEGIN
             sd.billing__doc_date,
             sd.NDP_INR
         FROM sales_data sd
-        JOIN      sku_master       sm  ON sd.material        = sm.MATNR
+        JOIN      material_master       sm  ON sd.material        = sm.MATNR
         LEFT JOIN tyre_type_master ttm ON sm.tyre_type       = CAST(ttm.tyre_type_code AS CHAR)
         LEFT JOIN customer_master  cm  ON sd.customer        = cm.KUNNR
         LEFT JOIN territory_master tm  ON cm.territory       = tm.territory_code
@@ -374,7 +374,7 @@ BEGIN
     /* ============================================================
        3. TARGETS FACT TABLE
           Join path: sales_target
-                  -> sku_master       (exclusion filters + segment)
+                  -> material_master       (exclusion filters + segment)
                   -> tyre_type_master (4W vs 2/3W segment)
                   -> territory_master (get region from Terr Code)
                   -> region_master    (get zone from region)
@@ -405,7 +405,7 @@ BEGIN
             CAST(REPLACE(IFNULL(st.Value, '0'), ',', '') AS DECIMAL(18, 2)) AS Target_Val
 
         FROM sales_target st                                     -- ✅ direct, no subquery
-        JOIN      sku_master       sm  ON st.MATNR       = sm.MATNR
+        JOIN      material_master       sm  ON st.MATNR       = sm.MATNR
         LEFT JOIN tyre_type_master ttm ON sm.tyre_type   = CAST(ttm.tyre_type_code AS CHAR)
         LEFT JOIN territory_master tm  ON st.Terr_Code   = tm.territory_code  -- ✅ underscore
         LEFT JOIN region_master    rm  ON tm.region_code = rm.region
@@ -607,7 +607,7 @@ BEGIN
             SUM(CASE WHEN tt.tyre_type_name = 'SCOOTER' THEN sd.Sales_Qty ELSE 0 END) AS `Scooter`,
             SUM(CASE WHEN tt.tyre_type_name = 'Motor Cycle' THEN sd.Sales_Qty ELSE 0 END) AS `Motor`
         FROM sales_data sd
-        JOIN sku_master sm ON sd.material = sm.MATNR
+        JOIN material_master sm ON sd.material = sm.MATNR
         LEFT JOIN tyre_type_master tt ON tt.tyre_type_code = CAST(sm.tyre_type AS CHAR)
         LEFT JOIN construction_master cm ON cm.construction_code = CAST(sm.construction AS CHAR)
         LEFT JOIN customer_master cust ON cust.KUNNR = sd.customer
@@ -657,7 +657,7 @@ BEGIN
             SUM(CASE WHEN tt.tyre_type_name = 'SCOOTER' THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `Scooter`,
             SUM(CASE WHEN tt.tyre_type_name = 'Motor Cycle' THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `Motor`
         FROM sales_target st
-        JOIN sku_master sm ON st.MATNR = sm.MATNR
+        JOIN material_master sm ON st.MATNR = sm.MATNR
         LEFT JOIN tyre_type_master tt ON tt.tyre_type_code = CAST(sm.tyre_type AS CHAR)
         LEFT JOIN construction_master cm ON cm.construction_code = CAST(sm.construction AS CHAR)
         LEFT JOIN territory_master tm ON tm.territory_code = st.Terr_Code
@@ -1030,7 +1030,7 @@ BEGIN
             cm.category_name AS category, 
             ROUND(SUM(sd.Invoice_Value_INR) / 10000000, 2) AS total_sales_cr
         FROM sales_data sd
-        JOIN sku_master sku ON sd.material = sku.matnr
+        JOIN material_master sku ON sd.material = sku.matnr
         JOIN category_master cm ON sku.category = cm.category_code
         GROUP BY cm.category_name
         HAVING total_sales_cr > 0;
@@ -1040,7 +1040,7 @@ BEGIN
             cm.category_name AS category, 
             ROUND(SUM(sd.Invoice_Value_INR) / 10000000, 2) AS total_sales_cr
         FROM sales_data sd
-        JOIN sku_master sku ON sd.material = sku.matnr
+        JOIN material_master sku ON sd.material = sku.matnr
         JOIN category_master cm ON sku.category = cm.category_code
         WHERE sd.customer IN (
             SELECT cust.KUNNR
