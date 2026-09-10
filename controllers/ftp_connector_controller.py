@@ -143,6 +143,7 @@ def _run_ftp_fetch(job_id: str, credential: dict, user_db: str, get_db_connectio
                 _scheduler.add_job(
                     func=process_csv_job,
                     args=[csv_files, user_db, db_host, db_user, db_pass, db_port],
+                    kwargs={"trigger_source": "ftp_connector"},
                     trigger='date',
                     id=str(uuid.uuid4()),
                     replace_existing=True
@@ -152,6 +153,7 @@ def _run_ftp_fetch(job_id: str, credential: dict, user_db: str, get_db_connectio
                 _scheduler.add_job(
                     func=process_sql_job,
                     args=[sql_files, user_db, db_host, db_user, db_pass, db_port],
+                    kwargs={"trigger_source": "ftp_connector"},
                     trigger='date',
                     id=str(uuid.uuid4()),
                     replace_existing=True

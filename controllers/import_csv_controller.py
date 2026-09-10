@@ -516,6 +516,22 @@ def import_csv_data(get_db_connection):
         # Calculate approximate data size
         data_size_mb = round((total_rows * 200) / (1024 * 1024), 2)  # Rough estimate
 
+        # Update (never recreate) the workspace's Knowledge Graph now that this
+        # credential-based import has written into it. build_kgraph() itself
+        # takes a kgraph_backups snapshot of the prior graph before touching it,
+        # and only re-evaluates newly added tables when a verified graph already
+        # exists (incremental mode) — see database/kgraph_builder.py.
+        if imported_files:
+            try:
+                from database.kgraph_builder import build_kgraph
+                build_kgraph(
+                    user_db, MYSQL_CONFIG["host"], MYSQL_CONFIG["user"],
+                    MYSQL_CONFIG["password"], MYSQL_CONFIG.get("port", 3306),
+                    trigger_source="import_csv_data"
+                )
+            except Exception as kg_err:
+                print(f"[KGRAPH] post-import build skipped: {kg_err}")
+
         return jsonify({
             "message": "Data imported successfully",
             "status": "success",

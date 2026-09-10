@@ -236,7 +236,8 @@ def _detect_encoding(path: str) -> str:
     return 'latin1'
 
 
-def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db_port):
+def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db_port,
+                     trigger_source="csv_upload"):
     safe_user = quote_plus(db_user)
     safe_pass = quote_plus(db_pass)
     base_url = f"mysql+pymysql://{safe_user}:{safe_pass}@{db_host}:{db_port}"
@@ -320,9 +321,30 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
         if target_candidate:
             matched_table = target_candidate
             existing_cols = list(schema_map[matched_table])
-            
-            # Match columns dynamically
-            match_res = match_columns_to_existing(sample, existing_cols)
+
+            # Pull a real sample of the EXISTING table's data so the matcher can
+            # compare actual data type / value-pattern fingerprints, not just
+            # column-name text similarity. Without this, match_columns_to_existing()
+            # falls back to header-only matching for every existing column, which
+            # defeats "check the data type and pattern it contains" entirely.
+            existing_sample_df = None
+            try:
+                with target_engine.connect() as sample_conn:
+                    sample_rows = sample_conn.execute(
+                        text(f"SELECT * FROM `{matched_table}` LIMIT 200")
+                    ).fetchall()
+                    if sample_rows:
+                        existing_sample_df = pd.DataFrame(
+                            sample_rows, columns=list(schema_map[matched_table])
+                        )
+            except Exception as sample_err:
+                print(f"[SCHEMA-MATCH] could not sample existing table "
+                      f"{matched_table} for pattern matching: {sample_err}")
+                existing_sample_df = None
+
+            # Match columns dynamically — by data type/pattern fingerprint first,
+            # header-name similarity second (cross-checked together).
+            match_res = match_columns_to_existing(sample, existing_cols, existing_sample_df)
             mapping = match_res['column_mapping']
             unmapped_cols = match_res['unmapped_new_cols']
             
@@ -430,7 +452,8 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
     try:
         from database.kgraph_builder import build_kgraph
         # [MODIFIED] Pass force=any_incremental to avoid useless rebuilds
-        build_kgraph(allocated_db_name, db_host, db_user, db_pass, db_port, force=any_incremental)
+        build_kgraph(allocated_db_name, db_host, db_user, db_pass, db_port,
+                     force=any_incremental, trigger_source=trigger_source)
     except Exception as e:
         print(f"[KGRAPH] post-CSV build skipped: {e}")
     return tables_created

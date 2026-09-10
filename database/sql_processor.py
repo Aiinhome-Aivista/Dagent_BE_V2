@@ -20,7 +20,8 @@ def parse_mssql(sql_content):
     commands = re.split(r'(?i)^\s*GO\s*$', sql_content, flags=re.MULTILINE)
     return [cmd.strip() for cmd in commands if cmd.strip() and not cmd.strip().startswith('--')]
 
-def process_sql_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db_port):
+def process_sql_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db_port,
+                     trigger_source="sql_upload"):
     ext_conn = pymysql.connect(
         host=db_host, port=int(db_port),
         user=db_user, password=db_pass, database=allocated_db_name
@@ -53,7 +54,8 @@ def process_sql_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
     print(f"\n🎉 SQL processing complete. Total executed: {total_executed}")
     try:
         from database.kgraph_builder import build_kgraph
-        build_kgraph(allocated_db_name, db_host, db_user, db_pass, db_port)
+        build_kgraph(allocated_db_name, db_host, db_user, db_pass, db_port,
+                     trigger_source=trigger_source)
     except Exception as e:
         print(f"[KGRAPH] post-SQL build skipped: {e}")
 

@@ -281,18 +281,26 @@ _DDL = {
             id INT AUTO_INCREMENT PRIMARY KEY,
             table_name VARCHAR(128), column_name VARCHAR(128), value VARCHAR(255),
             INDEX(table_name), INDEX(column_name))""",
-    "kgraph_backup": """
-        CREATE TABLE IF NOT EXISTS kgraph_backup(
+    # NOTE: name/columns match the table the operator creates manually
+    # (see project notes). Kept here as CREATE TABLE IF NOT EXISTS so a
+    # fresh workspace DB still gets it automatically, but it will never
+    # clash with (or duplicate) a table already created by hand.
+    "kgraph_backups": """
+        CREATE TABLE IF NOT EXISTS kgraph_backups(
             id INT AUTO_INCREMENT PRIMARY KEY,
             version_number INT,
-            schema_hash VARCHAR(40),
-            trigger_source VARCHAR(64),
+            schema_hash VARCHAR(64),
+            trigger_source VARCHAR(128),
             snapshot_data LONGTEXT,
             node_count INT DEFAULT 0,
             edge_count INT DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             INDEX(version_number))""",
 }
+
+# Backwards-compat alias: some earlier builds of this workspace DB may still
+# have the old singular table name. We only ever WRITE to kgraph_backups now.
+_LEGACY_BACKUP_TABLE = "kgraph_backup"
 
 
 
@@ -304,18 +312,28 @@ def _diff_schemas(schema, kgraph_nodes):
     return {"added": list(added), "unchanged": list(unchanged)}
 
 def _create_backup_snapshot(cur, conn, allocated_db_name, version_number, schema_hash, trigger_source):
+    """Persist a full snapshot of the CURRENT (pre-change) graph into
+    kgraph_backups BEFORE any node/edge/hierarchy/synonym/metric is touched.
+    This is what lets an update be reverted with restore_kgraph_backup()."""
     try:
         from controllers.kgraph_service import load_kgraph
         current_graph = load_kgraph(allocated_db_name)
-        if not current_graph: return False
+        if not current_graph:
+            return False
         import json
-        snapshot_json = json.dumps(current_graph)
+        # load_kgraph() returns pymysql DictCursor rows for nodes/edges/etc,
+        # which json.dumps can't serialize directly (Decimal/datetime types
+        # inside them). default=str keeps the snapshot lossless enough to
+        # restore from without ever throwing on a naturally occurring type.
+        snapshot_json = json.dumps(current_graph, default=str)
         node_count = len(current_graph.get("nodes", []))
         edge_count = len(current_graph.get("edges", []))
         cur.execute(
-            "INSERT INTO kgraph_backup (version_number, schema_hash, trigger_source, snapshot_data, node_count, edge_count) "
-            "VALUES (%s, %s, %s, %s, %s, %s)",
-            (version_number, schema_hash, trigger_source, snapshot_json, node_count, edge_count)
+            "INSERT INTO kgraph_backups "
+            "(version_number, schema_hash, trigger_source, snapshot_data, node_count, edge_count, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, NOW())",
+            (version_number, schema_hash, (trigger_source or "unknown")[:128],
+             snapshot_json, node_count, edge_count)
         )
         conn.commit()
         return True
@@ -333,9 +351,9 @@ def restore_kgraph_backup(allocated_db_name, db_host, db_user, db_pass, db_port,
         
         # 1. Fetch snapshot
         if version_number:
-            cur.execute("SELECT snapshot_data FROM kgraph_backup WHERE version_number=%s LIMIT 1", (version_number,))
+            cur.execute("SELECT snapshot_data FROM kgraph_backups WHERE version_number=%s LIMIT 1", (version_number,))
         else:
-            cur.execute("SELECT snapshot_data FROM kgraph_backup ORDER BY id DESC LIMIT 1")
+            cur.execute("SELECT snapshot_data FROM kgraph_backups ORDER BY id DESC LIMIT 1")
             
         row = cur.fetchone()
         if not row:
@@ -608,6 +626,7 @@ def build_kgraph(allocated_db_name, db_host, db_user, db_pass, db_port, force=Fa
         cur.execute("INSERT INTO kgraph_meta(schema_hash,status,table_count,note) "
                     "VALUES(%s,%s,%s,%s)",
                     (shash, "ok", len(schema),
+                     f"trigger={trigger_source}; mode={'incremental' if incremental_mode else 'full'}; "
                      f"edges_verified={sum(e['verified'] for e in edges)}/{len(edges)}"))
         conn.commit()
         print(f"[KGRAPH] built for {allocated_db_name}: "

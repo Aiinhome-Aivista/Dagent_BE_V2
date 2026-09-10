@@ -2,6 +2,43 @@ from flask import request, jsonify
 from database.external_sync_service import apply_external_sync as apply_external_sync_service, sync_external_database , apply_bulk_external_sync
 
 
+def _rebuild_kgraph_for_session(session_id, trigger_source):
+    """
+    Fires the same update-in-place Knowledge Graph build used by the CSV/SQL
+    upload pipelines, for sources that write directly to the workspace DB
+    (Tally, generic external DB connectors, per-table / bulk re-sync).
+    Every one of these is "some other source" landing in the SAME workspace
+    DB, so the graph must be UPDATED (with a kgraph_backups snapshot taken
+    first), never silently skipped or rebuilt from scratch.
+    """
+    try:
+        import pymysql
+        from database.config import MYSQL_CONFIG
+        from database.kgraph_builder import build_kgraph
+
+        conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"],
+                                password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s", (session_id,))
+                row = cur.fetchone()
+        finally:
+            conn.close()
+
+        workspace_db = row[0] if row else None
+        if not workspace_db:
+            return
+
+        build_kgraph(
+            workspace_db, MYSQL_CONFIG["host"], MYSQL_CONFIG["user"],
+            MYSQL_CONFIG["password"], MYSQL_CONFIG.get("port", 3306),
+            trigger_source=trigger_source
+        )
+    except Exception as kg_err:
+        # Never let a kgraph rebuild failure break the sync response itself.
+        print(f"[KGRAPH] post-sync build skipped ({trigger_source}): {kg_err}")
+
+
 def connect_external_db():
 
     data = request.json
@@ -135,6 +172,13 @@ def connect_external_db():
         response_data["tally_sync_result"] = tally_sync_result
         response_data["msg"] += " (Data fetched and saved successfully!)"
 
+    # Update (never recreate) the workspace's Knowledge Graph now that this
+    # source has written into it — a kgraph_backups snapshot of the graph as
+    # it stood before this sync is taken automatically inside build_kgraph().
+    _rebuild_kgraph_for_session(
+        session_id, trigger_source="tally_sync" if is_tally else "external_db_sync"
+    )
+
     return jsonify(response_data)
 
 def apply_external_sync():
@@ -155,6 +199,8 @@ def apply_external_sync():
         }), 400
 
     apply_external_sync_service(user_id, connection_id, session_id, table)
+
+    _rebuild_kgraph_for_session(session_id, trigger_source="external_db_apply_sync")
 
     return jsonify({
         "status": True,
@@ -186,7 +232,9 @@ def apply_bulk_sync():
 
     try:
         apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
-        
+
+        _rebuild_kgraph_for_session(session_id, trigger_source=f"external_db_bulk_sync:{action}")
+
         return jsonify({
             "status": True,
             "statuscode": 200,
