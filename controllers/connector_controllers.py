@@ -13,6 +13,7 @@ from email.mime.multipart import MIMEMultipart
 # pyrefly: ignore [missing-import]
 from snowflake.sqlalchemy import URL
 from database.user_db_service import create_workspace_database, create_workspace_arango_database
+from helper.workspace_wise_store_procedures import run_stored_procedures
 # This stores active engines in memory for the agent to use
 active_connectors = {}
 
@@ -157,6 +158,13 @@ def create_workspace_controller(get_db_connection):
                 (workspace_db, new_workspace_id)
             )
             db_conn.commit()
+            
+            # --- RUN WORKSPACE WISE STORE PROCEDURES FOR TYRE SALES ---
+            if workspace_type and workspace_type.lower() == 'tyre sales':
+                try:
+                    run_stored_procedures(workspace_db)
+                except Exception as e:
+                    print(f"Error running stored procedures for {workspace_db}: {e}")
 
         # --- 3.6. CREATE ARANGODB FOR WORKSPACE ---
         arango_result = create_workspace_arango_database(workspace_name)

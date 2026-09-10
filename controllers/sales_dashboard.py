@@ -10,18 +10,22 @@ def get_sales_revenue_data_controller(get_db_connection):
         cursor = conn.cursor(dictionary=True)
         
         if session_id:
-            cursor.execute("""
-                SELECT new_user_db 
-                FROM external_db_sync_log 
-                WHERE session_id=%s 
-                  AND new_user_db IS NOT NULL 
-                  AND new_user_db != ''
-                ORDER BY id DESC LIMIT 1
-            """, (session_id,))
-            sync_row = cursor.fetchone()
-            if sync_row:
-                user_db = sync_row["new_user_db"]
-                cursor.execute(f"USE `{user_db}`")
+            cursor.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s AND workspace_db IS NOT NULL AND workspace_db != '' ORDER BY id DESC LIMIT 1", (session_id,))
+            row = cursor.fetchone()
+            if row:
+                cursor.execute(f"USE `{row['workspace_db']}`")
+            else:
+                cursor.execute("""
+                    SELECT new_user_db 
+                    FROM external_db_sync_log 
+                    WHERE session_id=%s 
+                      AND new_user_db IS NOT NULL 
+                      AND new_user_db != ''
+                    ORDER BY id DESC LIMIT 1
+                """, (session_id,))
+                sync_row = cursor.fetchone()
+                if sync_row:
+                    cursor.execute(f"USE `{sync_row['new_user_db']}`")
         
         zone = request.args.get("zone")
         
@@ -58,15 +62,20 @@ def get_sales_by_account_category_controller(get_db_connection):
         cursor = conn.cursor(dictionary=True)
         
         if session_id:
-            cursor.execute("""
-                SELECT new_user_db 
-                FROM external_db_sync_log 
-                WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
-                ORDER BY id DESC LIMIT 1
-            """, (session_id,))
-            sync_row = cursor.fetchone()
-            if sync_row:
-                cursor.execute(f"USE `{sync_row['new_user_db']}`")
+            cursor.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s AND workspace_db IS NOT NULL AND workspace_db != '' ORDER BY id DESC LIMIT 1", (session_id,))
+            row = cursor.fetchone()
+            if row:
+                cursor.execute(f"USE `{row['workspace_db']}`")
+            else:
+                cursor.execute("""
+                    SELECT new_user_db 
+                    FROM external_db_sync_log 
+                    WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
+                    ORDER BY id DESC LIMIT 1
+                """, (session_id,))
+                sync_row = cursor.fetchone()
+                if sync_row:
+                    cursor.execute(f"USE `{sync_row['new_user_db']}`")
         
         zone = request.args.get("zone")
         args = (zone,) if zone else (None,)
@@ -96,15 +105,20 @@ def get_non_billed_accounts_controller(get_db_connection):
         cursor = conn.cursor(dictionary=True)
         
         if session_id:
-            cursor.execute("""
-                SELECT new_user_db 
-                FROM external_db_sync_log 
-                WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
-                ORDER BY id DESC LIMIT 1
-            """, (session_id,))
-            sync_row = cursor.fetchone()
-            if sync_row:
-                cursor.execute(f"USE `{sync_row['new_user_db']}`")
+            cursor.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s AND workspace_db IS NOT NULL AND workspace_db != '' ORDER BY id DESC LIMIT 1", (session_id,))
+            row = cursor.fetchone()
+            if row:
+                cursor.execute(f"USE `{row['workspace_db']}`")
+            else:
+                cursor.execute("""
+                    SELECT new_user_db 
+                    FROM external_db_sync_log 
+                    WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
+                    ORDER BY id DESC LIMIT 1
+                """, (session_id,))
+                sync_row = cursor.fetchone()
+                if sync_row:
+                    cursor.execute(f"USE `{sync_row['new_user_db']}`")
         
         zone = request.args.get("zone")
         args = (zone,) if zone else (None,)
@@ -134,15 +148,20 @@ def get_overdue_pct_controller(get_db_connection):
         cursor = conn.cursor(dictionary=True)
         
         if session_id:
-            cursor.execute("""
-                SELECT new_user_db 
-                FROM external_db_sync_log 
-                WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
-                ORDER BY id DESC LIMIT 1
-            """, (session_id,))
-            sync_row = cursor.fetchone()
-            if sync_row:
-                cursor.execute(f"USE `{sync_row['new_user_db']}`")
+            cursor.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s AND workspace_db IS NOT NULL AND workspace_db != '' ORDER BY id DESC LIMIT 1", (session_id,))
+            row = cursor.fetchone()
+            if row:
+                cursor.execute(f"USE `{row['workspace_db']}`")
+            else:
+                cursor.execute("""
+                    SELECT new_user_db 
+                    FROM external_db_sync_log 
+                    WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
+                    ORDER BY id DESC LIMIT 1
+                """, (session_id,))
+                sync_row = cursor.fetchone()
+                if sync_row:
+                    cursor.execute(f"USE `{sync_row['new_user_db']}`")
         
         zone = request.args.get("zone")
         args = (zone,) if zone else (None,)
@@ -172,15 +191,20 @@ def get_exposure_pct_controller(get_db_connection):
         cursor = conn.cursor(dictionary=True)
         
         if session_id:
-            cursor.execute("""
-                SELECT new_user_db 
-                FROM external_db_sync_log 
-                WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
-                ORDER BY id DESC LIMIT 1
-            """, (session_id,))
-            sync_row = cursor.fetchone()
-            if sync_row:
-                cursor.execute(f"USE `{sync_row['new_user_db']}`")
+            cursor.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s AND workspace_db IS NOT NULL AND workspace_db != '' ORDER BY id DESC LIMIT 1", (session_id,))
+            row = cursor.fetchone()
+            if row:
+                cursor.execute(f"USE `{row['workspace_db']}`")
+            else:
+                cursor.execute("""
+                    SELECT new_user_db 
+                    FROM external_db_sync_log 
+                    WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
+                    ORDER BY id DESC LIMIT 1
+                """, (session_id,))
+                sync_row = cursor.fetchone()
+                if sync_row:
+                    cursor.execute(f"USE `{sync_row['new_user_db']}`")
         
         zone = request.args.get("zone")
         args = (zone,) if zone else (None,)

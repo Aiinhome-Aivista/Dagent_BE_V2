@@ -16,16 +16,29 @@ def get_category_sales_controller(get_db_connection):
         db_name = None
         if session_id:
             cursor.execute("""
-                SELECT new_user_db 
-                FROM external_db_sync_log 
-                WHERE session_id=%s 
-                  AND new_user_db IS NOT NULL 
-                  AND new_user_db != ''
+                SELECT workspace_db
+                FROM workspaces
+                WHERE session_id=%s
+                  AND workspace_db IS NOT NULL
+                  AND workspace_db != ''
                 ORDER BY id DESC LIMIT 1
             """, (session_id,))
             row = cursor.fetchone()
+            
             if row:
-                db_name = row["new_user_db"]
+                db_name = row["workspace_db"]
+            else:
+                cursor.execute("""
+                    SELECT new_user_db 
+                    FROM external_db_sync_log 
+                    WHERE session_id=%s 
+                      AND new_user_db IS NOT NULL 
+                      AND new_user_db != ''
+                    ORDER BY id DESC LIMIT 1
+                """, (session_id,))
+                row = cursor.fetchone()
+                if row:
+                    db_name = row["new_user_db"]
                 
         if db_name:
             cursor.execute(f"USE `{db_name}`;")
