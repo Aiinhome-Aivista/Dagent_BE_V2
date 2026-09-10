@@ -435,52 +435,38 @@ def import_csv_data(get_db_connection):
             rows_inserted = 0
             
             if not already_imported:
-                # Define keywords to identify transaction tables
-                transaction_keywords = ['invoice', 'sale', 'order', 'transaction', 'receipt']
-                is_transaction = any(kw in table_name.lower() for kw in transaction_keywords)
+                # 1. Deduplicate within the dataframe itself to prevent duplicates
+                df = df.drop_duplicates()
+                data_values = [tuple(None if pd.isna(x) else x for x in row) for row in df.values]
+                
+                columns = ", ".join([f"`{c}`" for c in df.columns])
+                placeholders = ", ".join(["%s"] * len(df.columns))
+                
+                # 2. Setup Temporary Table
+                temp_table_name = "temp_csv_import_table"
+                user_cursor.execute(f"DROP TEMPORARY TABLE IF EXISTS `{temp_table_name}`")
+                user_cursor.execute(f"CREATE TEMPORARY TABLE `{temp_table_name}` LIKE `{table_name}`")
 
-                if is_transaction:
-                    # 1. Bulk Insert into Main Table directly (Append Only) for Transaction tables
-                    data_values = [tuple(None if pd.isna(x) else x for x in row) for row in df.values]
-                    columns = ", ".join([f"`{c}`" for c in df.columns])
-                    placeholders = ", ".join(["%s"] * len(df.columns))
-                    insert_main_query = f"INSERT INTO `{table_name}` ({columns}) VALUES ({placeholders})"
-                    
-                    user_cursor.executemany(insert_main_query, data_values)
-                    rows_inserted = len(data_values)
-                else:
-                    # 1. Deduplicate within the dataframe itself for Master tables
-                    df = df.drop_duplicates()
-                    data_values = [tuple(None if pd.isna(x) else x for x in row) for row in df.values]
-                    
-                    columns = ", ".join([f"`{c}`" for c in df.columns])
-                    placeholders = ", ".join(["%s"] * len(df.columns))
-                    
-                    # 2. Setup Temporary Table
-                    temp_table_name = "temp_csv_import_table"
-                    user_cursor.execute(f"DROP TEMPORARY TABLE IF EXISTS `{temp_table_name}`")
-                    user_cursor.execute(f"CREATE TEMPORARY TABLE `{temp_table_name}` LIKE `{table_name}`")
+                # 3. Bulk Insert into Temporary Table
+                insert_temp_query = f"INSERT INTO `{temp_table_name}` ({columns}) VALUES ({placeholders})"
+                user_cursor.executemany(insert_temp_query, data_values)
 
-                    # 3. Bulk Insert into Temporary Table
-                    insert_temp_query = f"INSERT INTO `{temp_table_name}` ({columns}) VALUES ({placeholders})"
-                    user_cursor.executemany(insert_temp_query, data_values)
+                # 4. Insert into Main Table avoiding duplicates
+                join_conditions = " AND ".join([f"`{table_name}`.`{c}` <=> `{temp_table_name}`.`{c}`" for c in df.columns])
 
-                    # 4. Insert into Main Table avoiding duplicates
-                    join_conditions = " AND ".join([f"`{table_name}`.`{c}` <=> `{temp_table_name}`.`{c}`" for c in df.columns])
+                insert_main_query = f"""
+                INSERT INTO `{table_name}` ({columns})
+                SELECT {columns} FROM `{temp_table_name}`
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM `{table_name}`
+                    WHERE {join_conditions}
+                )
+                """
+                user_cursor.execute(insert_main_query)
+                rows_inserted = user_cursor.rowcount
 
-                    insert_main_query = f"""
-                    INSERT INTO `{table_name}` ({columns})
-                    SELECT {columns} FROM `{temp_table_name}`
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM `{table_name}`
-                        WHERE {join_conditions}
-                    )
-                    """
-                    user_cursor.execute(insert_main_query)
-                    rows_inserted = user_cursor.rowcount
-
-                    # 5. Drop Temporary Table
-                    user_cursor.execute(f"DROP TEMPORARY TABLE `{temp_table_name}`")
+                # 5. Drop Temporary Table
+                user_cursor.execute(f"DROP TEMPORARY TABLE `{temp_table_name}`")
 
             # 6. Get actual total rows in the table for reporting
             user_cursor.execute(f"SELECT COUNT(*) as cnt FROM `{table_name}`")
