@@ -189,6 +189,14 @@ MYSQL_URI = (
 
 engine = create_engine(MYSQL_URI, pool_recycle=3600, pool_pre_ping=True)
 
+
+
+@app.get("/")
+def health_check():
+    return "API is running"
+
+
+
 # Helper function to create a new mysql.connector connection for the controllers
 def get_db_connection():
     """Establishes and returns a raw mysql.connector connection."""
