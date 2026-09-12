@@ -57,6 +57,8 @@ def resolve_source_table(source_cursor, target_table_name, db_name, db_type, con
                 return t_name, t_schema
         
         return remainder, "public"
+    elif db_type in ["mysql", "mariadb", "mysql2"]:
+        return target_table_name, None
     else:
         prefix = f"{db_name}_"
         if target_table_name.startswith(prefix):
@@ -505,7 +507,7 @@ def sync_external_database(user_id, connection_id, session_id):
                     """)
                 source_tables = [(r[0], r[1]) for r in source_cursor.fetchall()]
             else:
-                source_cursor.execute("SHOW TABLES")
+                source_cursor.execute("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'")
                 source_tables = [(t[0], None) for t in source_cursor.fetchall()]
 
             target_cursor.execute("SHOW TABLES")
@@ -544,6 +546,8 @@ def sync_external_database(user_id, connection_id, session_id):
 
                 if db_type in ["postgresql", "postgres"] and not schema_name:
                     new_table_name = f"{external_db['database']}_{active_schema}_{table_name}"
+                elif db_type in ["mysql", "mariadb", "mysql2"]:
+                    new_table_name = table_name
                 else:
                     new_table_name = f"{external_db['database']}_{table_name}"
 
@@ -1369,6 +1373,8 @@ def resolve_source_table(source_cursor, target_table_name, db_name, db_type, con
                 return t_name, t_schema
         
         return remainder, "public"
+    elif db_type in ["mysql", "mariadb", "mysql2"]:
+        return target_table_name, None
     else:
         prefix = f"{db_name}_"
         if target_table_name.startswith(prefix):
@@ -1814,7 +1820,7 @@ def sync_external_database(user_id, connection_id, session_id):
                     """)
                 source_tables = [(r[0], r[1]) for r in source_cursor.fetchall()]
             else:
-                source_cursor.execute("SHOW TABLES")
+                source_cursor.execute("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'")
                 source_tables = [(t[0], None) for t in source_cursor.fetchall()]
 
             target_cursor.execute("SHOW TABLES")
@@ -1853,6 +1859,8 @@ def sync_external_database(user_id, connection_id, session_id):
 
                 if db_type in ["postgresql", "postgres"] and not schema_name:
                     new_table_name = f"{external_db['database']}_{active_schema}_{table_name}"
+                elif db_type in ["mysql", "mariadb", "mysql2"]:
+                    new_table_name = table_name
                 else:
                     new_table_name = f"{external_db['database']}_{table_name}"
 

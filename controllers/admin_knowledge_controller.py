@@ -189,7 +189,7 @@ def admin_get_chats_controller(get_db_connection):
         _ensure_db_schema(conn)
         cursor = conn.cursor(dictionary=True)
         query = """
-            SELECT id, session_id, question, answer, visualizations, created_at, kg_status
+            SELECT id, session_id, question, answer, visualizations, created_at, kg_status, is_public
             FROM session_chat_history
             WHERE question IS NOT NULL AND (kg_status = 'none' OR kg_status IS NULL)
             ORDER BY created_at DESC
@@ -198,6 +198,70 @@ def admin_get_chats_controller(get_db_connection):
         cursor.execute(query, (limit,))
         rows = cursor.fetchall()
         return jsonify({"status": "success", "data": rows}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if 'cursor' in locals() and cursor: cursor.close()
+        if 'conn' in locals() and conn: conn.close()
+
+def admin_toggle_public_controller(get_db_connection):
+    try:
+        data = request.json
+        if not data or 'id' not in data or 'is_public' not in data:
+            return jsonify({"status": "error", "message": "id and is_public are required"}), 400
+        
+        chat_id = data['id']
+        is_public = bool(data['is_public'])
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE session_chat_history SET is_public = %s WHERE id = %s",
+            (is_public, chat_id)
+        )
+        conn.commit()
+        
+        return jsonify({"status": "success", "message": f"Chat visibility updated to {'Public' if is_public else 'Private'}"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if 'cursor' in locals() and cursor: cursor.close()
+        if 'conn' in locals() and conn: conn.close()
+
+def admin_share_chat_controller(get_db_connection):
+    try:
+        data = request.json
+        if not data or 'chat_id' not in data or 'workspace_id' not in data or 'user_ids' not in data:
+            return jsonify({"status": "error", "message": "chat_id, workspace_id, and user_ids are required"}), 400
+        
+        chat_id = data['chat_id']
+        workspace_id = data['workspace_id']
+        user_ids = data['user_ids']
+        
+        if not isinstance(user_ids, list):
+            return jsonify({"status": "error", "message": "user_ids must be a list"}), 400
+            
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Optionally clear previous sharing for this chat in this workspace
+        # cursor.execute("DELETE FROM shared_chat_insights WHERE chat_id = %s AND target_workspace_id = %s", (chat_id, workspace_id))
+        
+        # Insert new sharing records
+        if len(user_ids) > 0:
+            for uid in user_ids:
+                # Use INSERT IGNORE or handle duplicates if unique constraint exists
+                cursor.execute("""
+                    INSERT INTO shared_chat_insights (chat_id, target_workspace_id, target_user_id) 
+                    SELECT %s, %s, %s 
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM shared_chat_insights 
+                        WHERE chat_id = %s AND target_workspace_id = %s AND target_user_id = %s
+                    )
+                """, (chat_id, workspace_id, uid, chat_id, workspace_id, uid))
+                
+        conn.commit()
+        return jsonify({"status": "success", "message": "Chat shared successfully"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:

@@ -709,10 +709,11 @@ def get_all_users_controller(get_db_connection):
         cursor = db_conn.cursor(dictionary=True)
 
         cursor.execute("""
-            SELECT u.id, u.name, u.email, u.created_at
+            SELECT u.id, u.name, u.email, u.created_at, u.company_id, c.company_name
             FROM users u
+            LEFT JOIN companies c ON u.company_id = c.id
             WHERE u.role_id = 1
-            ORDER BY u.name ASC
+            ORDER BY COALESCE(u.updated_at, u.created_at) DESC
         """)
         users = cursor.fetchall()
 
@@ -971,7 +972,7 @@ def get_workspace_users_controller(get_db_connection):
             FROM workspace_users wu
             JOIN users u ON wu.user_id = u.id
             WHERE wu.workspace_id = %s
-            ORDER BY wu.assigned_at ASC
+            ORDER BY COALESCE(wu.updated_at, wu.assigned_at) DESC
         """
         cursor.execute(query, (workspace_id,))
         assigned_users = cursor.fetchall()
@@ -979,7 +980,7 @@ def get_workspace_users_controller(get_db_connection):
         # Format datetime for JSON
         for row in assigned_users:
             if row.get('assigned_at'):
-                row['assigned_at'] = row['assigned_at'].strftime("%Y-%m-%dT%H:%M:%SZ")
+                row['assigned_at'] = row['assigned_at'].strftime("%Y-%m-%d %H:%M:%S")
 
         cursor.close()
         db_conn.close()
@@ -1628,7 +1629,7 @@ def get_user_workspaces_controller(get_db_connection):
             FROM workspace_users wu
             JOIN workspaces w ON wu.workspace_id = w.id
             WHERE wu.user_id = %s
-            ORDER BY w.created_at DESC
+            ORDER BY COALESCE(w.updated_at, w.created_at) DESC
         """
         
         cursor.execute(query, (user_id,))

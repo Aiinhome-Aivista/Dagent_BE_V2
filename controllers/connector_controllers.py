@@ -36,12 +36,13 @@ def get_all_users_controller(get_db_connection):
         cursor = db_conn.cursor(dictionary=True)
 
         cursor.execute("""
-            SELECT u.id, u.name, u.email, u.password, u.visibility, u.created_at, u.updated_at, GROUP_CONCAT(wu.workspace_name SEPARATOR ', ') as workspaces
+            SELECT u.id, u.name, u.email, u.password, u.visibility, u.role_id, u.company_id, c.company_name, u.created_at, u.updated_at, GROUP_CONCAT(wu.workspace_name SEPARATOR ', ') as workspaces
             FROM users u
             LEFT JOIN workspace_users wu ON u.id = wu.user_id
-            WHERE u.role_id = 2
-            GROUP BY u.id
-            ORDER BY u.name ASC
+            LEFT JOIN companies c ON u.company_id = c.id
+            WHERE u.role_id IN (2, 4)
+            GROUP BY u.id, c.company_name
+            ORDER BY COALESCE(u.updated_at, u.created_at) DESC
         """)
         users = cursor.fetchall()
         for user in users:
@@ -363,7 +364,7 @@ def get_workspace_users_controller(get_db_connection):
                 JOIN users u ON wu.user_id = u.id
                 LEFT JOIN workspaces w ON wu.workspace_id = w.id
                 WHERE wu.workspace_id = %s AND u.role_id != 1
-                ORDER BY wu.assigned_at ASC
+                ORDER BY COALESCE(wu.updated_at, wu.assigned_at) DESC
             """
             cursor.execute(query, (workspace_id,))
         else:
@@ -373,7 +374,7 @@ def get_workspace_users_controller(get_db_connection):
                 JOIN users u ON wu.user_id = u.id
                 LEFT JOIN workspaces w ON wu.workspace_id = w.id
                 WHERE u.role_id != 1
-                ORDER BY wu.assigned_at ASC
+                ORDER BY COALESCE(wu.updated_at, wu.assigned_at) DESC
             """
             cursor.execute(query)
 
@@ -382,7 +383,7 @@ def get_workspace_users_controller(get_db_connection):
         # Format datetime for JSON
         for row in assigned_users:
             if row.get('assigned_at'):
-                row['assigned_at'] = row['assigned_at'].strftime("%Y-%m-%dT%H:%M:%SZ")
+                row['assigned_at'] = row['assigned_at'].strftime("%Y-%m-%d %H:%M:%S")
 
         cursor.close()
         db_conn.close()
@@ -1122,7 +1123,7 @@ def get_user_workspaces_controller(get_db_connection):
             FROM workspace_users wu
             JOIN workspaces w ON wu.workspace_id = w.id
             WHERE wu.user_id = %s
-            ORDER BY w.created_at DESC
+            ORDER BY COALESCE(w.updated_at, w.created_at) DESC
         """
         
         cursor.execute(query, (user_id,))
@@ -1232,14 +1233,14 @@ def get_user_workspaces_simple(get_db_connection):
                 SELECT id, workspace_name, workspace_name as name, session_id, workspace_type
                 FROM workspaces
                 WHERE user_id = %s
-                ORDER BY id DESC
+                ORDER BY COALESCE(updated_at, created_at) DESC
             """
             cursor.execute(query, (user_id,))
         else:
             query = """
                 SELECT id, workspace_name, workspace_name as name, session_id, workspace_type
                 FROM workspaces
-                ORDER BY id DESC
+                ORDER BY COALESCE(updated_at, created_at) DESC
             """
             cursor.execute(query)
         workspaces = cursor.fetchall()
@@ -1275,6 +1276,8 @@ def create_user_controller(get_db_connection):
     email = data.get("email")
     password = data.get("password")
     visibility = data.get('visibility', 1)
+    role_id = data.get('role_id', 2)
+    company_id = data.get('company_id')
 
     if not admin_id:
         return jsonify({"status": "error", "message": "admin_id is required"}), 400
@@ -1322,11 +1325,11 @@ def create_user_controller(get_db_connection):
         # --- 3. INSERT USER ---
         hashed_password = encrypt_password(password)
         insert_query = """
-            INSERT INTO users (name, email, password, role_id, visibility)
-            VALUES (%s, %s, %s, 2, %s)
+            INSERT INTO users (name, email, password, role_id, visibility, company_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
         """
 
-        cursor.execute(insert_query, (name, email, hashed_password, visibility))
+        cursor.execute(insert_query, (name, email, hashed_password, role_id, visibility, company_id))
         db_conn.commit()
 
         new_user_id = cursor.lastrowid
@@ -1787,6 +1790,8 @@ def edit_user_controller(get_db_connection, user_id):
     email = data.get("email")
     password = data.get("password")
     visibility = data.get("visibility", 1)
+    role_id = data.get("role_id", 2)
+    company_id = data.get("company_id")
 
     if not admin_id:
         return jsonify({"status": "error", "message": "admin_id is required"}), 400
@@ -1806,13 +1811,13 @@ def edit_user_controller(get_db_connection, user_id):
         if password:
             hashed_password = encrypt_password(password)
             cursor.execute(
-                "UPDATE users SET name = %s, email = %s, password = %s, visibility = %s WHERE id = %s",
-                (name, email, hashed_password, visibility, user_id)
+                "UPDATE users SET name = %s, email = %s, password = %s, role_id = %s, visibility = %s, company_id = %s WHERE id = %s",
+                (name, email, hashed_password, role_id, visibility, company_id, user_id)
             )
         else:
             cursor.execute(
-                "UPDATE users SET name = %s, email = %s, visibility = %s WHERE id = %s",
-                (name, email, visibility, user_id)
+                "UPDATE users SET name = %s, email = %s, role_id = %s, visibility = %s, company_id = %s WHERE id = %s",
+                (name, email, role_id, visibility, company_id, user_id)
             )
         db_conn.commit()
         return jsonify({"status": "success", "message": "User updated successfully"}), 200

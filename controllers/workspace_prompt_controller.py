@@ -113,7 +113,7 @@ def get_all_workspace_prompts(get_db_connection):
             FROM workspace_prompts wp
             LEFT JOIN workspaces w ON wp.workspace_id = w.id
             LEFT JOIN prompt_types_master pt ON wp.prompt_type = pt.type_code
-            ORDER BY w.workspace_name ASC, wp.prompt_type ASC
+            ORDER BY COALESCE(wp.updated_at, wp.created_at) DESC
         """
         cursor.execute(query)
         prompts = cursor.fetchall()

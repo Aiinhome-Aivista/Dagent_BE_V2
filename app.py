@@ -3,6 +3,7 @@ import os
 os.environ["PYTHONWARNINGS"] = "ignore"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["MPLBACKEND"] = "Agg" # Force Matplotlib headless mode globally
+os.environ["PYTHONUNBUFFERED"] = "1"  # Force unbuffered stdout/stderr — ensures all print() appear immediately in logs
 import logging
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -45,6 +46,7 @@ from database.llm_service import LLMService
 from database.database_service import DatabaseService
 from controllers.orchestrator_controller import process_books
 from controllers.admin_login import staff_login_controller, create_staff_account_controller,get_all_staff_controller
+from controllers.kgraph_controller import rollback_kgraph_controller
 load_dotenv()
 from controllers.captcha_controller import generate_captcha_controller
 from flask import send_from_directory
@@ -134,10 +136,46 @@ from controllers.dashboard_visuals import graph_metrics_controller,extract_graph
 from controllers.sales_dashboard import get_sales_revenue_data_controller, get_sales_by_account_category_controller, get_non_billed_accounts_controller, get_overdue_pct_controller, get_exposure_pct_controller
 from controllers.workspace_types_controller import get_workspace_types_controller, create_workspace_type_controller
 
+from controllers.llm_config_controller import (
+    get_providers_controller, create_provider_controller, update_provider_controller,
+    delete_provider_controller, get_assignments_controller, update_assignments_controller,
+    test_provider_controller
+)
+
+from controllers.company_controller import (
+    get_companies_controller,
+    create_company_controller,
+    update_company_controller,
+    delete_company_controller
+)
+
 from flask_socketio import SocketIO
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 CORS(app)
+
+def get_db_connection():
+    try:
+        return mysql.connector.connect(**MYSQL_CONFIG)
+    except Exception as e:
+        print(f"DB Error: {e}")
+        return None
+
+# LLM Config Routes
+@app.route('/api/llm/providers', methods=['GET', 'OPTIONS'])
+def get_providers(): return get_providers_controller(get_db_connection) if request.method != 'OPTIONS' else ('', 204)
+@app.route('/api/llm/providers', methods=['POST', 'OPTIONS'])
+def create_provider(): return create_provider_controller(get_db_connection) if request.method != 'OPTIONS' else ('', 204)
+@app.route('/api/llm/providers/<int:id>', methods=['PUT', 'OPTIONS'])
+def update_provider(id): return update_provider_controller(get_db_connection, id) if request.method != 'OPTIONS' else ('', 204)
+@app.route('/api/llm/providers/<int:id>', methods=['DELETE', 'OPTIONS'])
+def delete_provider(id): return delete_provider_controller(get_db_connection, id) if request.method != 'OPTIONS' else ('', 204)
+@app.route('/api/llm/providers/<int:id>/test', methods=['POST', 'OPTIONS'])
+def test_provider(id): return test_provider_controller(get_db_connection, id) if request.method != 'OPTIONS' else ('', 204)
+@app.route('/api/llm/assignments', methods=['GET', 'OPTIONS'])
+def get_assignments(): return get_assignments_controller(get_db_connection) if request.method != 'OPTIONS' else ('', 204)
+@app.route('/api/llm/assignments', methods=['PUT', 'OPTIONS'])
+def update_assignments(): return update_assignments_controller(get_db_connection) if request.method != 'OPTIONS' else ('', 204)
 
 # Create necessary folders if not exist
 for folder in [GRAPH_FOLDER, UPLOAD_FOLDER, TEMP_UPLOAD_FOLDER]:
@@ -554,6 +592,16 @@ def upload_csv_route():
 def admin_chats():
     return admin_get_chats_controller(get_db_connection)
 
+@app.route('/api/admin/chats/toggle-public', methods=['POST'])
+def admin_chats_toggle_public():
+    from controllers.admin_knowledge_controller import admin_toggle_public_controller
+    return admin_toggle_public_controller(get_db_connection)
+
+@app.route('/api/admin/chats/share', methods=['POST'])
+def admin_chats_share():
+    from controllers.admin_knowledge_controller import admin_share_chat_controller
+    return admin_share_chat_controller(get_db_connection)
+
 @app.route('/api/admin/push_to_kg', methods=['POST'])
 def admin_push_kg():
     return admin_push_knowledge_controller(get_db_connection)
@@ -733,6 +781,25 @@ def update_pricing(plan_id):
 def delete_pricing(plan_id):
     return delete_pricing_controller(plan_id)
 
+# ==========================================
+# Company API
+# ==========================================
+
+@app.route('/companies', methods=['GET'])
+def get_companies():
+    return get_companies_controller(get_db_connection)
+
+@app.route('/companies', methods=['POST'])
+def create_company():
+    return create_company_controller(get_db_connection)
+
+@app.route('/companies/<int:company_id>', methods=['PUT'])
+def update_company(company_id):
+    return update_company_controller(get_db_connection, company_id)
+
+@app.route('/companies/<int:company_id>', methods=['DELETE'])
+def delete_company(company_id):
+    return delete_company_controller(get_db_connection, company_id)
 
 
 # ==========================================
@@ -845,6 +912,10 @@ def delete_scheduled_report(schedule_id):
     return delete_schedule_controller(schedule_id)
 
 
+
+@app.route("/kgraph-rollback", methods=["POST"])
+def rollback_kgraph():
+    return rollback_kgraph_controller(get_db_connection)
 
 if __name__ == '__main__':
     # Start APScheduler

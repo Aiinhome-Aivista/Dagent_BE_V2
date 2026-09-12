@@ -488,8 +488,8 @@ def save_chat_history(get_connection_func):
             cursor.execute("""
                 SELECT COALESCE(MAX(visit_number), 0) AS max_v
                 FROM session_chat_history
-                WHERE session_id = %s AND user_id = %s
-            """, (session_id, int(user_id)))
+                WHERE session_id = %s
+            """, (session_id,))
             row = cursor.fetchone()
             visit_number = (row["max_v"] + 1) if row else 1
 
@@ -498,7 +498,7 @@ def save_chat_history(get_connection_func):
             cursor.execute("""
                 UPDATE session_chat_history
                 SET question=%s, answer=%s, follow_up_questions=%s, visualizations=%s, intent=%s, mode=%s
-                WHERE session_id=%s AND user_id=%s AND visit_number=%s AND turn_index=0
+                WHERE session_id=%s AND visit_number=%s AND turn_index=0
             """, (
                 question,
                 answer,
@@ -507,7 +507,6 @@ def save_chat_history(get_connection_func):
                 intent,
                 mode,
                 session_id,
-                int(user_id),
                 visit_number
             ))
             conn.commit()
@@ -518,12 +517,12 @@ def save_chat_history(get_connection_func):
                 "message":    "Chat turn updated."
             }), 200
 
-        # Get current turn count for this session+user
+        # Get current turn count for this session+visit
         cursor.execute("""
             SELECT COALESCE(MAX(turn_index), -1) AS last_turn
             FROM session_chat_history
-            WHERE session_id = %s AND user_id = %s AND visit_number = %s
-        """, (session_id, int(user_id), visit_number))
+            WHERE session_id = %s AND visit_number = %s
+        """, (session_id, visit_number))
         row        = cursor.fetchone()
         turn_index = (row["last_turn"] + 1) if row else 0
 
@@ -676,23 +675,43 @@ def get_chat_history(get_connection_func):
         #     WHERE session_id = %s AND user_id = %s
         #     ORDER BY turn_index ASC
         # """, (session_id, int(user_id)))
-       # 1. Fetch data from the database
-        # - Default chats (visit_number = 1) are shared among all users in the workspace
-        # - Private persona queries (visit_number > 1) are strictly filtered by user_id
-        # - If session_id starts with 'def_', it's fully shared
-        cur.execute("""
-            SELECT id, visit_number, question, answer, follow_up_questions, visualizations, created_at
-            FROM session_chat_history
-            WHERE session_id = %s AND (
-                user_id = %s 
-                OR visit_number = 1 
-                OR session_id LIKE 'def_%%'
-            )
-            ORDER BY turn_index ASC, id ASC
-        """, (session_id, int(user_id)))
+        # Check user role
+        cur.execute("SELECT role_id FROM users WHERE id = %s", (int(user_id),))
+        user_role_row = cur.fetchone()
+        user_role = user_role_row['role_id'] if user_role_row else 2
+
+        if user_role in (1, 3, 4):
+            # Admin, Super Admin, and Support User can see all chats for this session
+            cur.execute("""
+                SELECT h.id, h.visit_number, h.question, h.answer, h.follow_up_questions, h.visualizations, h.created_at, h.user_id, u.name as user_name
+                FROM session_chat_history h
+                LEFT JOIN users u ON h.user_id = u.id
+                WHERE h.session_id = %s
+                ORDER BY h.turn_index ASC, h.id ASC
+            """, (session_id,))
+        else:
+            # End user can only see their own chats, plus default ones
+            cur.execute("""
+                SELECT h.id, h.visit_number, h.question, h.answer, h.follow_up_questions, h.visualizations, h.created_at, h.user_id, u.name as user_name
+                FROM session_chat_history h
+                LEFT JOIN users u ON h.user_id = u.id
+                LEFT JOIN shared_chat_insights s ON h.id = s.chat_id AND s.target_user_id = %s
+                LEFT JOIN workspaces w ON s.target_workspace_id = w.id AND w.session_id = %s
+                WHERE (
+                    (h.session_id = %s AND (
+                        h.user_id = %s 
+                        OR h.visit_number = 1 
+                        OR h.session_id LIKE 'def_%%'
+                        OR h.is_public = TRUE
+                    ))
+                    OR (s.id IS NOT NULL AND w.id IS NOT NULL)
+                )
+                ORDER BY h.turn_index ASC, h.id ASC
+            """, (int(user_id), session_id, session_id, int(user_id)))
 
         rows = cur.fetchall()
         grouped_sessions = defaultdict(list)
+        grouped_users = {}
 
         # 2. Group the chats and safely parse JSON
         for row in rows:
@@ -716,6 +735,12 @@ def get_chat_history(get_connection_func):
                 "visualizations": viz,
                 "created_at": row["created_at"].isoformat() if row.get("created_at") else None         
             })
+            
+            if visit_num not in grouped_users:
+                grouped_users[visit_num] = {
+                    "userId": row.get("user_id"),
+                    "userName": row.get("user_name")
+                }
 
         querySessions = []
 
@@ -746,7 +771,9 @@ def get_chat_history(get_connection_func):
                 # "sessionId": session_id,                        # e.g., "f9c29d15..."
                 "querySessionName": session_name,               # Use first question as name
                 "querySessionId": f"session_visit_{v_num}",     # e.g., "session_visit_1"
-                "querySessionHistory": history                  # The list of chats
+                "querySessionHistory": history,                  # The list of chats
+                "userId": grouped_users[v_num]["userId"],
+                "userName": grouped_users[v_num]["userName"]
             })
 
         final_response = {

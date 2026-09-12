@@ -40,6 +40,15 @@
 
 import re, json, time, hashlib, math, requests, mysql.connector, threading, os
 from collections import defaultdict
+
+try:
+    import psycopg2
+    import psycopg2.extras
+    PSYCOPG2_AVAILABLE = True
+except ImportError:
+    PSYCOPG2_AVAILABLE = False
+    print("[RAG] psycopg2 not installed - PostgreSQL support disabled")
+
 # pyrefly: ignore [missing-import]
 from flask import request, jsonify
 from database.config import MISTRAL_API_KEY, MISTRAL_MODEL, MYSQL_CONFIG
@@ -47,6 +56,8 @@ from database.prompt_loader import get_prompt
 from controllers.kgraph_service import (
     load_kgraph, build_sql_rules, resolve_grouping, detect_drilldown, validate_sql
 )
+from controllers.intent_router import classify_intent
+from controllers.query_branches import execute_hybrid
 from helper.email_action_handler import is_email_action_request, execute_email_action
 # ChromaDB persistent storage — vectors survive server restarts
 CHROMA_PERSIST_DIR = os.path.join(
@@ -759,11 +770,11 @@ DROP INDEX chat_id
 # CHAT_ID MANAGER
 # ══════════════════════════════════════════════════
 
-def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id):
+def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id, force_new=False):
     """
     CASE A — source_chat_id আছে + same day → same chat_id continue
     CASE B — source_chat_id আছে + different day → new chat_id + copy source history
-    CASE C — source_chat_id নেই + today's chat exists → continue today's chat
+    CASE C — source_chat_id নেই + today's chat exists → continue today's chat (unless force_new=True)
     CASE C — source_chat_id নেই + no today's chat → brand new chat_id
     """
     import uuid
@@ -819,16 +830,17 @@ def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id):
             return new_id, True
 
         # CASE C — no source_chat_id
-        cur.execute("""
-            SELECT chat_id FROM session_chat_history
-            WHERE session_id = %s AND user_id = %s AND DATE(created_at) = %s
-            ORDER BY id DESC LIMIT 1
-        """, (session_id, int(user_id), today.isoformat()))
-        today_row = cur.fetchone()
+        if not force_new:
+            cur.execute("""
+                SELECT chat_id FROM session_chat_history
+                WHERE session_id = %s AND user_id = %s AND DATE(created_at) = %s
+                ORDER BY id DESC LIMIT 1
+            """, (session_id, int(user_id), today.isoformat()))
+            today_row = cur.fetchone()
 
-        if today_row:
-            print(f"[ChatID] CASE C today exists → {today_row['chat_id'][:8]}...")
-            return today_row["chat_id"], False
+            if today_row:
+                print(f"[ChatID] CASE C today exists → {today_row['chat_id'][:8]}...")
+                return today_row["chat_id"], False
 
         new_id = uuid.uuid4().hex[:32]
         print(f"[ChatID] CASE C brand new → {new_id[:8]}...")
@@ -925,7 +937,7 @@ DEEP ANALYSIS RULES:
 
 from model.llm_client import call_llm_chat
 
-def _mistral(system, user, retries=2):
+def _mistral(system, user, retries=2, temperature=0.15):
     if len(user) > 60000:
         print("[LLM] prompt is very large, but proceeding without arbitrary truncation to preserve JSON instructions.")
         
@@ -936,7 +948,7 @@ def _mistral(system, user, retries=2):
     
     for attempt in range(retries + 1):
         try:
-            response = call_llm_chat(messages, json_mode=True, temperature=0.15)
+            response = call_llm_chat(messages, json_mode=True, temperature=temperature)
             if response:
                 return json.loads(response)
             return None
@@ -1692,6 +1704,7 @@ def session_rag_chat_controller(get_connection_func):
     question       = (data.get("question")       or "").strip()
     history        = data.get("chat_history", [])
     user_id        = data.get("user_id")
+    visit_number   = data.get("visit_number")
     login_token    = data.get("login_token")
     source_chat_id = (data.get("source_chat_id") or "").strip() or None
 
@@ -1701,9 +1714,10 @@ def session_rag_chat_controller(get_connection_func):
 
     # ── Resolve active chat_id ──────────────────────────────────
     active_chat_id = None
+    force_new = data.get("is_new_query") is True
     if user_id:
         active_chat_id, _ = _resolve_chat_id(
-            get_connection_func, session_id, user_id, source_chat_id
+            get_connection_func, session_id, user_id, source_chat_id, force_new
         )
 
     workspace_id = None
@@ -2433,7 +2447,7 @@ Return ONLY: {{"suggested_questions":["What ...?","What ...?","What ...?"]}}
 
             if sql_results:
                 # Override context with SQL results for final LLM generation
-                context = f"SQL Query executed: {sql_query}\n\nSQL Results:\n" + json.dumps(sql_results, indent=2)
+                context = f"SQL Query executed: {sql_query}\n\nSQL Results:\n" + json.dumps(sql_results, indent=2, default=str)
 
         # AGGREGATION fail-safe: if no SQL rows were produced, do NOT let the
         # model answer from an empty/stale context (that caused fabricated,
