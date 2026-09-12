@@ -919,9 +919,9 @@ def rollback_kgraph():
 
 if __name__ == '__main__':
     # Start APScheduler
-    # scheduler = BackgroundScheduler()
-    # scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
-    # scheduler.start()
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
+    scheduler.start()
 
 
     app.run(host="0.0.0.0", port=3019, debug=True, use_reloader=False)
