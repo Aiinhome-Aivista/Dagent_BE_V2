@@ -30,6 +30,14 @@ def get_source_column_types(source_cursor, table_name, db_type, schema='public')
             ORDER BY ordinal_position
         """, (table_name, schema))
         return [r[0].lower() for r in source_cursor.fetchall()]
+    elif db_type == "mssql":
+        source_cursor.execute("""
+            SELECT DATA_TYPE 
+            FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_NAME = %s AND TABLE_SCHEMA = %s
+            ORDER BY ORDINAL_POSITION
+        """, (table_name, schema))
+        return [r[0].lower() for r in source_cursor.fetchall()]
     return None
 
 def resolve_source_table(source_cursor, target_table_name, db_name, db_type, connection_schema=None):
@@ -57,6 +65,29 @@ def resolve_source_table(source_cursor, target_table_name, db_name, db_type, con
                 return t_name, t_schema
         
         return remainder, "public"
+    elif db_type == "mssql":
+        prefix = f"{db_name}_"
+        if target_table_name.startswith(prefix):
+            remainder = target_table_name[len(prefix):]
+        else:
+            remainder = target_table_name
+
+        if connection_schema:
+            return remainder, connection_schema
+
+        source_cursor.execute("""
+            SELECT TABLE_NAME, TABLE_SCHEMA
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_TYPE = 'BASE TABLE'
+        """)
+        all_tables = source_cursor.fetchall()
+        for t_name, t_schema in all_tables:
+            if remainder == f"{t_schema}_{t_name}":
+                return t_name, t_schema
+            if remainder == t_name:
+                return t_name, t_schema
+        
+        return remainder, "dbo"
     elif db_type in ["mysql", "mariadb", "mysql2"]:
         return target_table_name, None
     else:
@@ -104,9 +135,43 @@ def postgres_to_mysql_type(data_type, char_len):
     else:
         return 'TEXT'
 
+def mssql_to_mysql_type(data_type, char_len=None):
+    dt = data_type.lower()
+    if dt in ['int', 'tinyint', 'smallint']:
+        return 'INT'
+    elif dt in ['bigint']:
+        return 'BIGINT'
+    elif dt in ['bit']:
+        return 'TINYINT(1)'
+    elif dt in ['varchar', 'nvarchar', 'char', 'nchar']:
+        if char_len and char_len != -1:
+            return f'VARCHAR({char_len})'
+        else:
+            return 'TEXT'
+    elif dt in ['text', 'ntext']:
+        return 'TEXT'
+    elif dt in ['float', 'real']:
+        return 'FLOAT'
+    elif dt in ['decimal', 'numeric', 'money', 'smallmoney']:
+        return 'DECIMAL(20, 6)'
+    elif dt in ['datetime', 'datetime2', 'smalldatetime']:
+        return 'DATETIME'
+    elif dt == 'date':
+        return 'DATE'
+    elif dt == 'time':
+        return 'TIME'
+    elif dt in ['uniqueidentifier']:
+        return 'VARCHAR(36)'
+    elif dt in ['image', 'binary', 'varbinary']:
+        return 'LONGBLOB'
+    else:
+        return 'TEXT'
+
 def get_source_table_select_name(table_name, db_type):
     if db_type in ["postgresql", "postgres"]:
         return f'"{table_name}"'
+    elif db_type == "mssql":
+        return f'[{table_name}]'
     return f"`{table_name}`"
 
 def get_source_columns(source_cursor, table_name, db_type, schema='public'):
@@ -116,6 +181,14 @@ def get_source_columns(source_cursor, table_name, db_type, schema='public'):
             FROM information_schema.columns 
             WHERE table_name = %s AND table_schema = %s
             ORDER BY ordinal_position
+        """, (table_name, schema))
+        return [r[0] for r in source_cursor.fetchall()]
+    elif db_type == "mssql":
+        source_cursor.execute("""
+            SELECT COLUMN_NAME 
+            FROM INFORMATION_SCHEMA.COLUMNS 
+            WHERE TABLE_NAME = %s AND TABLE_SCHEMA = %s
+            ORDER BY ORDINAL_POSITION
         """, (table_name, schema))
         return [r[0] for r in source_cursor.fetchall()]
     else:
@@ -451,6 +524,12 @@ def sync_external_database(user_id, connection_id, session_id):
             database=external_db["database"]
         )
         source_conn.autocommit = True
+    elif db_type == "mssql":
+        import pyodbc
+        port_val = external_db.get("port")
+        port_str = f",{port_val}" if port_val else ""
+        conn_str = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={external_db['host']}{port_str};DATABASE={external_db['database']};UID={external_db['username']};PWD={external_db['password']}"
+        source_conn = pyodbc.connect(conn_str, autocommit=True)
     else:
         source_conn = pymysql.connect(
             host=external_db["host"],
@@ -505,6 +584,13 @@ def sync_external_database(user_id, connection_id, session_id):
                         WHERE table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast') 
                           AND table_type = 'BASE TABLE'
                     """)
+                source_tables = [(r[0], r[1]) for r in source_cursor.fetchall()]
+            elif db_type == "mssql":
+                source_cursor.execute("""
+                    SELECT TABLE_NAME, TABLE_SCHEMA
+                    FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_TYPE = 'BASE TABLE'
+                """)
                 source_tables = [(r[0], r[1]) for r in source_cursor.fetchall()]
             else:
                 source_cursor.execute("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'")
@@ -568,6 +654,20 @@ def sync_external_database(user_id, connection_id, session_id):
                             col_defs = []
                             for col_name, data_type, is_nullable, char_len in cols_info:
                                 mysql_type = postgres_to_mysql_type(data_type, char_len)
+                                null_def = "NULL" if is_nullable == "YES" else "NOT NULL"
+                                col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
+                            create_query = f"CREATE TABLE `{new_table_name}` (\n  " + ",\n  ".join(col_defs) + "\n)"
+                        elif db_type == "mssql":
+                            source_cursor.execute("""
+                                SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, CHARACTER_MAXIMUM_LENGTH
+                                FROM INFORMATION_SCHEMA.COLUMNS
+                                WHERE TABLE_NAME = %s AND TABLE_SCHEMA = %s
+                                ORDER BY ORDINAL_POSITION
+                            """, (table_name, active_schema))
+                            cols_info = source_cursor.fetchall()
+                            col_defs = []
+                            for col_name, data_type, is_nullable, char_len in cols_info:
+                                mysql_type = mssql_to_mysql_type(data_type, char_len)
                                 null_def = "NULL" if is_nullable == "YES" else "NOT NULL"
                                 col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                             create_query = f"CREATE TABLE `{new_table_name}` (\n  " + ",\n  ".join(col_defs) + "\n)"
@@ -688,8 +788,12 @@ def sync_external_database(user_id, connection_id, session_id):
         raise e
 
     finally:
-        source_conn.close()
-        target_conn.close()
+        if 'source_conn' in locals() and source_conn:
+            try: source_conn.close()
+            except: pass
+        if 'target_conn' in locals() and target_conn:
+            try: target_conn.close()
+            except: pass
 
     return {
         "summary": {
@@ -892,6 +996,12 @@ def apply_external_sync(user_id, connection_id, session_id, table):
             database=external_db["database"]
         )
         source_conn.autocommit = True
+    elif db_type == "mssql":
+        import pyodbc
+        port_val = external_db.get("port")
+        port_str = f",{port_val}" if port_val else ""
+        conn_str = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={external_db['host']}{port_str};DATABASE={external_db['database']};UID={external_db['username']};PWD={external_db['password']}"
+        source_conn = pyodbc.connect(conn_str, autocommit=True)
     else:
         source_conn = pymysql.connect(
             host=external_db["host"],
@@ -943,6 +1053,20 @@ def apply_external_sync(user_id, connection_id, session_id, table):
                     col_defs = []
                     for col_name, data_type, is_nullable, char_len in cols_info:
                         mysql_type = postgres_to_mysql_type(data_type, char_len)
+                        null_def = "NULL" if is_nullable == "YES" else "NOT NULL"
+                        col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
+                    create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
+                elif db_type == "mssql":
+                    source_cursor.execute("""
+                        SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, CHARACTER_MAXIMUM_LENGTH
+                        FROM INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_NAME = %s AND TABLE_SCHEMA = %s
+                        ORDER BY ORDINAL_POSITION
+                    """, (original_table, active_schema))
+                    cols_info = source_cursor.fetchall()
+                    col_defs = []
+                    for col_name, data_type, is_nullable, char_len in cols_info:
+                        mysql_type = mssql_to_mysql_type(data_type, char_len)
                         null_def = "NULL" if is_nullable == "YES" else "NOT NULL"
                         col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                     create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
@@ -1004,8 +1128,12 @@ def apply_external_sync(user_id, connection_id, session_id, table):
                     target_cursor.executemany(insert_query, cleaned_rows)
 
     finally:
-        source_conn.close()
-        target_conn.close()
+        if 'source_conn' in locals() and source_conn:
+            try: source_conn.close()
+            except: pass
+        if 'target_conn' in locals() and target_conn:
+            try: target_conn.close()
+            except: pass
 
 def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action):
     """
@@ -1174,6 +1302,12 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
             database=external_db["database"]
         )
         source_conn.autocommit = True
+    elif db_type == "mssql":
+        import pyodbc
+        port_val = external_db.get("port")
+        port_str = f",{port_val}" if port_val else ""
+        conn_str = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={external_db['host']}{port_str};DATABASE={external_db['database']};UID={external_db['username']};PWD={external_db['password']}"
+        source_conn = pyodbc.connect(conn_str, autocommit=True)
     else:
         source_conn = pymysql.connect(
             host=external_db["host"],
@@ -1232,6 +1366,20 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                             null_def = "NULL" if is_nullable == "YES" else "NOT NULL"
                             col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                         create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
+                    elif db_type == "mssql":
+                        source_cursor.execute("""
+                            SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, CHARACTER_MAXIMUM_LENGTH
+                            FROM INFORMATION_SCHEMA.COLUMNS
+                            WHERE TABLE_NAME = %s AND TABLE_SCHEMA = %s
+                            ORDER BY ORDINAL_POSITION
+                        """, (original_table, active_schema))
+                        cols_info = source_cursor.fetchall()
+                        col_defs = []
+                        for col_name, data_type, is_nullable, char_len in cols_info:
+                            mysql_type = mssql_to_mysql_type(data_type, char_len)
+                            null_def = "NULL" if is_nullable == "YES" else "NOT NULL"
+                            col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
+                        create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                     else:
                         source_cursor.execute(f"SHOW CREATE TABLE `{original_table}`")
                         create_query = source_cursor.fetchone()[1]
@@ -1272,6 +1420,20 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                             col_defs = []
                             for col_name, data_type, is_nullable, char_len in cols_info:
                                 mysql_type = postgres_to_mysql_type(data_type, char_len)
+                                null_def = "NULL" if is_nullable == "YES" else "NOT NULL"
+                                col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
+                            create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
+                        elif db_type == "mssql":
+                            source_cursor.execute("""
+                                SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, CHARACTER_MAXIMUM_LENGTH
+                                FROM INFORMATION_SCHEMA.COLUMNS
+                                WHERE TABLE_NAME = %s AND TABLE_SCHEMA = %s
+                                ORDER BY ORDINAL_POSITION
+                            """, (original_table, active_schema))
+                            cols_info = source_cursor.fetchall()
+                            col_defs = []
+                            for col_name, data_type, is_nullable, char_len in cols_info:
+                                mysql_type = mssql_to_mysql_type(data_type, char_len)
                                 null_def = "NULL" if is_nullable == "YES" else "NOT NULL"
                                 col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                             create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
@@ -2001,8 +2163,12 @@ def sync_external_database(user_id, connection_id, session_id):
         raise e
 
     finally:
-        source_conn.close()
-        target_conn.close()
+        if 'source_conn' in locals() and source_conn:
+            try: source_conn.close()
+            except: pass
+        if 'target_conn' in locals() and target_conn:
+            try: target_conn.close()
+            except: pass
 
     return {
         "summary": {
@@ -2316,8 +2482,12 @@ def apply_external_sync(user_id, connection_id, session_id, table):
                     target_cursor.executemany(insert_query, cleaned_rows)
 
     finally:
-        source_conn.close()
-        target_conn.close()
+        if 'source_conn' in locals() and source_conn:
+            try: source_conn.close()
+            except: pass
+        if 'target_conn' in locals() and target_conn:
+            try: target_conn.close()
+            except: pass
 
 def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action):
     """
@@ -2629,8 +2799,12 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                             
 
     finally:
-        source_conn.close()
-        target_conn.close()
+        if 'source_conn' in locals() and source_conn:
+            try: source_conn.close()
+            except: pass
+        if 'target_conn' in locals() and target_conn:
+            try: target_conn.close()
+            except: pass
 
         source_conn.close()
         target_conn.close()

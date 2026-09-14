@@ -248,6 +248,7 @@ def import_csv_data(get_db_connection):
         imported_files = []
         unique_tables_info = {}
         force_import_tables = set()  # Track tables that are newly created or empty during this API call
+        created_tables = set() # Track tables created during this session for rollback
 
         # fetch credential
         query = """
@@ -261,12 +262,16 @@ def import_csv_data(get_db_connection):
         """
         
         all_files = []
+        file_to_cid = {}
         for cid in connection_ids:
             cursor.execute(query, (cid, user_id, session_id))
             result = cursor.fetchone()
             if result:
                 credential = json.loads(result["credential"])
-                all_files.extend(credential.get("files", []))
+                cid_files = credential.get("files", [])
+                all_files.extend(cid_files)
+                for f in cid_files:
+                    file_to_cid[f] = cid
                 
         # Remove duplicates while preserving order
         files = list(dict.fromkeys(all_files))
@@ -425,6 +430,7 @@ def import_csv_data(get_db_connection):
                 cols = ", ".join(col_defs)
                 create_query = f"CREATE TABLE IF NOT EXISTS `{table_name}` ({cols})"
                 user_cursor.execute(create_query)
+                created_tables.add(table_name)
                 # Register in schema_map so subsequent files in this batch can match it
                 schema_map[table_name] = set(df.columns)
 
@@ -534,9 +540,48 @@ def import_csv_data(get_db_connection):
         })
 
     except Exception as e:
+        from utils.error_formatter import format_db_error
+        failed_file = locals().get('file', 'CSV data')
+        smart_message = format_db_error(e, failed_file)
+        
+        try:
+            # Rollback any created tables in user_db
+            user_cursor_local = locals().get('user_cursor')
+            created_tables_local = locals().get('created_tables', set())
+            if user_cursor_local and created_tables_local:
+                for t in created_tables_local:
+                    user_cursor_local.execute(f"DROP TABLE IF EXISTS `{t}`")
+        except Exception as rollback_e:
+            print("Failed to rollback tables:", rollback_e)
+            
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # 1. Update connection_history status to 'failed' ONLY for the specific file
+            failed_cid = locals().get('file_to_cid', {}).get(failed_file)
+            
+            if failed_cid:
+                cursor.execute("UPDATE connection_history SET status = 'failed' WHERE id = %s", (failed_cid,))
+            elif connection_ids:
+                format_strings = ','.join(['%s'] * len(connection_ids))
+                cursor.execute(f"UPDATE connection_history SET status = 'failed' WHERE id IN ({format_strings})", tuple(connection_ids))
+                
+            # 2. Insert into error_logs
+            session_id_local = locals().get('session_id')
+            if session_id_local:
+                cursor.execute("""
+                    INSERT INTO error_logs (session_name, module_name, error)
+                    VALUES (%s, %s, %s)
+                """, (session_id_local, 'import_csv_data', smart_message))
+            
+            conn.commit()
+        except Exception as log_e:
+            print("Failed to log error:", log_e)
+
         print("ERROR:", str(e))
         return jsonify({
             "status": "error",
-            "message": str(e)
+            "message": smart_message
         }), 500
 

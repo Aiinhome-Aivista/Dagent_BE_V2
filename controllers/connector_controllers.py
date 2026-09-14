@@ -611,16 +611,36 @@ def create_connector_controllers(get_db_connection):
             if not target_host or str(target_host).strip().lower() == 'none':
                 return jsonify({"status": "error", "message": "Database 'host' is required and cannot be empty or 'None'"}), 400
 
+            # Handle cases where user types host,port or host:port in the host field
+            target_host = str(target_host).strip()
+            if ',' in target_host:
+                parts = target_host.split(',')
+                target_host = parts[0].strip()
+                if len(parts) > 1 and parts[1].strip().isdigit():
+                    data['port'] = int(parts[1].strip())
+            elif ':' in target_host:
+                parts = target_host.split(':')
+                target_host = parts[0].strip()
+                if len(parts) > 1 and parts[1].strip().isdigit():
+                    data['port'] = int(parts[1].strip())
+            
+            # Ensure the cleaned host is saved into the database credential later
+            data['host'] = target_host
+            
+            port_val = data.get('port')
+            port_str = f":{port_val}" if port_val else ""
+
             if db_type == 'mysql':
-                uri = f"mysql+pymysql://{username}:{password}@{target_host}:{data.get('port', 3306)}/{database}"
+                uri = f"mysql+pymysql://{username}:{password}@{target_host}{port_str}/{database}"
             elif db_type == 'mssql':
-                uri = f"mssql+pymssql://{username}:{password}@{target_host}:{data.get('port', 1433)}/{database}"
+                # Switching to pyodbc to bypass FreeTDS TLS limitation
+                uri = f"mssql+pyodbc://{username}:{password}@{target_host}{port_str}/{database}?driver=ODBC+Driver+17+for+SQL+Server"
             elif db_type in ['postgresql', 'postgres']:
                 schema = data.get('schema')
                 if schema:
-                    uri = f"postgresql+psycopg2://{username}:{password}@{target_host}:{data.get('port', 5432)}/{database}?options=-csearch_path%3D{schema}"
+                    uri = f"postgresql+psycopg2://{username}:{password}@{target_host}{port_str}/{database}?options=-csearch_path%3D{schema}"
                 else:
-                    uri = f"postgresql+psycopg2://{username}:{password}@{target_host}:{data.get('port', 5432)}/{database}"
+                    uri = f"postgresql+psycopg2://{username}:{password}@{target_host}{port_str}/{database}"
             else:
                 return jsonify({"status": "error", "message": f"Unsupported connection type: {db_type}"}), 400
 
@@ -733,10 +753,7 @@ def get_connection_history_controller(get_db_connection):
             SELECT ch.*, dc.connection_id, dc.credential
             FROM connection_history ch
             LEFT JOIN database_credential dc 
-              ON ch.user_id = dc.user_id 
-             AND ch.db_type = dc.db_type 
-             AND ch.session_id = dc.session_id
-             AND ch.created_at = dc.created_at  
+              ON ch.id = dc.connection_id 
             WHERE ch.session_id = %s 
         """
         cursor.execute(query_conn, (session_id,))
@@ -822,7 +839,7 @@ def get_connection_history_controller(get_db_connection):
                     extracted_topic = cred_dict.get('topic', "")
                     
                     # IF it's a CSV or Doc upload, dig into the JSON to find the actual file names
-                    if row['db_type'] in ['csv_upload', 'doc_upload']:
+                    if row['db_type'] in ['csv_upload', 'doc_upload', 'csv_chunk_upload', 'doc_chunk_upload']:
                         # Look for common keys your upload function might have saved them under
                         files = cred_dict.get('files', []) or cred_dict.get('file_names', []) or cred_dict.get('file', '')
                         
@@ -842,7 +859,7 @@ def get_connection_history_controller(get_db_connection):
                 "connectionName": display_name,     # Outputs: "sales_data.csv, users.csv"
                 "db_type": row['db_type'],
                 "topic": extracted_topic,
-                "status": "completed"
+                "status": row.get('status') or "completed"
             })
 
 
@@ -970,12 +987,10 @@ def get_workspace_history_controller(get_db_connection):
         cursor = db_conn.cursor(dictionary=True) 
         
         query_conn = """
-            SELECT ch.*, dc.connection_id
+            SELECT ch.*, dc.connection_id, dc.credential
             FROM connection_history ch
             LEFT JOIN database_credential dc 
-              ON ch.user_id = dc.user_id 
-             AND ch.db_type = dc.db_type 
-             AND ch.created_at = dc.created_at
+              ON ch.id = dc.connection_id
             WHERE ch.session_id = %s
             ORDER BY ch.created_at DESC
         """
@@ -1018,12 +1033,27 @@ def get_workspace_history_controller(get_db_connection):
             date_str = row['created_at'].strftime("%Y-%m-%dT%H:%M:%SZ") if row['created_at'] else ""
             exact_id = str(row['connection_id']) if row.get('connection_id') else f"h{row['id']}"
 
+            display_name = row['connection_name']
+            
+            if row['db_type'] in ['csv_upload', 'csv_chunk_upload', 'sql_upload']:
+                if row.get('credential'):
+                    import json
+                    try:
+                        cred_dict = json.loads(row['credential'])
+                        files = cred_dict.get('files', []) or cred_dict.get('file_names', []) or cred_dict.get('file', '')
+                        if isinstance(files, list) and len(files) > 0:
+                            display_name = ", ".join(files)
+                        elif isinstance(files, str) and files.strip() != "":
+                            display_name = files
+                    except:
+                        pass
+
             if row['db_type'] in ['web_search', 'google_sheets']:
-                action_str = f"Configured {row['connection_name']}" 
+                action_str = f"Configured {display_name}" 
             elif row['db_type'] in ['csv_upload', 'csv_chunk_upload', 'sql_upload']:
-                action_str = f"Uploaded {row['connection_name']}"
+                action_str = f"Uploaded {display_name}"
             else:
-                action_str = f"Connected to {row['connection_name']}"
+                action_str = f"Connected to {display_name}"
 
             history_item = {
                 "id": exact_id,  
@@ -1031,8 +1061,9 @@ def get_workspace_history_controller(get_db_connection):
                 "date": date_str,
                 "action": action_str,
                 "details": details,
-                "connectionName": row['connection_name'],
-                "status": "completed"
+                "connectionName": display_name,
+                "status": row.get('status') or "completed",
+                "db_type": row['db_type']
             }
             
             if row['db_type'] == 'web_search':

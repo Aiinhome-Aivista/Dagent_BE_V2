@@ -174,8 +174,30 @@ def import_sql_data(get_db_connection):
         })
 
     except Exception as e:
+        from utils.error_formatter import format_db_error
+        failed_file = locals().get('file', 'SQL data')
+        smart_message = format_db_error(e, failed_file)
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # 1. Update connection_history status to 'failed'
+            if connection_id:
+                cursor.execute("UPDATE connection_history SET status = 'failed' WHERE id = %s", (connection_id,))
+                
+            # 2. Insert into error_logs
+            cursor.execute("""
+                INSERT INTO error_logs (session_name, module_name, error)
+                VALUES (%s, %s, %s)
+            """, (session_id, 'import_sql_data', smart_message))
+            
+            conn.commit()
+        except Exception as log_e:
+            print("Failed to log error:", log_e)
+
         print("ERROR:", str(e))
         return jsonify({
             "status": "error",
-            "message": str(e)
+            "message": smart_message
         }), 500
