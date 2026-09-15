@@ -770,7 +770,7 @@ DROP INDEX chat_id
 # CHAT_ID MANAGER
 # ══════════════════════════════════════════════════
 
-def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id, force_new=False):
+def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id, force_new=False, visit_number=None):
     """
     CASE A — source_chat_id আছে + same day → same chat_id continue
     CASE B — source_chat_id আছে + different day → new chat_id + copy source history
@@ -786,6 +786,22 @@ def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id, force_new=Fals
         cur  = conn.cursor(dictionary=True)
         cur.execute(_HISTORY_TABLE_SQL)
         today = date.today()
+
+        if force_new:
+            new_id = uuid.uuid4().hex[:32]
+            print(f"[ChatID] force_new=True → brand new {new_id[:8]}...")
+            return new_id, True
+
+        if visit_number:
+            cur.execute("""
+                SELECT chat_id FROM session_chat_history
+                WHERE session_id = %s AND user_id = %s AND visit_number = %s
+                ORDER BY id DESC LIMIT 1
+            """, (session_id, int(user_id), int(visit_number)))
+            v_row = cur.fetchone()
+            if v_row and v_row["chat_id"]:
+                print(f"[ChatID] Found by visit_number {visit_number} → {v_row['chat_id'][:8]}...")
+                return v_row["chat_id"], False
 
         if source_chat_id:
             cur.execute("""
@@ -838,7 +854,7 @@ def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id, force_new=Fals
             """, (session_id, int(user_id), today.isoformat()))
             today_row = cur.fetchone()
 
-            if today_row:
+            if today_row and today_row.get("chat_id"):
                 print(f"[ChatID] CASE C today exists → {today_row['chat_id'][:8]}...")
                 return today_row["chat_id"], False
 
@@ -882,7 +898,14 @@ def _save_history(get_fn, session_id, user_id, question, answer,
             visit  = last["visit_number"] + (1 if new_v else 0)
             local  = 0 if new_v else last["local_turn_index"] + 1
         else:
-            turn = visit = local = 0
+            turn = local = 0
+            cur.execute("""
+                SELECT COALESCE(MAX(visit_number), 0) AS max_v
+                FROM session_chat_history
+                WHERE session_id = %s AND user_id = %s
+            """, (session_id, int(user_id)))
+            max_v_row = cur.fetchone()
+            visit = (max_v_row["max_v"] + 1) if max_v_row else 1
 
         cur.execute("""
             INSERT INTO session_chat_history
@@ -902,6 +925,7 @@ def _save_history(get_fn, session_id, user_id, question, answer,
     finally:
         if cur:  cur.close()
         if conn: conn.close()
+    return visit
 
 # ══════════════════════════════════════════════════
 # SYSTEM PROMPT
@@ -1712,12 +1736,32 @@ def session_rag_chat_controller(get_connection_func):
         return jsonify({"status":"failed","statusCode":400,
                         "message":"session_id is required"}), 400
 
+    # --- FIX: Frontend might pass chat_id as session_id when navigating ---
+    try:
+        conn_fix = get_connection_func()
+        cur_fix = conn_fix.cursor(dictionary=True)
+        cur_fix.execute("SELECT id FROM workspaces WHERE session_id = %s", (session_id,))
+        if not cur_fix.fetchone():
+            cur_fix.execute("SELECT session_id FROM session_chat_history WHERE chat_id = %s LIMIT 1", (session_id,))
+            hr = cur_fix.fetchone()
+            if hr and hr.get("session_id"):
+                if not source_chat_id:
+                    source_chat_id = session_id
+                session_id = hr["session_id"]
+    except Exception:
+        pass
+    finally:
+        if 'cur_fix' in locals() and cur_fix: cur_fix.close()
+        if 'conn_fix' in locals() and conn_fix: conn_fix.close()
+    # ----------------------------------------------------------------------
+
     # ── Resolve active chat_id ──────────────────────────────────
     active_chat_id = None
-    force_new = data.get("is_new_query") is True
+    # Support both bool and string representations
+    force_new = str(data.get("is_new_query")).lower() == "true"
     if user_id:
         active_chat_id, _ = _resolve_chat_id(
-            get_connection_func, session_id, user_id, source_chat_id, force_new
+            get_connection_func, session_id, user_id, source_chat_id, force_new, visit_number
         )
 
     workspace_id = None
@@ -2498,7 +2542,7 @@ Return ONLY:
             return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
         _advance_turn(session_id)
         fuq = res.get("follow_up_questions",[])
-        _save_history(get_connection_func, session_id, user_id,
+        actual_visit = _save_history(get_connection_func, session_id, user_id,
                       question, json.dumps(res.get("datasets",[])), fuq, understanding["intent"], "graph",
                       login_token=login_token, chat_id=active_chat_id)
         return jsonify({
@@ -2512,7 +2556,8 @@ Return ONLY:
                 "source_note": res.get("source_note","")
             },
             "follow_up_questions": fuq,
-            "chat_id": active_chat_id
+            "chat_id": active_chat_id,
+            "visit_number": actual_visit
         }), 200
 
     # Report
@@ -2550,7 +2595,7 @@ Return ONLY:
             return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
         _advance_turn(session_id)
         fuq = res.get("follow_up_questions",[])
-        _save_history(get_connection_func, session_id, user_id,
+        actual_visit = _save_history(get_connection_func, session_id, user_id,
                       question, res.get("report_title",""), fuq, understanding["intent"], "report",
                       login_token=login_token, chat_id=active_chat_id)
         return jsonify({
@@ -2562,7 +2607,8 @@ Return ONLY:
                 "key_findings": res.get("key_findings",[])
             },
             "follow_up_questions": fuq,
-            "chat_id": active_chat_id
+            "chat_id": active_chat_id,
+            "visit_number": actual_visit
         }), 200
 
     # Answer
@@ -2656,7 +2702,7 @@ Return ONLY:
         visualizations = [v for v in visualizations if v.get("type") == "table"]
 
     _advance_turn(session_id)
-    _save_history(get_connection_func, session_id, user_id,
+    actual_visit = _save_history(get_connection_func, session_id, user_id,
                   question, clean_answer, fuq, understanding["intent"], "answer",
                   login_token=login_token, visualizations=visualizations,
                   chat_id=active_chat_id)
@@ -2667,7 +2713,8 @@ Return ONLY:
         "answer":              clean_answer,
         "follow_up_questions": fuq,
         "visualizations": visualizations,
-        "visit_number": visit_number
+        "chat_id": active_chat_id,
+        "visit_number": actual_visit
     }), 200
 
 

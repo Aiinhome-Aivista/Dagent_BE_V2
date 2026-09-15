@@ -347,6 +347,9 @@ def import_csv_data(get_db_connection):
 
             matched_table = None
             expected_table_name = file.replace(".csv", "").strip().lower()
+            import re
+            # Remove trailing file duplicate suffixes like ' (1)' or ' (1) (1)'
+            expected_table_name = re.sub(r'(\s*\(\d+\))+$', '', expected_table_name)
             
             # Step 1: Priority check for exact table name match (case-insensitive)
             target_table_candidate = next((t for t in schema_map if t.lower() == expected_table_name), None)
