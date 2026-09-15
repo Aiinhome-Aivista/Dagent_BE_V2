@@ -532,7 +532,7 @@ def sync_external_database(user_id, connection_id, session_id):
         import pyodbc
         port_val = external_db.get("port")
         port_str = f",{port_val}" if port_val else ""
-        conn_str = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={external_db['host']}{port_str};DATABASE={external_db['database']};UID={external_db['username']};PWD={external_db['password']}"
+        conn_str = f"DRIVER={{FreeTDS}};SERVER={external_db['host']};PORT={external_db.get('port') or 1433};DATABASE={external_db['database']};UID={external_db['username']};PWD={external_db['password']};TDS_Version=7.4;Encrypt=no;TrustServerCertificate=yes"
         source_conn = pyodbc.connect(conn_str, autocommit=True)
     else:
         source_conn = pymysql.connect(
@@ -1012,7 +1012,7 @@ def apply_external_sync(user_id, connection_id, session_id, table):
         import pyodbc
         port_val = external_db.get("port")
         port_str = f",{port_val}" if port_val else ""
-        conn_str = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={external_db['host']}{port_str};DATABASE={external_db['database']};UID={external_db['username']};PWD={external_db['password']}"
+        conn_str = f"DRIVER={{FreeTDS}};SERVER={external_db['host']};PORT={external_db.get('port') or 1433};DATABASE={external_db['database']};UID={external_db['username']};PWD={external_db['password']};TDS_Version=7.4;Encrypt=no;TrustServerCertificate=yes"
         source_conn = pyodbc.connect(conn_str, autocommit=True)
     else:
         source_conn = pymysql.connect(
@@ -1318,7 +1318,7 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
         import pyodbc
         port_val = external_db.get("port")
         port_str = f",{port_val}" if port_val else ""
-        conn_str = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={external_db['host']}{port_str};DATABASE={external_db['database']};UID={external_db['username']};PWD={external_db['password']}"
+        conn_str = f"DRIVER={{FreeTDS}};SERVER={external_db['host']};PORT={external_db.get('port') or 1433};DATABASE={external_db['database']};UID={external_db['username']};PWD={external_db['password']};TDS_Version=7.4;Encrypt=no;TrustServerCertificate=yes"
         source_conn = pyodbc.connect(conn_str, autocommit=True)
     else:
         source_conn = pymysql.connect(

@@ -256,6 +256,7 @@ def import_csv_data(get_db_connection):
 
         imported_files = []
         unique_tables_info = {}
+        total_data_size_bytes = 0  # To track exact file size in bytes
         force_import_tables = set()  # Track tables that are newly created or empty during this API call
         created_tables = set() # Track tables created during this session for rollback
 
@@ -338,13 +339,24 @@ def import_csv_data(get_db_connection):
                 continue
 
             file_path = os.path.join(UPLOAD_DIR, matched_file)
+            file_size_bytes = os.path.getsize(file_path)
+            
             df = pd.read_csv(file_path, encoding="utf-8-sig", dtype=str)
 
             if df.empty:
                 continue
 
-            # Standardize column names: strip whitespace, replace spaces/dots with underscores, and convert to lowercase
-            df.columns = df.columns.str.strip().str.replace(" ", "_").str.replace(".", "_", regex=False).str.lower()
+            # 1. Drop completely empty rows
+            df = df.dropna(how='all')
+
+            # 2. Standardize column names: strip whitespace, replace spaces/dots/hyphens with underscores, and convert to lowercase
+            df.columns = df.columns.str.strip().str.replace(" ", "_").str.replace(".", "_", regex=False).str.replace("-", "_", regex=False).str.lower()
+            
+            # 3. Drop Unnamed/empty columns
+            df = df.loc[:, ~df.columns.str.contains('^unnamed', na=False)]
+            
+            # 4. Strip leading/trailing spaces from string data
+            df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
             
             # Infer schema and apply data types using csv_processor
             schema = _infer_schema(df.head(50000))
@@ -359,6 +371,8 @@ def import_csv_data(get_db_connection):
             import re
             # Remove trailing file duplicate suffixes like ' (1)' or ' (1) (1)'
             expected_table_name = re.sub(r'(\s*\(\d+\))+$', '', expected_table_name)
+            # Standardize table name: replace spaces, dots, and hyphens with underscores
+            expected_table_name = expected_table_name.replace(" ", "_").replace("-", "_").replace(".", "_")
             
             # Step 1: Priority check for exact table name match (case-insensitive)
             target_table_candidate = next((t for t in schema_map if t.lower() == expected_table_name), None)
@@ -486,6 +500,9 @@ def import_csv_data(get_db_connection):
                 # 5. Drop Temporary Table
                 user_cursor.execute(f"DROP TEMPORARY TABLE `{temp_table_name}`")
 
+            if not already_imported:
+                total_data_size_bytes += file_size_bytes
+                
             # 6. Get actual total rows in the table for reporting
             user_cursor.execute(f"SELECT COUNT(*) as cnt FROM `{table_name}`")
             table_total_rows = user_cursor.fetchone()['cnt']
@@ -498,7 +515,7 @@ def import_csv_data(get_db_connection):
             }
 
             if not already_imported:
-                table_data_size_mb = round((table_total_rows * 200) / (1024 * 1024), 2)
+                table_data_size_mb = round(file_size_bytes / (1024 * 1024), 6)
                 log_query = """
                 INSERT INTO external_db_sync_log
                 (user_id,username,external_database,table_name,
@@ -517,8 +534,8 @@ def import_csv_data(get_db_connection):
         total_rows = sum(t["rows"] for t in affected_tables_info)
         total_columns = sum(t["columns"] for t in affected_tables_info)
 
-        # Calculate approximate data size
-        data_size_mb = round((total_rows * 200) / (1024 * 1024), 2)  # Rough estimate
+        # Calculate exact data size based on actual files
+        data_size_mb = round(total_data_size_bytes / (1024 * 1024), 6)
 
         # Update (never recreate) the workspace's Knowledge Graph now that this
         # credential-based import has written into it. build_kgraph() itself
@@ -544,7 +561,8 @@ def import_csv_data(get_db_connection):
                 "summary": {
                     "total_rows": total_rows,
                     "total_columns": total_columns,
-                    "data_size_mb": max(data_size_mb, 0.01),
+                    "data_size_bytes": total_data_size_bytes,
+                    "data_size_mb": data_size_mb,
                     "last_sync": "Just now"
                 },
                 "tables": affected_tables_info
