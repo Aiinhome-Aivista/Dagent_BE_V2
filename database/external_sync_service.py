@@ -418,8 +418,8 @@ def sync_external_database(user_id, connection_id, session_id):
             for summary in table_summary:
                 cursor.execute(f"""
                     INSERT INTO `{MYSQL_CONFIG["database"]}`.external_db_sync_log
-                    (user_id, new_user_db, username, external_database, table_name, action_type, rows_affected, session_id)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    (user_id, new_user_db, username, external_database, table_name, action_type, rows_affected, session_id, total_rows, total_columns, data_size_mb)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """, (
                     user_id,
                     user_db_name,
@@ -428,7 +428,11 @@ def sync_external_database(user_id, connection_id, session_id):
                     summary["table"],
                     "NEW_TABLE",
                     summary["rows"],
-                    session_id
+                    session_id,
+                    summary["rows"],
+                    summary["columns"],
+                    round((summary["rows"] * summary["columns"] * 8) / (1024 * 1024), 4) # fallback for single table
+
                 ))
             log_conn.commit()
         log_conn.close()
@@ -757,7 +761,15 @@ def sync_external_database(user_id, connection_id, session_id):
                                 "buttons": ["Yes", "No"]
                             })
 
-            data_size_mb = round((total_rows * total_columns * 8) / (1024 * 1024), 2)
+            # Get actual data size in bytes for the imported tables from information_schema
+            target_cursor.execute(f"""
+                SELECT SUM(data_length + index_length) 
+                FROM information_schema.tables 
+                WHERE table_schema = '{new_user_db}'
+            """)
+            actual_size = target_cursor.fetchone()[0] or 0
+            data_size_mb = round(actual_size / (1024 * 1024), 4)
+
 
             # Enable FK
             target_cursor.execute("SET FOREIGN_KEY_CHECKS=1")
@@ -2132,7 +2144,15 @@ def sync_external_database(user_id, connection_id, session_id):
                                 "buttons": ["Yes", "No"]
                             })
 
-            data_size_mb = round((total_rows * total_columns * 8) / (1024 * 1024), 2)
+            # Get actual data size in bytes for the imported tables from information_schema
+            target_cursor.execute(f"""
+                SELECT SUM(data_length + index_length) 
+                FROM information_schema.tables 
+                WHERE table_schema = '{new_user_db}'
+            """)
+            actual_size = target_cursor.fetchone()[0] or 0
+            data_size_mb = round(actual_size / (1024 * 1024), 4)
+
 
             # Enable FK
             target_cursor.execute("SET FOREIGN_KEY_CHECKS=1")

@@ -1340,6 +1340,29 @@ def create_user_controller(get_db_connection):
                 "message": "Access denied. Only admin can create users."
             }), 403
 
+        # --- 1.5 CHECK COMPANY USER LIMIT ---
+        if company_id:
+            cursor.execute('''
+                SELECT c.plan_type, p.number_of_users, 
+                       (SELECT COUNT(*) FROM users WHERE company_id = %s) as current_users
+                FROM companies c
+                LEFT JOIN pricing_plans p ON c.plan_type = p.plan_name
+                WHERE c.id = %s
+            ''', (company_id, company_id))
+            company_data = cursor.fetchone()
+            
+            if company_data and company_data['number_of_users'] is not None:
+                limit = company_data['number_of_users']
+                current_users = company_data['current_users']
+                
+                # -1 or 0 means unlimited
+                if limit != -1 and limit != 0 and current_users >= limit:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"User limit reached for the active plan ({limit} users max). Please upgrade to add more users."
+                    }), 403
+
+
         # --- 2. CHECK EMAIL DUPLICATE ---
         cursor.execute(
             "SELECT id FROM users WHERE email = %s",
@@ -1511,6 +1534,9 @@ def delete_connection_history_controller(get_db_connection):
         # Delete credential and connection history
         cursor.execute("DELETE FROM database_credential WHERE connection_id = %s", (item_id,))
         cursor.execute("DELETE FROM connection_history WHERE id = %s", (item_id,))
+        
+        # Reset unstructured docs quota for this session
+        cursor.execute("DELETE FROM unstructured_docs WHERE session_name = %s", (session_id,))
         
         db_conn.commit()
         return jsonify({"status": "success", "message": "Connection and associated tables deleted successfully."}), 200

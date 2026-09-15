@@ -789,6 +789,11 @@ def update_pricing(plan_id):
 def delete_pricing(plan_id):
     return delete_pricing_controller(plan_id)
 
+@app.route("/api/user/usage-stats", methods=["GET"])
+def get_user_usage_stats():
+    from controllers.pricing_controller import get_user_usage_stats_controller
+    return get_user_usage_stats_controller()
+
 # ==========================================
 # Company API
 # ==========================================
@@ -903,6 +908,8 @@ def export_domestic_sales_preview():
 # ==========================================
 # Scheduled Reports API
 # ==========================================
+from controllers.pricing_controller import cleanup_audit_memory_chats
+
 @app.route("/api/scheduled-reports", methods=["GET"])
 def get_scheduled_reports():
     return get_schedules_controller()
@@ -929,6 +936,10 @@ if __name__ == '__main__':
     # Start APScheduler
     scheduler = BackgroundScheduler()
     scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
+    
+    # Run the chat cleanup job every day at midnight
+    scheduler.add_job(func=cleanup_audit_memory_chats, trigger="cron", hour=0, minute=0)
+    
     scheduler.start()
 
 
