@@ -634,7 +634,7 @@ def create_connector_controllers(get_db_connection):
                 uri = f"mysql+pymysql://{username}:{password}@{target_host}{port_str}/{database}"
             elif db_type == 'mssql':
                 # Switching to pyodbc to bypass FreeTDS TLS limitation
-                uri = f"mssql+pyodbc://{username}:{password}@{target_host}{port_str}/{database}?driver=ODBC+Driver+17+for+SQL+Server"
+                uri = f"mssql+pyodbc://{username}:{password}@{target_host}{port_str}/{database}?driver=FreeTDS&tds_version=7.4&Encrypt=no&TrustServerCertificate=yes"
             elif db_type in ['postgresql', 'postgres']:
                 schema = data.get('schema')
                 if schema:
