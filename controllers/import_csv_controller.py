@@ -241,6 +241,15 @@ def import_csv_data(get_db_connection):
     if not user_id or not connection_ids or not session_id:
         return jsonify({"error": "Missing parameters"}), 400
 
+    from controllers.pricing_controller import get_usage_and_limits
+    usage_res = get_usage_and_limits(user_id)
+    if usage_res.get('status') == 'success':
+        uploads_metric = usage_res['usage_stats']['metrics']['uploads']
+        used = uploads_metric['used']
+        total = uploads_metric['total']
+        if total != -1 and used >= total:
+            return jsonify({"status": "error", "message": "Daily upload limit exceeded based on your active plan."}), 403
+
     try:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)

@@ -162,14 +162,10 @@ def delete_pricing_controller(plan_id):
     else:
         return jsonify({"status": "error", "message": "Failed to delete pricing plan"}), 500
 
-def get_user_usage_stats_controller():
-    user_id = request.args.get('user_id')
-    if not user_id:
-        return jsonify({'status': 'error', 'message': 'user_id is required'}), 400
-    
+def get_usage_and_limits(user_id):
     conn = get_db_connection()
     if not conn:
-        return jsonify({'status': 'error', 'message': 'Database connection error'}), 500
+        return {'status': 'error', 'message': 'Database connection error'}
         
     try:
         cursor = conn.cursor(dictionary=True)
@@ -183,7 +179,7 @@ def get_user_usage_stats_controller():
         user_record = cursor.fetchone()
         
         if not user_record or not user_record.get('plan_type'):
-            return jsonify({'status': 'error', 'message': 'No active plan found'}), 404
+            return {'status': 'error', 'message': 'No active plan found'}
             
         plan_name = user_record['plan_type']
         
@@ -192,7 +188,7 @@ def get_user_usage_stats_controller():
         plan = cursor.fetchone()
         
         if not plan:
-            return jsonify({'status': 'error', 'message': 'Plan details not found'}), 404
+            return {'status': 'error', 'message': 'Plan details not found'}
             
         # 3. Calculate usage
         # 3.1 Uploads today (Count by Batch/Action based on upload minute)
@@ -223,7 +219,7 @@ def get_user_usage_stats_controller():
         db_size_record = cursor.fetchone()
         db_storage_used = db_size_record['total_db_size'] if db_size_record and db_size_record['total_db_size'] else 0.00
         
-        return jsonify({
+        return {
             'status': 'success',
             'usage_stats': {
                 'company_name': user_record['company_name'],
@@ -245,14 +241,26 @@ def get_user_usage_stats_controller():
                     }
                 }
             }
-        }), 200
+        }
         
     except Exception as e:
         print(f'Error fetching usage stats: {e}')
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return {'status': 'error', 'message': str(e)}
     finally:
         cursor.close()
         conn.close()
+
+def get_user_usage_stats_controller():
+    user_id = request.args.get('user_id')
+    if not user_id:
+        return jsonify({'status': 'error', 'message': 'user_id is required'}), 400
+    
+    result = get_usage_and_limits(user_id)
+    if result.get('status') == 'error':
+        status_code = 500 if 'Database' in result['message'] or 'Error' in result['message'] else 404
+        return jsonify(result), status_code
+        
+    return jsonify(result), 200
 
 def cleanup_audit_memory_chats():
     """

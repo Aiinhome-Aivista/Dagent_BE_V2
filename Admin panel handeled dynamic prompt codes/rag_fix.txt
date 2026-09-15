@@ -1009,6 +1009,16 @@ def session_rag_chat_controller(get_connection_func):
         return jsonify({"status":"failed","statusCode":400,
                         "message":"session_id is required"}), 400
 
+    if user_id:
+        from controllers.pricing_controller import get_usage_and_limits
+        usage_res = get_usage_and_limits(user_id)
+        if usage_res.get('status') == 'success':
+            queries_metric = usage_res['usage_stats']['metrics']['queries']
+            used = queries_metric['used']
+            total = queries_metric['total']
+            if total != -1 and used >= total:
+                return jsonify({"status": "error", "message": "Daily query limit exceeded based on your active plan."}), 403
+
     # --- FIX: Frontend might pass chat_id as session_id when navigating ---
     try:
         conn_fix = get_connection_func()
