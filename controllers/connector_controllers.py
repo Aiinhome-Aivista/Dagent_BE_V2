@@ -847,6 +847,11 @@ def get_connection_history_controller(get_db_connection):
                             display_name = ", ".join(files) # Joins multiple files like: "data1.csv, data2.csv"
                         elif isinstance(files, str) and files.strip() != "":
                             display_name = files
+                    else:
+                        db_name = cred_dict.get('database') or cred_dict.get('database_name')
+                        if db_name:
+                            display_name = db_name
+                            action_str = f"Connected to {db_name}"
                 except:
                     pass
 
