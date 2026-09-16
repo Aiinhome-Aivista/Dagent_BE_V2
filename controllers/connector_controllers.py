@@ -16,6 +16,7 @@ from database.user_db_service import create_workspace_database, create_workspace
 from helper.workspace_wise_store_procedures import run_stored_procedures
 # This stores active engines in memory for the agent to use
 active_connectors = {}
+active_ssh_tunnels = {}
 
 
 # =========================================================
@@ -529,9 +530,8 @@ def create_connector_controllers(get_db_connection):
     if not conn_name and db_type == 'web_search':
         conn_name = f"Search Agent: {topic}"
         
-    username = data.get('username')
-    raw_password = data.get('password', '')
-    password = quote_plus(raw_password) 
+    username = data.get('username', '').strip() if data.get('username') else ''
+    password = data.get('password', '').strip() if data.get('password') else ''
     database = data.get('database')
     target_host = data.get('host') or data.get('account') 
     
@@ -626,30 +626,135 @@ def create_connector_controllers(get_db_connection):
             
             # Ensure the cleaned host is saved into the database credential later
             data['host'] = target_host
-            
             port_val = data.get('port')
             port_str = f":{port_val}" if port_val else ""
+            
+            safe_password = quote_plus(password)
+            
+            from sqlalchemy.engine.url import URL
 
             if db_type == 'mysql':
-                uri = f"mysql+pymysql://{username}:{password}@{target_host}{port_str}/{database}"
+                connect_args = {'connect_timeout': 5}
+                
+                import pymysql
+                uri = "mysql+pymysql://"
+                engine = create_engine(
+                    uri, 
+                    creator=lambda: pymysql.connect(
+                        host=target_host,
+                        port=int(port_val) if port_val else 3306,
+                        user=username,
+                        password=password,
+                        database=database,
+                        connect_timeout=5
+                    )
+                )
+                tunnel = None
+                try:
+                    with engine.connect() as conn:
+                        conn.execute(text("SELECT 1"))
+                except Exception as direct_e:
+                    ssh_host = data.get('ssh_host')
+                    if ssh_host:
+                        ssh_port = int(data.get('ssh_port', 22))
+                        ssh_username = data.get('ssh_username')
+                        ssh_password = data.get('ssh_password')
+                        ssh_key_file = data.get('ssh_key_file')
+                        remote_mysql_host = data.get('remote_mysql_host', target_host)
+                        remote_mysql_port = int(data.get('remote_mysql_port', port_val or 3306))
+
+                        from sshtunnel import SSHTunnelForwarder
+                        tunnel = SSHTunnelForwarder(
+                            (ssh_host, ssh_port),
+                            ssh_username=ssh_username,
+                            ssh_password=ssh_password,
+                            ssh_pkey=ssh_key_file,
+                            remote_bind_address=(remote_mysql_host, remote_mysql_port)
+                        )
+                        tunnel.start()
+
+                        import pymysql
+                        import ssl
+                        
+                        def safe_mysql_connect(db_name=None):
+                            # First try with SSL
+                            ssl_ctx = ssl.create_default_context()
+                            ssl_ctx.check_hostname = False
+                            ssl_ctx.verify_mode = ssl.CERT_NONE
+                            
+                            conn_args = {
+                                'host': "127.0.0.1",
+                                'port': tunnel.local_bind_port,
+                                'user': username,
+                                'password': password,
+                                'charset': 'utf8mb4',
+                                'ssl': ssl_ctx
+                            }
+                            if db_name:
+                                conn_args['database'] = db_name
+                                
+                            try:
+                                return pymysql.connect(**conn_args)
+                            except pymysql.err.OperationalError as e:
+                                # If server doesn't support SSL, retry without SSL
+                                if e.args[0] == 2026 or 'SSL' in str(e):
+                                    conn_args.pop('ssl')
+                                    return pymysql.connect(**conn_args)
+                                safe_args = {k: v for k, v in conn_args.items() if k != 'password' and k != 'ssl'}
+                                safe_args['password_length'] = len(conn_args.get('password', ''))
+                                safe_args['has_ssl'] = 'ssl' in conn_args
+                                raise Exception(f"{str(e)} | DEBUG ARGS: {safe_args}")
+                        
+                        def try_tunnel_connect():
+                            try:
+                                conn = safe_mysql_connect(db_name=database)
+                                conn.close()
+                                return None
+                            except Exception as e:
+                                try:
+                                    conn2 = safe_mysql_connect()
+                                    conn2.close()
+                                    return f"Authentication SUCCEEDED, but you don't have access to the database '{database}'. Check MySQL privileges for user '{username}' on database '{database}'."
+                                except Exception as e2:
+                                    return str(e)
+                        
+                        err_msg = try_tunnel_connect()
+                        if err_msg:
+                            raise Exception(err_msg)
+                            
+                        # If successful, continue as normal
+                        tunnel_uri = "mysql+pymysql://"
+                        
+                        engine = create_engine(
+                            tunnel_uri,
+                            creator=lambda: safe_mysql_connect(db_name=database)
+                        )
+                        with engine.connect() as conn:
+                            conn.execute(text("SELECT 1"))
+                    else:
+                        raise direct_e
             elif db_type == 'mssql':
                 # Switching to pyodbc to bypass FreeTDS TLS limitation
-                uri = f"mssql+pyodbc://{username}:{password}@{target_host}{port_str}/{database}?driver=FreeTDS&tds_version=7.4&Encrypt=no&TrustServerCertificate=yes"
+                uri = f"mssql+pyodbc://{username}:{safe_password}@{target_host}{port_str}/{database}?driver=FreeTDS&tds_version=7.4&Encrypt=no&TrustServerCertificate=yes"
+                engine = create_engine(uri)
+                with engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
             elif db_type in ['postgresql', 'postgres']:
                 schema = data.get('schema')
                 if schema:
-                    uri = f"postgresql+psycopg2://{username}:{password}@{target_host}{port_str}/{database}?options=-csearch_path%3D{schema}"
+                    uri = f"postgresql+psycopg2://{username}:{safe_password}@{target_host}{port_str}/{database}?options=-csearch_path%3D{schema}"
                 else:
-                    uri = f"postgresql+psycopg2://{username}:{password}@{target_host}{port_str}/{database}"
+                    uri = f"postgresql+psycopg2://{username}:{safe_password}@{target_host}{port_str}/{database}"
+                engine = create_engine(uri)
+                with engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
             else:
                 return jsonify({"status": "error", "message": f"Unsupported connection type: {db_type}"}), 400
 
-            engine = create_engine(uri)
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            
             session_key = f"user_{user_id}_{conn_name}"
             active_connectors[session_key] = engine
+            if db_type == 'mysql' and 'tunnel' in locals() and tunnel is not None:
+                active_ssh_tunnels[session_key] = tunnel
 
             status = "success"
             message = f"Successfully connected to {db_type} database: {conn_name}"
@@ -671,22 +776,26 @@ def create_connector_controllers(get_db_connection):
                                    (user_id, session_id, connection_name, db_type, target_host, status, error_message) 
                                    VALUES (%s, %s, %s, %s, %s, %s, %s)"""
                 cursor.execute(history_query, (user_id, user_session_id, conn_name, db_type, target_host, status, error_msg))
+                new_history_id = cursor.lastrowid
                 
                 # --- TABLE 3: Insert into database_credential ---
                 cred_data = {
                     "host": data.get('host'), "port": data.get('port'),
-                    "username": username, "password": raw_password, 
+                    "username": username, "password": password, 
                     "database": database, "url": data.get('url'),   
                     "account": data.get('account'), "warehouse": data.get('warehouse'),
                     "schema": data.get('schema'), "topic": topic            
                 }
-                # Clean out empty values
-                clean_cred_data = {k: v for k, v in cred_data.items() if v is not None}
+                # Clean out empty values and sensitive SSH secrets
+                clean_cred_data = {}
+                for k, v in cred_data.items():
+                    if v is not None and not str(k).startswith('ssh_'):
+                        clean_cred_data[k] = v
                 
                 cred_query = """INSERT INTO database_credential 
-                                (user_id, session_id, db_type, credential) 
-                                VALUES (%s, %s, %s, %s)"""
-                cursor.execute(cred_query, (user_id, user_session_id, db_type, json.dumps(clean_cred_data)))
+                                (user_id, session_id, db_type, credential, connection_id) 
+                                VALUES (%s, %s, %s, %s, %s)"""
+                cursor.execute(cred_query, (user_id, user_session_id, db_type, json.dumps(clean_cred_data), new_history_id))
                 new_connection_id = cursor.lastrowid
 
                 # Fetch user details for sync
@@ -850,7 +959,6 @@ def get_connection_history_controller(get_db_connection):
                     else:
                         db_name = cred_dict.get('database') or cred_dict.get('database_name')
                         if db_name:
-                            display_name = db_name
                             action_str = f"Connected to {db_name}"
                 except:
                     pass
@@ -1482,10 +1590,15 @@ def delete_connection_history_controller(get_db_connection):
 
         user_id = conn_history["user_id"]
 
-        # Fetch the allocated DB for the user
-        cursor.execute("SELECT new_user_db FROM users WHERE id = %s", (user_id,))
-        user_row = cursor.fetchone()
-        new_user_db = user_row["new_user_db"] if user_row else None
+        # Fetch the allocated DB for the workspace
+        cursor.execute("SELECT workspace_db FROM workspaces WHERE session_id = %s", (session_id,))
+        workspace_row = cursor.fetchone()
+        if workspace_row and workspace_row.get("workspace_db"):
+            new_user_db = workspace_row["workspace_db"]
+        else:
+            cursor.execute("SELECT new_user_db FROM users WHERE id = %s", (user_id,))
+            user_row = cursor.fetchone()
+            new_user_db = user_row["new_user_db"] if user_row else None
 
         # Fetch credential to find external database names
         cursor.execute("SELECT credential FROM database_credential WHERE connection_id = %s", (item_id,))

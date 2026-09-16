@@ -61,8 +61,8 @@ def check_usage_limit(limit_type):
                 # 4. Check specific limit based on limit_type
                 limit_value = plan.get(limit_type, -1)
                 
-                # If limit is -1, it means unlimited
-                if limit_value == -1:
+                # If limit is -1 or 0, it means unlimited
+                if limit_value in (-1, 0):
                     return f(*args, **kwargs)
                 
                 # Example for uploads checking:

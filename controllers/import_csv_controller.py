@@ -247,7 +247,7 @@ def import_csv_data(get_db_connection):
         uploads_metric = usage_res['usage_stats']['metrics']['uploads']
         used = uploads_metric['used']
         total = uploads_metric['total']
-        if total != -1 and used >= total:
+        if total not in (-1, 0) and used >= total:
             return jsonify({"status": "error", "message": "Daily upload limit exceeded based on your active plan."}), 403
 
     try:
@@ -515,7 +515,7 @@ def import_csv_data(get_db_connection):
             }
 
             if not already_imported:
-                table_data_size_mb = round(file_size_bytes / (1024 * 1024), 6)
+                table_data_size_mb = round(file_size_bytes / (1024 * 1024), 2)
                 log_query = """
                 INSERT INTO external_db_sync_log
                 (user_id,username,external_database,table_name,
@@ -534,8 +534,7 @@ def import_csv_data(get_db_connection):
         total_rows = sum(t["rows"] for t in affected_tables_info)
         total_columns = sum(t["columns"] for t in affected_tables_info)
 
-        # Calculate exact data size based on actual files
-        data_size_mb = round(total_data_size_bytes / (1024 * 1024), 6)
+        data_size_mb = max(round(total_data_size_bytes / (1024 * 1024), 2), 0.01)
 
         # Update (never recreate) the workspace's Knowledge Graph now that this
         # credential-based import has written into it. build_kgraph() itself
