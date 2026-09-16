@@ -196,7 +196,7 @@ def get_usage_and_limits(user_id):
             SELECT COUNT(DISTINCT DATE_FORMAT(upload_date, '%Y-%m-%d %H:%i')) as current_usage 
             FROM unstructured_docs 
             WHERE DATE(upload_date) = CURDATE() 
-            AND session_name IN (SELECT session_name FROM workspaces WHERE user_id = %s)
+            AND session_name IN (SELECT session_id FROM workspace_users WHERE user_id = %s)
         ''', (user_id,))
         upload_record = cursor.fetchone()
         uploads_used = upload_record['current_usage'] if upload_record else 0

@@ -190,6 +190,14 @@ def upload_universal_dump_controller(get_db_connection):
             'Success',           # status
             session_id           # session_id
         ))
+        
+        # --- Track Daily Upload Limit ---
+        for fname in file_names:
+            main_cursor.execute("""
+                INSERT INTO unstructured_docs (filename, session_name, extracted_json) 
+                VALUES (%s, %s, %s)
+            """, (fname, session_id, '{}'))
+
         main_conn.commit()
         
         main_cursor.close()
@@ -293,6 +301,12 @@ def upload_chunk_controller(get_db_connection):
             (user_id, session_id, connection_id, db_type, credential)
             VALUES (%s,%s,%s,%s,%s)
         """,(user_id,session_id,ch_id,db_type_cred,cred_json))
+
+        # --- Track Daily Upload Limit ---
+        cursor.execute("""
+            INSERT INTO unstructured_docs (filename, session_name, extracted_json) 
+            VALUES (%s, %s, %s)
+        """, (filename, session_id, '{}'))
 
         db_conn.commit()
 
@@ -417,6 +431,13 @@ def upload_csv_controller(get_db_connection):
                 VALUES (%s,%s,%s,'csv_upload',%s)
             """, (user_id, ch_id, session_id, cred_json))
             
+            # --- Track Daily Upload Limit ---
+            for orig_name in original_filenames:
+                cursor.execute("""
+                    INSERT INTO unstructured_docs (filename, session_name, extracted_json) 
+                    VALUES (%s, %s, %s)
+                """, (orig_name, session_id, '{}'))
+                
             db_conn.commit()
         except Exception as log_err:
             print(f"Error logging CSV history: {log_err}")
