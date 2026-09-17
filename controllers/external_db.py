@@ -125,8 +125,17 @@ def connect_external_db():
             if "situations" in sync_res: result["situations"].extend(sync_res["situations"])
             if "new_tables" in sync_res: result["new_tables"].extend(sync_res["new_tables"])
             if "tables" in sync_res: result["tables"].extend(sync_res["tables"])
-            if "summary" in sync_res: result["summary"] = sync_res["summary"]
-
+            if "summary" in sync_res:
+                s = sync_res["summary"]
+                result["summary"]["total_rows"] = result["summary"].get("total_rows", 0) + s.get("total_rows", 0)
+                result["summary"]["total_columns"] = result["summary"].get("total_columns", 0) + s.get("total_columns", 0)
+                try:
+                    cur_size = float(result["summary"].get("data_size_mb", 0))
+                    new_size = float(s.get("data_size_mb", 0))
+                    result["summary"]["data_size_mb"] = str(round(cur_size + new_size, 2))
+                except (ValueError, TypeError):
+                    pass
+                result["summary"]["last_sync"] = s.get("last_sync", "Just now")
     # For doc_upload, the frontend never calls apply_bulk_sync, and apply_bulk_sync skips it anyway.
     # We must insert it into external_db_sync_log here so it appears in /session-sources.
     try:
