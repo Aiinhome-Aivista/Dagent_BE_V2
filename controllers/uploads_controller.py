@@ -347,11 +347,12 @@ def upload_chunk_controller(get_db_connection):
             from database.csv_processor import process_csv_job
             import pymysql
             
-            cursor = db_conn.cursor(pymysql.cursors.DictCursor)
-            cursor.execute("SELECT email FROM users WHERE id=%s", (user_id,))
-            user_row = cursor.fetchone()
-            username = user_row['email'].split("@")[0] if user_row else "unknown"
-            cursor.close()
+            temp_conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
+            with temp_conn.cursor(pymysql.cursors.DictCursor) as temp_cursor:
+                temp_cursor.execute("SELECT email FROM users WHERE id=%s", (user_id,))
+                user_row = temp_cursor.fetchone()
+                username = user_row['email'].split("@")[0] if user_row else "unknown"
+            temp_conn.close()
             
             job = scheduler.add_job(
                 func=process_csv_job,
