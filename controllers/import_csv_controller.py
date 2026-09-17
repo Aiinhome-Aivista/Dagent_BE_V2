@@ -542,16 +542,24 @@ def import_csv_data(get_db_connection):
         # takes a kgraph_backups snapshot of the prior graph before touching it,
         # and only re-evaluates newly added tables when a verified graph already
         # exists (incremental mode) — see database/kgraph_builder.py.
+        # NOTE: Run in a background thread so the HTTP response is NOT blocked
+        # by the LLM call inside build_kgraph (which can take 30-60 s with a
+        # local model), which was causing a 504 Gateway Timeout on the frontend.
         if imported_files:
-            try:
-                from database.kgraph_builder import build_kgraph
-                build_kgraph(
-                    user_db, MYSQL_CONFIG["host"], MYSQL_CONFIG["user"],
-                    MYSQL_CONFIG["password"], MYSQL_CONFIG.get("port", 3306),
-                    trigger_source="import_csv_data"
-                )
-            except Exception as kg_err:
-                print(f"[KGRAPH] post-import build skipped: {kg_err}")
+            import threading
+            def _bg_kgraph(db, host, user, pwd, port):
+                try:
+                    from database.kgraph_builder import build_kgraph
+                    build_kgraph(db, host, user, pwd, port,
+                                 trigger_source="import_csv_data")
+                except Exception as kg_err:
+                    print(f"[KGRAPH] post-import build skipped: {kg_err}")
+            threading.Thread(
+                target=_bg_kgraph,
+                args=(user_db, MYSQL_CONFIG["host"], MYSQL_CONFIG["user"],
+                      MYSQL_CONFIG["password"], MYSQL_CONFIG.get("port", 3306)),
+                daemon=True
+            ).start()
 
         return jsonify({
             "message": "Data imported successfully",
