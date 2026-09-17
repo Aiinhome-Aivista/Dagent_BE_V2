@@ -60,7 +60,8 @@ def session_sources_controller(get_connection_func):
                 MAX(sync_time)             AS last_sync,
                 SUM(total_rows)            AS total_rows,
                 SUM(total_columns)         AS total_columns,
-                SUM(data_size_mb)          AS data_size_mb
+                SUM(data_size_mb)          AS data_size_mb,
+                SUM(exact_size_mb)         AS exact_size_mb
             FROM external_db_sync_log
             WHERE session_id = %s
               AND external_database IS NOT NULL
@@ -90,7 +91,7 @@ def session_sources_controller(get_connection_func):
                 "summary": {
                     "total_rows": int(r["total_rows"] or 0),
                     "total_columns": int(r["total_columns"] or 0),
-                    "data_size_mb": round(float(r["data_size_mb"] or 0.0), 2)
+                    "data_size_mb": float(r["exact_size_mb"]) if r.get("exact_size_mb") and float(r["exact_size_mb"]) > 0 else float(r["data_size_mb"] or 0.0)
                 }
             }
             for r in db_rows_deduped

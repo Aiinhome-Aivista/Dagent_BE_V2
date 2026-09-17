@@ -217,7 +217,10 @@ def get_usage_and_limits(user_id):
             WHERE user_id = %s
         ''', (user_id,))
         db_size_record = cursor.fetchone()
-        db_storage_used = db_size_record['total_db_size'] if db_size_record and db_size_record['total_db_size'] else 0.00
+        
+        # Convert MB to GB for the response
+        db_storage_mb = float(db_size_record['total_db_size']) if db_size_record and db_size_record['total_db_size'] else 0.0
+        db_storage_gb = round(db_storage_mb / 1024.0, 4)
         
         return {
             'status': 'success',
@@ -227,7 +230,7 @@ def get_usage_and_limits(user_id):
                 'allowed_connectors': plan.get('connectors', ''),
                 'metrics': {
                     'storage': {
-                        'used': float(db_storage_used),
+                        'used': db_storage_gb,
                         'total': plan.get('data_storage', -1),
                         'unit': 'GB'
                     },

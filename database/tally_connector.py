@@ -313,10 +313,12 @@ def sync_tally_database(user_id, connection_id, session_id, external_db, user_db
                 with log_conn.cursor() as log_cursor:
                     log_cursor.execute(f"""
                         INSERT INTO `{MYSQL_CONFIG["database"]}`.external_db_sync_log
-                        (user_id, new_user_db, username, external_database, table_name, action_type, rows_affected, session_id)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        (user_id, new_user_db, username, external_database, table_name, action_type, rows_affected, session_id, data_size_mb, exact_size_mb)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """, (
-                        user_id, user_db_name, username, company_name, table_name, "NEW_TABLE", len(insert_data), session_id
+                        user_id, user_db_name, username, company_name, table_name, "NEW_TABLE", len(insert_data), session_id,
+                        (len(json.dumps(flattened_ledgers).encode('utf-8')) / (1024 * 1024)),
+                        (len(json.dumps(flattened_ledgers).encode('utf-8')) / (1024 * 1024))
                     ))
                 log_conn.close()
 
@@ -331,7 +333,8 @@ def sync_tally_database(user_id, connection_id, session_id, external_db, user_db
     finally:
         target_conn.close()
 
-    data_size_mb = round((row_count * col_count * 8) / (1024 * 1024), 2)
+    exact_size_mb = len(json.dumps(flattened_ledgers).encode('utf-8')) / (1024 * 1024)
+    data_size_mb = exact_size_mb
     return {
         "summary": {
             "total_rows": row_count,

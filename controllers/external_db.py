@@ -57,46 +57,75 @@ def connect_external_db():
             "msg": "Missing data"
         }), 400
 
-    is_tally = False
+    tally_sync_result = None
+    result = {"situations": [], "new_tables": [], "summary": {"data_size_mb": 0.0, "total_rows": 0, "total_columns": 0}, "tables": []}
+    
     try:
         import pymysql
         from database.config import MYSQL_CONFIG
         conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
         with conn.cursor() as cur:
-            cur.execute("SELECT db_type FROM database_credential WHERE connection_id=%s AND user_id=%s", (connection_id, user_id))
-            cred_row = cur.fetchone()
-            if cred_row and cred_row[0].strip().lower() == 'tally':
-                is_tally = True
+            cur.execute("SELECT id, db_type FROM connection_history WHERE session_id=%s AND db_type NOT IN ('doc_upload', 'doc_chunk_upload', 'csv_upload', 'csv_chunk_upload', 'saved_web_result', 'web_search')", (session_id,))
+            session_connections = cur.fetchall()
         conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        session_connections = [(connection_id, 'unknown')]
 
-    tally_sync_result = None
-    if is_tally:
-        try:
-            import pymysql, json
-            from database.config import MYSQL_CONFIG
-            conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
-            with conn.cursor() as cur:
-                cur.execute("SELECT credential FROM database_credential WHERE connection_id=%s AND user_id=%s", (connection_id, user_id))
-                clean_cred_data = json.loads(cur.fetchone()[0])
-                cur.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s", (session_id,))
-                user_db_name = cur.fetchone()[0]
-                cur.execute("SELECT email FROM users WHERE id=%s", (user_id,))
-                user_email = cur.fetchone()[0]
-                username_for_sync = user_email.split("@")[0] if user_email else "unknown"
-            conn.close()
+    if connection_id not in [c[0] for c in session_connections]:
+        session_connections.append((connection_id, 'unknown'))
 
-            from database.tally_connector import sync_tally_database
-            print("[*] Triggering Auto-Sync for Tally after connection creation...")
-            tally_sync_result = sync_tally_database(user_id, connection_id, session_id, clean_cred_data, user_db_name, username_for_sync)
-            result = tally_sync_result
-        except Exception as sync_e:
-            print(f"[!] Auto-Sync failed for Tally: {sync_e}")
-            tally_sync_result = {"error": str(sync_e)}
-            result = {"situations": [], "new_tables": [], "summary": {}, "tables": []}
-    else:
-        result = sync_external_database(user_id, connection_id, session_id)
+    for cid, ctype in session_connections:
+        is_tally = False
+        if ctype and ctype.strip().lower() == 'tally':
+            is_tally = True
+        else:
+            try:
+                import pymysql
+                from database.config import MYSQL_CONFIG
+                conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
+                with conn.cursor() as cur:
+                    cur.execute("SELECT db_type FROM database_credential WHERE connection_id=%s AND user_id=%s", (cid, user_id))
+                    cred_row = cur.fetchone()
+                    if cred_row and cred_row[0].strip().lower() == 'tally':
+                        is_tally = True
+                conn.close()
+            except Exception:
+                pass
+        
+        sync_res = {}
+        if is_tally:
+            try:
+                import pymysql, json
+                from database.config import MYSQL_CONFIG
+                conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
+                with conn.cursor() as cur:
+                    cur.execute("SELECT credential FROM database_credential WHERE connection_id=%s AND user_id=%s", (cid, user_id))
+                    clean_cred_data = json.loads(cur.fetchone()[0])
+                    cur.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s", (session_id,))
+                    ws_row = cur.fetchone()
+                    user_db_name = ws_row[0] if ws_row else ""
+                    cur.execute("SELECT email FROM users WHERE id=%s", (user_id,))
+                    user_row = cur.fetchone()
+                    username_for_sync = user_row[0].split("@")[0] if user_row else "unknown"
+                conn.close()
+
+                from database.tally_connector import sync_tally_database
+                print(f"[*] Triggering Auto-Sync for Tally (connection {cid})...")
+                sync_res = sync_tally_database(user_id, cid, session_id, clean_cred_data, user_db_name, username_for_sync)
+                tally_sync_result = sync_res
+            except Exception as sync_e:
+                print(f"[!] Auto-Sync failed for Tally ({cid}): {sync_e}")
+        else:
+            try:
+                sync_res = sync_external_database(user_id, cid, session_id)
+            except Exception as sync_e:
+                print(f"[!] Auto-Sync failed for External DB ({cid}): {sync_e}")
+
+        if isinstance(sync_res, dict):
+            if "situations" in sync_res: result["situations"].extend(sync_res["situations"])
+            if "new_tables" in sync_res: result["new_tables"].extend(sync_res["new_tables"])
+            if "tables" in sync_res: result["tables"].extend(sync_res["tables"])
+            if "summary" in sync_res: result["summary"] = sync_res["summary"]
 
     # For doc_upload, the frontend never calls apply_bulk_sync, and apply_bulk_sync skips it anyway.
     # We must insert it into external_db_sync_log here so it appears in /session-sources.

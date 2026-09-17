@@ -516,17 +516,18 @@ def import_csv_data(get_db_connection):
 
             if not already_imported:
                 table_data_size_mb = round(file_size_bytes / (1024 * 1024), 2)
+                exact_size_mb = file_size_bytes / (1024 * 1024)
                 log_query = """
                 INSERT INTO external_db_sync_log
                 (user_id,username,external_database,table_name,
                 action_type,rows_affected,session_id,new_user_db,
-                total_rows,total_columns,data_size_mb)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                total_rows,total_columns,data_size_mb,exact_size_mb)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """
                 cursor.execute(log_query, (
                     user_id, username, file, table_name,
                     "IMPORT", rows_inserted, session_id, user_db,
-                    table_total_rows, num_columns, table_data_size_mb
+                    table_total_rows, num_columns, table_data_size_mb, exact_size_mb
                 ))
                 conn.commit()
 
@@ -534,7 +535,7 @@ def import_csv_data(get_db_connection):
         total_rows = sum(t["rows"] for t in affected_tables_info)
         total_columns = sum(t["columns"] for t in affected_tables_info)
 
-        data_size_mb = max(round(total_data_size_bytes / (1024 * 1024), 2), 0.01)
+        data_size_mb = total_data_size_bytes / (1024 * 1024) if total_data_size_bytes else 0.0
 
         # Update (never recreate) the workspace's Knowledge Graph now that this
         # credential-based import has written into it. build_kgraph() itself

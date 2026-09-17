@@ -734,8 +734,27 @@ def create_connector_controllers(get_db_connection):
                     else:
                         raise direct_e
             elif db_type == 'mssql':
-                # Switching to pyodbc to bypass FreeTDS TLS limitation
-                uri = f"mssql+pyodbc://{username}:{safe_password}@{target_host}{port_str}/{database}?driver=FreeTDS&tds_version=7.4&Encrypt=no&TrustServerCertificate=yes"
+                import pyodbc
+                drivers = pyodbc.drivers()
+                
+                # Prioritize drivers based on OS/availability
+                preferred_drivers = ["ODBC Driver 17 for SQL Server", "ODBC Driver 18 for SQL Server", "FreeTDS", "SQL Server"]
+                selected_driver = None
+                for p in preferred_drivers:
+                    if p in drivers:
+                        selected_driver = p
+                        break
+                
+                if not selected_driver:
+                    selected_driver = drivers[0] if drivers else "SQL Server"
+                
+                driver_escaped = selected_driver.replace(" ", "+")
+                
+                if selected_driver == "FreeTDS":
+                    uri = f"mssql+pyodbc://{username}:{safe_password}@{target_host}{port_str}/{database}?driver={driver_escaped}&tds_version=7.4&Encrypt=no&TrustServerCertificate=yes"
+                else:
+                    uri = f"mssql+pyodbc://{username}:{safe_password}@{target_host}{port_str}/{database}?driver={driver_escaped}&Encrypt=no&TrustServerCertificate=yes"
+                
                 engine = create_engine(uri)
                 with engine.connect() as conn:
                     conn.execute(text("SELECT 1"))
@@ -784,12 +803,16 @@ def create_connector_controllers(get_db_connection):
                     "username": username, "password": password, 
                     "database": database, "url": data.get('url'),   
                     "account": data.get('account'), "warehouse": data.get('warehouse'),
-                    "schema": data.get('schema'), "topic": topic            
+                    "schema": data.get('schema'), "topic": topic,
+                    "ssh_host": data.get('ssh_host'), "ssh_port": data.get('ssh_port'),
+                    "ssh_username": data.get('ssh_username'), "ssh_password": data.get('ssh_password'),
+                    "ssh_key_file": data.get('ssh_key_file'), "remote_mysql_host": data.get('remote_mysql_host'),
+                    "remote_mysql_port": data.get('remote_mysql_port')
                 }
-                # Clean out empty values and sensitive SSH secrets
+                # Clean out empty values
                 clean_cred_data = {}
                 for k, v in cred_data.items():
-                    if v is not None and not str(k).startswith('ssh_'):
+                    if v is not None:
                         clean_cred_data[k] = v
                 
                 cred_query = """INSERT INTO database_credential 

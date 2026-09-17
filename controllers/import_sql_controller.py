@@ -132,6 +132,10 @@ def import_sql_data(get_db_connection):
                         "columns": 0
                     })
 
+            # exact file size
+            file_size_bytes = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            exact_size_mb = file_size_bytes / (1024 * 1024)
+
             rows_affected = len(commands)
             for t_name in affected_tables:
                 t_info = next((t for t in affected_tables_info if t["table"] == t_name), {"rows": 0, "columns": 0})
@@ -143,20 +147,20 @@ def import_sql_data(get_db_connection):
                 INSERT INTO external_db_sync_log
                 (user_id,username,external_database,table_name,
                 action_type,rows_affected,session_id,new_user_db,
-                total_rows,total_columns,data_size_mb)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                total_rows,total_columns,data_size_mb,exact_size_mb)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """
                 cursor.execute(log_query, (
                     user_id, username, file, t_name,
                     "IMPORT", rows_affected, session_id, user_db,
-                    t_rows, t_cols, t_size
+                    t_rows, t_cols, t_size, exact_size_mb
                 ))
             conn.commit()
 
             imported_files.append(file)
 
-        # Calculate approximate data size
-        data_size_mb = round((total_rows * 200) / (1024 * 1024), 2)
+        # Use the exact size for response summary if there's only one file, otherwise keep an aggregate or just use the last one
+        data_size_mb = max(exact_size_mb, 0.000001) if 'exact_size_mb' in locals() else 0.0
 
         return jsonify({
             "message": "Data imported successfully",
