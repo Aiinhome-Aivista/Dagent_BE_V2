@@ -342,6 +342,30 @@ def upload_chunk_controller(get_db_connection):
                 replace_existing=True
             )
             print(f"Scheduled Document processing job: {job.id}")
+            
+        elif filename.lower().endswith('.csv'):
+            from database.csv_processor import process_csv_job
+            import pymysql
+            
+            cursor = db_conn.cursor(pymysql.cursors.DictCursor)
+            cursor.execute("SELECT email FROM users WHERE id=%s", (user_id,))
+            user_row = cursor.fetchone()
+            username = user_row['email'].split("@")[0] if user_row else "unknown"
+            cursor.close()
+            
+            job = scheduler.add_job(
+                func=process_csv_job,
+                args=[
+                    [merged_path], allocated_db_name, MYSQL_CONFIG.get("host"), 
+                    MYSQL_CONFIG.get("user"), MYSQL_CONFIG.get("password"), 
+                    int(MYSQL_CONFIG.get("port", 3306)), "csv_chunk_upload", 
+                    session_id, user_id, username
+                ],
+                trigger='date',
+                id=str(uuid.uuid4()),
+                replace_existing=True
+            )
+            print(f"Scheduled CSV processing job: {job.id}")
 
         import shutil
         shutil.rmtree(session_folder)
@@ -416,10 +440,17 @@ def upload_csv_controller(get_db_connection):
             file.save(path)
             saved_paths.append(path)
 
+        cursor.execute("SELECT email FROM users WHERE id=%s", (user_id,))
+        user_row = cursor.fetchone()
+        username = user_row['email'].split("@")[0] if user_row else "unknown"
+
         # Schedule background processing
         job = scheduler.add_job(
             func=process_csv_job,
-            args=[saved_paths, allocated_db_name, db_host, db_user, db_pass, db_port],
+            args=[
+                saved_paths, allocated_db_name, db_host, db_user, db_pass, db_port, 
+                "csv_upload", session_id, user_id, username
+            ],
             trigger='date',
             id=str(uuid.uuid4()),
             replace_existing=True

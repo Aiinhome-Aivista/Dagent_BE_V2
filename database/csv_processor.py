@@ -237,7 +237,7 @@ def _detect_encoding(path: str) -> str:
 
 
 def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db_port,
-                     trigger_source="csv_upload"):
+                     trigger_source="csv_upload", session_id=None, user_id=None, username=None):
     safe_user = quote_plus(db_user)
     safe_pass = quote_plus(db_pass)
     base_url = f"mysql+pymysql://{safe_user}:{safe_pass}@{db_host}:{db_port}"
@@ -444,6 +444,38 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
 
         tables_created.append(table_name)
         print(f"✅ Finished loading table: {table_name} ({processed_rows} rows)")
+
+        if session_id and user_id:
+            try:
+                from database.config import MYSQL_CONFIG
+                import pymysql
+                import os
+                conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
+                with conn.cursor() as cur:
+                    # check if already exists to avoid duplicates
+                    cur.execute("SELECT id FROM external_db_sync_log WHERE session_id=%s AND table_name=%s", (session_id, table_name))
+                    if not cur.fetchone():
+                        file_size_bytes = os.path.getsize(path) if os.path.exists(path) else 0
+                        table_data_size_mb = round(file_size_bytes / (1024 * 1024), 2)
+                        num_columns = len(sample.columns)
+                        exact_size_mb = file_size_bytes / (1024 * 1024)
+                        
+                        log_query = """
+                        INSERT INTO external_db_sync_log
+                        (user_id,username,external_database,table_name,
+                        action_type,rows_affected,session_id,new_user_db,
+                        total_rows,total_columns,data_size_mb,exact_size_mb)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        """
+                        cur.execute(log_query, (
+                            user_id, username or "unknown", os.path.basename(path), table_name,
+                            "IMPORT", processed_rows, session_id, allocated_db_name,
+                            total_rows, num_columns, table_data_size_mb, exact_size_mb
+                        ))
+                        conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"Failed to log CSV import to external_db_sync_log: {e}")
 
     print("\n🎉 All files processed successfully!")
     # ──────────────────────────────────────────────────────────────

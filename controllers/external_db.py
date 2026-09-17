@@ -184,6 +184,46 @@ def connect_external_db():
     except Exception as e:
         print(f"Error auto-syncing doc_upload: {e}")
 
+    # Ensure CSVs and previously synced tables for this session are included in the final summary response
+    try:
+        import pymysql
+        from database.config import MYSQL_CONFIG
+        conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
+        with conn.cursor(pymysql.cursors.DictCursor) as cur:
+            cur.execute("""
+                SELECT table_name, rows_affected, data_size_mb, new_user_db
+                FROM external_db_sync_log
+                WHERE session_id=%s
+            """, (session_id,))
+            logs = cur.fetchall()
+            
+            existing_tables = {t['table'].split('.')[-1] for t in result.get('tables', [])}
+            
+            for log in logs:
+                t_name = log['table_name']
+                t_full_name = f"{log['new_user_db']}.{t_name}" if log['new_user_db'] else t_name
+                
+                if t_name not in existing_tables:
+                    rows = log['rows_affected'] or 0
+                    size = log['data_size_mb'] or 0.0
+                    
+                    result['tables'].append({
+                        "table": t_full_name,
+                        "rows": rows,
+                        "columns": 0
+                    })
+                    result['summary']['total_rows'] = result['summary'].get('total_rows', 0) + rows
+                    try:
+                        cur_size = float(result["summary"].get("data_size_mb", 0))
+                        result["summary"]["data_size_mb"] = str(round(cur_size + float(size), 2))
+                    except (ValueError, TypeError):
+                        pass
+                    existing_tables.add(t_name)
+        conn.close()
+    except Exception as e:
+        print("Error fetching CSV logs for summary:", e)
+
+
     if not result.get("situations") and not result.get("new_tables"):
         response_data = {
             "status": True,
