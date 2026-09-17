@@ -121,7 +121,26 @@ def upload_universal_dump_controller(get_db_connection):
         elif target_db_type == 'mssql':
             # pyrefly: ignore [missing-import]
             import pyodbc
-            conn_str = f"DRIVER={{FreeTDS}};SERVER={db_host};PORT={creds.get('port') or 1433};DATABASE={db_name};UID={db_user};PWD={db_pass};TDS_Version=7.4;Encrypt=no;TrustServerCertificate=yes"
+            import platform
+            
+            drivers = pyodbc.drivers()
+            if platform.system() == "Windows":
+                preferred_drivers = ["ODBC Driver 17 for SQL Server", "ODBC Driver 18 for SQL Server", "SQL Server"]
+            else:
+                preferred_drivers = ["FreeTDS", "ODBC Driver 17 for SQL Server", "ODBC Driver 18 for SQL Server", "SQL Server"]
+                
+            selected_driver = None
+            for p in preferred_drivers:
+                if p in drivers:
+                    selected_driver = p
+                    break
+            if not selected_driver:
+                selected_driver = drivers[0] if drivers else "SQL Server"
+                
+            conn_str = f"DRIVER={{{selected_driver}}};SERVER={db_host};PORT={creds.get('port') or 1433};DATABASE={db_name};UID={db_user};PWD={db_pass};Encrypt=no;TrustServerCertificate=yes"
+            if selected_driver == "FreeTDS":
+                conn_str += ";TDS_Version=7.4"
+                
             ext_conn = pyodbc.connect(conn_str)
         elif target_db_type in ['postgresql', 'postgres']:
             import psycopg2

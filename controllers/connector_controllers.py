@@ -735,10 +735,14 @@ def create_connector_controllers(get_db_connection):
                         raise direct_e
             elif db_type == 'mssql':
                 import pyodbc
+                import platform
                 drivers = pyodbc.drivers()
                 
                 # Prioritize drivers based on OS/availability
-                preferred_drivers = ["ODBC Driver 17 for SQL Server", "ODBC Driver 18 for SQL Server", "FreeTDS", "SQL Server"]
+                if platform.system() == "Windows":
+                    preferred_drivers = ["ODBC Driver 17 for SQL Server", "ODBC Driver 18 for SQL Server", "SQL Server"]
+                else:
+                    preferred_drivers = ["FreeTDS", "ODBC Driver 17 for SQL Server", "ODBC Driver 18 for SQL Server", "SQL Server"]
                 selected_driver = None
                 for p in preferred_drivers:
                     if p in drivers:

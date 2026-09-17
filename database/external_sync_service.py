@@ -594,7 +594,11 @@ def sync_external_database(user_id, connection_id, session_id):
             db_port = tunnel.local_bind_port
 
         drivers = pyodbc.drivers()
-        preferred_drivers = ["ODBC Driver 17 for SQL Server", "ODBC Driver 18 for SQL Server", "FreeTDS", "SQL Server"]
+        import platform
+        if platform.system() == "Windows":
+            preferred_drivers = ["ODBC Driver 17 for SQL Server", "ODBC Driver 18 for SQL Server", "SQL Server"]
+        else:
+            preferred_drivers = ["FreeTDS", "ODBC Driver 17 for SQL Server", "ODBC Driver 18 for SQL Server", "SQL Server"]
         selected_driver = None
         for p in preferred_drivers:
             if p in drivers:
