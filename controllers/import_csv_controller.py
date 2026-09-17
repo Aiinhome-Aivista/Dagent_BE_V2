@@ -535,7 +535,7 @@ def import_csv_data(get_db_connection):
         total_rows = sum(t["rows"] for t in affected_tables_info)
         total_columns = sum(t["columns"] for t in affected_tables_info)
 
-        data_size_mb = total_data_size_bytes / (1024 * 1024) if total_data_size_bytes else 0.0
+        data_size_mb = round(total_data_size_bytes / (1024 * 1024), 2) if total_data_size_bytes else 0.0
 
         # Update (never recreate) the workspace's Knowledge Graph now that this
         # credential-based import has written into it. build_kgraph() itself
