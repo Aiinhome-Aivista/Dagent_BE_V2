@@ -768,7 +768,8 @@ def sync_external_database(user_id, connection_id, session_id):
                 WHERE table_schema = '{new_user_db}'
             """)
             actual_size = target_cursor.fetchone()[0] or 0
-            data_size_mb = round(actual_size / (1024 * 1024), 4)
+            
+            data_size_mb = round(actual_size / (1024 * 1024), 2)
 
 
             # Enable FK

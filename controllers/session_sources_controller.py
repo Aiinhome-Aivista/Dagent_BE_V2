@@ -90,7 +90,7 @@ def session_sources_controller(get_connection_func):
                 "summary": {
                     "total_rows": int(r["total_rows"] or 0),
                     "total_columns": int(r["total_columns"] or 0),
-                    "data_size_mb": float(r["data_size_mb"] or 0.0)
+                    "data_size_mb": round(float(r["data_size_mb"] or 0.0), 2)
                 }
             }
             for r in db_rows_deduped
