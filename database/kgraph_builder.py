@@ -253,6 +253,22 @@ def _extract_dim_values(schema):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Per-database build lock — prevents concurrent kgraph builds for the same db
+# (e.g. 4 CSV jobs + 1 MySQL sync all triggering build_kgraph at once).
+# ─────────────────────────────────────────────────────────────────────────────
+import threading as _threading
+_kgraph_locks: dict = {}          # allocated_db_name -> threading.Lock()
+_kgraph_locks_meta: dict = {}     # allocated_db_name -> dict
+_kgraph_locks_guard = _threading.Lock()
+
+def _get_db_lock(db_name: str) -> _threading.Lock:
+    with _kgraph_locks_guard:
+        if db_name not in _kgraph_locks:
+            _kgraph_locks[db_name] = _threading.Lock()
+            _kgraph_locks_meta[db_name] = {"building": False}
+        return _kgraph_locks[db_name]
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Public entry point
 # ─────────────────────────────────────────────────────────────────────────────
 def build_kgraph(allocated_db_name, db_host, db_user, db_pass, db_port,
@@ -281,6 +297,25 @@ def build_kgraph(allocated_db_name, db_host, db_user, db_pass, db_port,
     Callers should forward "graph" + "dim_values" to the ArangoDB
     backup/update pipeline as required.
     """
+    # ── Concurrency guard: skip if a build is already running for this db ──
+    db_lock = _get_db_lock(allocated_db_name)
+    if not db_lock.acquire(blocking=False):
+        print(f"[KGRAPH] build already in progress for {allocated_db_name}, "
+              f"skipping duplicate trigger ({trigger_source})")
+        return {"status": "skipped", "tables": 0}
+    try:
+        _kgraph_locks_meta[allocated_db_name]["building"] = True
+        # ── main build (lock is held until finally block) ────────────────────
+        return _build_kgraph_inner(allocated_db_name, db_host, db_user, db_pass,
+                                   db_port, force=force, trigger_source=trigger_source)
+    finally:
+        _kgraph_locks_meta[allocated_db_name]["building"] = False
+        db_lock.release()
+
+
+def _build_kgraph_inner(allocated_db_name, db_host, db_user, db_pass, db_port,
+                        force=False, trigger_source="unknown"):
+    """Actual build logic — always called with the per-db lock already held."""
     t0 = time.time()
     conn = None
     try:

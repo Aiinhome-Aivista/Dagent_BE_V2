@@ -270,7 +270,7 @@ def import_csv_data(get_db_connection):
         ORDER BY dc.connection_id DESC
         LIMIT 1
         """
-        
+
         all_files = []
         file_to_cid = {}
         for cid in connection_ids:
@@ -282,7 +282,7 @@ def import_csv_data(get_db_connection):
                 all_files.extend(cid_files)
                 for f in cid_files:
                     file_to_cid[f] = cid
-                
+
         # Remove duplicates while preserving order
         files = list(dict.fromkeys(all_files))
         
@@ -291,6 +291,7 @@ def import_csv_data(get_db_connection):
 
         if not files:
             return jsonify({"status": "error", "message": "Credentials not found or no files to import"}), 404
+
 
         # fetch workspace db
         cursor.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s", (session_id,))
@@ -537,6 +538,43 @@ def import_csv_data(get_db_connection):
 
         data_size_mb = round(total_data_size_bytes / (1024 * 1024), 2) if total_data_size_bytes else 0.0
 
+        # ── Auto-sync any live DB connections in this session ─────────────────
+        # If the session has MySQL / PostgreSQL / etc. connections alongside CSV
+        # uploads, sync them now and merge their tables into the same response so
+        # the frontend gets a single unified summary for ALL source types.
+        try:
+            DB_TYPES = {'mysql', 'postgres', 'postgresql', 'mssql', 'sqlite', 'tally'}
+            cursor.execute("""
+                SELECT ch.id, dc.db_type
+                FROM connection_history ch
+                JOIN database_credential dc ON dc.connection_id = ch.id
+                WHERE ch.session_id = %s
+                AND dc.user_id = %s
+                AND LOWER(dc.db_type) IN ('mysql','postgres','postgresql','mssql','sqlite','tally')
+                GROUP BY ch.id, dc.db_type
+            """, (session_id, user_id))
+            db_connections = cursor.fetchall()
+
+            if db_connections:
+                from database.external_sync_service import sync_external_database
+                seen_tables = {t["table"] for t in affected_tables_info}
+                for row in db_connections:
+                    cid = row["id"]
+                    try:
+                        sync_res = sync_external_database(user_id, cid, session_id)
+                        if isinstance(sync_res, dict):
+                            for t in sync_res.get("tables", []):
+                                tname = t.get("table", "")
+                                if tname not in seen_tables:
+                                    affected_tables_info.append(t)
+                                    seen_tables.add(tname)
+                                    total_rows += t.get("rows", 0)
+                                    total_columns += t.get("columns", 0)
+                    except Exception as db_sync_err:
+                        print(f"[Import] DB sync skipped for connection {cid}: {db_sync_err}")
+        except Exception as db_scan_err:
+            print(f"[Import] DB connection scan skipped: {db_scan_err}")
+
         # Update (never recreate) the workspace's Knowledge Graph now that this
         # credential-based import has written into it. build_kgraph() itself
         # takes a kgraph_backups snapshot of the prior graph before touching it,
@@ -576,6 +614,7 @@ def import_csv_data(get_db_connection):
                 "tables": affected_tables_info
             }
         })
+
 
     except Exception as e:
         from utils.error_formatter import format_db_error
