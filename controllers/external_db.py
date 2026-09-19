@@ -66,7 +66,7 @@ def connect_external_db():
         conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
         with conn.cursor() as cur:
             cur.execute("SELECT id, db_type FROM connection_history WHERE session_id=%s AND db_type NOT IN ('doc_upload', 'doc_chunk_upload', 'csv_upload', 'csv_chunk_upload', 'saved_web_result', 'web_search')", (session_id,))
-            session_connections = cur.fetchall()
+            session_connections = list(cur.fetchall())
         conn.close()
     except Exception as e:
         session_connections = [(connection_id, 'unknown')]
