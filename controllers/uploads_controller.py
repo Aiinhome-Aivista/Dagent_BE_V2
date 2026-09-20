@@ -305,11 +305,13 @@ def upload_chunk_controller(get_db_connection):
         db_type_hist = 'sql_chunk_upload' if filename.lower().endswith('.sql') else 'doc_chunk_upload' if filename.lower().endswith(('.pdf', '.doc', '.docx')) else 'csv_chunk_upload'
         db_type_cred = 'sql_upload' if filename.lower().endswith('.sql') else 'doc_upload' if filename.lower().endswith(('.pdf', '.doc', '.docx')) else 'csv_upload'
 
+        initial_status = 'processing' if filename.lower().endswith(('.pdf', '.txt', '.doc', '.docx', '.md', '.csv')) else 'Success'
+
         cursor.execute("""
             INSERT INTO connection_history
             (user_id, session_id, connection_name, db_type, target_host, status)
-            VALUES (%s, %s, %s, %s, %s, 'Success')
-        """, (user_id, session_id, history_name, db_type_hist, MYSQL_CONFIG.get("host")))
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (user_id, session_id, history_name, db_type_hist, MYSQL_CONFIG.get("host"), initial_status))
 
         ch_id = cursor.lastrowid
 
@@ -329,6 +331,11 @@ def upload_chunk_controller(get_db_connection):
 
         db_conn.commit()
 
+        # Fetch username for logging before closing connection
+        cursor.execute("SELECT name FROM users WHERE id = %s", (user_id,))
+        user_row = cursor.fetchone()
+        username = user_row["name"] if user_row else "unknown"
+
         cursor.close()
         db_conn.close()
 
@@ -336,7 +343,7 @@ def upload_chunk_controller(get_db_connection):
         if filename.lower().endswith(('.pdf', '.txt', '.doc', '.docx', '.md')):
             job = scheduler.add_job(
                 func=process_doc_job,
-                args=[merged_path, allocated_db_name, MYSQL_CONFIG.get("host"), MYSQL_CONFIG.get("user"), MYSQL_CONFIG.get("password"), MYSQL_CONFIG.get("port", 3306)],
+                args=[merged_path, allocated_db_name, MYSQL_CONFIG.get("host"), MYSQL_CONFIG.get("user"), MYSQL_CONFIG.get("password"), MYSQL_CONFIG.get("port", 3306), session_id, user_id, username, ch_id],
                 trigger='date',
                 id=str(uuid.uuid4()),
                 replace_existing=True
@@ -360,7 +367,7 @@ def upload_chunk_controller(get_db_connection):
                     [merged_path], allocated_db_name, MYSQL_CONFIG.get("host"), 
                     MYSQL_CONFIG.get("user"), MYSQL_CONFIG.get("password"), 
                     int(MYSQL_CONFIG.get("port", 3306)), "csv_chunk_upload", 
-                    session_id, user_id, username
+                    session_id, user_id, username, ch_id
                 ],
                 trigger='date',
                 id=str(uuid.uuid4()),

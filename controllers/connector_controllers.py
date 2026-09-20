@@ -589,9 +589,15 @@ def create_connector_controllers(get_db_connection):
             # -> gvrkcso-nm14601
             account = host.split(".")[0]
 
-            warehouse = data.get('warehouse', 'COMPUTE_WH')
-            schema = data.get('schema', 'BLOG')
-            role = data.get('role', 'ACCOUNTADMIN')
+            warehouse = data.get('warehouse')
+            schema = data.get('schema')
+            role = data.get('role')
+
+            if not warehouse or not schema or not role:
+                return jsonify({
+                    "status": "error",
+                    "message": "Warehouse, Schema, and Role are required for Snowflake"
+                }), 400
 
             uri = (f"snowflake://{username}:{password}@{account}/"f"{database}/{schema}"f"?warehouse={warehouse}&role={role}")
             print("SNOWFLAKE URI:", uri)
@@ -754,10 +760,16 @@ def create_connector_controllers(get_db_connection):
                 
                 driver_escaped = selected_driver.replace(" ", "+")
                 
-                if selected_driver == "FreeTDS":
-                    uri = f"mssql+pyodbc://{username}:{safe_password}@{target_host}{port_str}/{database}?driver={driver_escaped}&tds_version=7.4&Encrypt=no&TrustServerCertificate=yes"
+                if username:
+                    if selected_driver == "FreeTDS":
+                        uri = f"mssql+pyodbc://{username}:{safe_password}@{target_host}{port_str}/{database}?driver={driver_escaped}&tds_version=7.4&Encrypt=no&TrustServerCertificate=yes"
+                    else:
+                        uri = f"mssql+pyodbc://{username}:{safe_password}@{target_host}{port_str}/{database}?driver={driver_escaped}&Encrypt=no&TrustServerCertificate=yes"
                 else:
-                    uri = f"mssql+pyodbc://{username}:{safe_password}@{target_host}{port_str}/{database}?driver={driver_escaped}&Encrypt=no&TrustServerCertificate=yes"
+                    if selected_driver == "FreeTDS":
+                        uri = f"mssql+pyodbc://@{target_host}{port_str}/{database}?driver={driver_escaped}&tds_version=7.4&Encrypt=no&TrustServerCertificate=yes&Trusted_Connection=yes"
+                    else:
+                        uri = f"mssql+pyodbc://@{target_host}{port_str}/{database}?driver={driver_escaped}&Encrypt=no&TrustServerCertificate=yes&Trusted_Connection=yes"
                 
                 engine = create_engine(uri)
                 with engine.connect() as conn:
@@ -1636,7 +1648,7 @@ def delete_connection_history_controller(get_db_connection):
             import json
             try:
                 cred_json = json.loads(cred_row["credential"])
-                if conn_history["db_type"] in ['csv_upload', 'csv_chunk_upload', 'sql_upload', 'sql_chunk_upload']:
+                if conn_history["db_type"] in ['csv_upload', 'csv_chunk_upload', 'sql_upload', 'sql_chunk_upload', 'doc_upload', 'doc_chunk_upload']:
                     files = cred_json.get("files", [])
                     external_databases.extend(files)
                 elif conn_history["db_type"] == 'ftp':
@@ -1649,7 +1661,7 @@ def delete_connection_history_controller(get_db_connection):
                 pass
                 
         # Fallback if external_databases is empty
-        if not external_databases and conn_history["db_type"] not in ['csv_upload', 'csv_chunk_upload']:
+        if not external_databases:
              external_databases.append(conn_history["connection_name"])
 
         # Find tables from sync log
@@ -1662,28 +1674,61 @@ def delete_connection_history_controller(get_db_connection):
             for log in sync_logs:
                 if log["table_name"]:
                     tables_to_drop.append(log["table_name"])
+            
+            # Explicitly add workspace_files for documents to ensure physical deletion
+            if conn_history["db_type"] in ['doc_upload', 'doc_chunk_upload']:
+                if 'workspace_files' not in tables_to_drop:
+                    tables_to_drop.append('workspace_files')
 
             # Delete from external_db_sync_log
             delete_log_query = f"DELETE FROM external_db_sync_log WHERE session_id = %s AND external_database IN ({format_strings})"
             cursor.execute(delete_log_query, [session_id] + external_databases)
 
-        # Connect to new_user_db and drop tables
+        # Connect to new_user_db and drop tables (or rows for workspace_files)
         if new_user_db and tables_to_drop:
-            cursor.execute(f"USE `{new_user_db}`")
-            cursor.execute("SET FOREIGN_KEY_CHECKS=0")
-            for table in set(tables_to_drop):
-                cursor.execute(f"DROP TABLE IF EXISTS `{table}`")
-            cursor.execute("SET FOREIGN_KEY_CHECKS=1")
-            cursor.execute(f"USE `{config.MYSQL_CONFIG['database']}`")
+            # Also add prefixed versions (e.g. Poc_Users for Users) since physical name may differ
+            prefixed_tables = []
+            for ext_db_name in external_databases:
+                for t in tables_to_drop:
+                    if t != 'workspace_files':
+                        prefixed_tables.append(f"{ext_db_name}_{t}")
+            all_tables_to_drop = set(tables_to_drop + prefixed_tables)
+
+            try:
+                cursor.execute(f"USE `{new_user_db}`")
+                cursor.execute("SET FOREIGN_KEY_CHECKS=0")
+                for table in all_tables_to_drop:
+                    if table == 'workspace_files' and external_databases:
+                        # For docs, delete only the row corresponding to this file
+                        del_format = ','.join(['%s'] * len(external_databases))
+                        try:
+                            cursor.execute(f"DELETE FROM workspace_files WHERE file_name IN ({del_format})", external_databases)
+                        except Exception as e:
+                            print(f"[DELETE] Could not delete rows from workspace_files: {e}")
+                    else:
+                        try:
+                            cursor.execute(f"DROP TABLE IF EXISTS `{table}`")
+                        except Exception as drop_err:
+                            print(f"[DELETE] Could not drop table `{table}`: {drop_err}")
+                cursor.execute("SET FOREIGN_KEY_CHECKS=1")
+            except Exception as use_err:
+                print(f"[DELETE] Could not switch to {new_user_db}: {use_err}")
+            finally:
+                try:
+                    cursor.execute(f"USE `{config.MYSQL_CONFIG['database']}`")
+                except:
+                    pass
 
         # Delete credential and connection history
         cursor.execute("DELETE FROM database_credential WHERE connection_id = %s", (item_id,))
         cursor.execute("DELETE FROM connection_history WHERE id = %s", (item_id,))
         
-        # Reset unstructured docs quota for this session
-        cursor.execute("DELETE FROM unstructured_docs WHERE session_name = %s", (session_id,))
+        # We DO NOT delete from session_analysis_cache, session_chat_history, or unstructured_docs here,
+        # because those apply to the ENTIRE session (which may contain other active connections).
+        # We only delete the specific connector credential and history.
         
         db_conn.commit()
+
         return jsonify({"status": "success", "message": "Connection and associated tables deleted successfully."}), 200
 
     except Exception as e:

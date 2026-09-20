@@ -16,6 +16,7 @@ def extract_text_from_file(file_path):
     
     try:
         if ext == '.pdf':
+            # pyrefly: ignore [missing-import]
             import pymupdf as fitz
             # pyrefly: ignore [missing-import]
             import easyocr
@@ -113,7 +114,7 @@ Return ONLY valid JSON.'''
         print(f"Error structuring text with LLM: {e}")
     return None
 
-def process_doc_job(file_path, allocated_db_name, db_host, db_user, db_pass, db_port):
+def process_doc_job(file_path, allocated_db_name, db_host, db_user, db_pass, db_port, session_id=None, user_id=None, username="unknown", ch_id=None):
     try:
         safe_user = quote_plus(db_user)
         safe_pass = quote_plus(db_pass)
@@ -139,6 +140,9 @@ def process_doc_job(file_path, allocated_db_name, db_host, db_user, db_pass, db_
         }
         
         json_str = json.dumps(file_data)
+        file_size_bytes = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+        data_size_mb = round(file_size_bytes / (1024 * 1024), 2)
+        exact_size_mb = file_size_bytes / (1024 * 1024)
 
         with target_engine.connect() as conn:
             # Create table if not exists
@@ -159,9 +163,51 @@ def process_doc_job(file_path, allocated_db_name, db_host, db_user, db_pass, db_
             else:
                 conn.execute(text("INSERT INTO workspace_files (file_name, file_data) VALUES (:fname, :fdata)"), {"fname": filename, "fdata": json_str})
                 
+            # Get total rows for log
+            total_rows = conn.execute(text("SELECT COUNT(*) FROM workspace_files")).scalar() or 1
             conn.commit()
+
+        # Log to external_db_sync_log in main database (traverse_db or similar)
+        if session_id and user_id:
+            import pymysql
+            log_conn = pymysql.connect(host=db_host, user=db_user, password=db_pass, port=int(db_port))
+            try:
+                with log_conn.cursor() as cur:
+                    # We need the main db name. It's usually the one defined in config, or we can just infer from the active DB, but we didn't pass it.
+                    # We can use the connection to look up the database for the user from workspaces, or just rely on passing it. Wait, the main DB name is not passed.
+                    # Let's import config.
+                    from database.config import MYSQL_CONFIG
+                    cur.execute(f"USE `{MYSQL_CONFIG['database']}`")
+                    
+                    cur.execute("SELECT id FROM external_db_sync_log WHERE session_id=%s AND table_name='workspace_files' AND external_database=%s", (session_id, filename))
+                    existing_log = cur.fetchone()
+                    
+                    if not existing_log:
+                        cur.execute("""
+                            INSERT INTO external_db_sync_log
+                            (user_id, username, external_database, table_name, action_type, rows_affected, session_id, new_user_db, total_rows, total_columns, data_size_mb, exact_size_mb)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (user_id, username, filename, 'workspace_files', 'IMPORT', 1, session_id, allocated_db_name, total_rows, 4, data_size_mb, exact_size_mb))
+                    else:
+                        cur.execute("""
+                            UPDATE external_db_sync_log
+                            SET rows_affected = rows_affected + 1, total_rows = %s, data_size_mb = %s, sync_time = CURRENT_TIMESTAMP
+                            WHERE id = %s
+                        """, (total_rows, data_size_mb, existing_log[0]))
+                    
+                    # Update connection_history status to Success
+                    if ch_id:
+                        cur.execute("UPDATE connection_history SET status='Success' WHERE id=%s", (ch_id,))
+                        
+                log_conn.commit()
+            except Exception as log_e:
+                print(f"Error logging to external_db_sync_log: {log_e}")
+            finally:
+                log_conn.close()
 
         print(f"Successfully processed document and saved to workspace_files in {allocated_db_name}")
 
     except Exception as e:
+        print(f"Error processing document job for {file_path}: {e}")
+        # Could also log failure to connection_history here if ch_id is passed
         print(f"Error processing document job for {file_path}: {e}")

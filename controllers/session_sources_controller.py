@@ -54,50 +54,108 @@ def session_sources_controller(get_connection_func):
             SELECT
                 external_database,
                 new_user_db,
-                COUNT(DISTINCT table_name) AS table_count,
-                GROUP_CONCAT(DISTINCT table_name ORDER BY table_name SEPARATOR ', ')
-                                           AS tables,
-                MAX(sync_time)             AS last_sync,
-                SUM(total_rows)            AS total_rows,
-                SUM(total_columns)         AS total_columns,
-                SUM(data_size_mb)          AS data_size_mb,
-                SUM(exact_size_mb)         AS exact_size_mb
+                table_name,
+                rows_affected,
+                total_rows,
+                data_size_mb,
+                sync_time,
+                id
             FROM external_db_sync_log
             WHERE session_id = %s
               AND external_database IS NOT NULL
               AND external_database != ''
-            GROUP BY external_database, new_user_db
-            ORDER BY external_database
+            ORDER BY id ASC
         """, (session_id,))
         db_rows = cursor.fetchall()
 
-        # Deduplicate by external_database name to ensure all unique uploaded files are listed
-        unique_dbs = {}
+        # Group by external_database
+        db_groups = {}
         for r in db_rows:
-            db_key = r["external_database"]
-            # Keep the latest sync if there are multiple entries for the same file
-            if db_key not in unique_dbs or r["last_sync"] > unique_dbs[db_key]["last_sync"]:
-                unique_dbs[db_key] = r
-                
-        db_rows_deduped = list(unique_dbs.values())
-
-        external_dbs = [
-            {
-                "external_database": r["external_database"],
-                "new_user_db":       r["new_user_db"],
-                "table_count":       r["table_count"],
-                "tables":            r["tables"].split(", ") if r["tables"] else [],
-                "last_sync":         str(r["last_sync"]) if r["last_sync"] else None,
-                "summary": {
-                    "total_rows": int(r["total_rows"] or 0),
-                    "total_columns": int(r["total_columns"] or 0),
-                    "data_size_mb": float(r["exact_size_mb"]) if r.get("exact_size_mb") and float(r["exact_size_mb"]) > 0 else float(r["data_size_mb"] or 0.0)
+            ext_db = r["external_database"]
+            if ext_db not in db_groups:
+                db_groups[ext_db] = {
+                    "external_database": ext_db,
+                    "new_user_db": r["new_user_db"],
+                    "tables_dict": {},
+                    "last_sync": r["sync_time"],
+                    "total_rows": 0,
+                    "data_size_mb": 0.0
                 }
+            
+            grp = db_groups[ext_db]
+            t_name = r["table_name"]
+            
+            # Fetch exact column count from information_schema
+            cols = 0
+            if r.get('new_user_db') and t_name:
+                try:
+                    cursor.execute("SELECT COUNT(*) as col_count FROM information_schema.columns WHERE table_schema=%s AND table_name=%s", (r['new_user_db'], t_name))
+                    col_row = cursor.fetchone()
+                    if col_row:
+                        cols = col_row['col_count']
+                except Exception:
+                    pass
+            
+            # Keep the latest row count and size for each table
+            ext_db = r.get('external_database')
+            if ext_db:
+                if ext_db.lower().endswith('.csv'):
+                    display_table = ext_db
+                elif ext_db.lower().endswith(('.xlsx', '.xls')):
+                    display_table = f"{ext_db} ({t_name})"
+                else:
+                    display_table = f"{ext_db}.{t_name}"
+            else:
+                display_table = t_name
+                
+            grp["tables_dict"][t_name] = {
+                "table": display_table,
+                "rows": int(r.get("total_rows") or r["rows_affected"] or 0),
+                "columns": cols,
+                "size": float(r["data_size_mb"] or 0.0)
             }
-            for r in db_rows_deduped
-        ]
+            if r["sync_time"] and (not grp["last_sync"] or r["sync_time"] > grp["last_sync"]):
+                grp["last_sync"] = r["sync_time"]
+
+        external_dbs = []
+        for ext_db, grp in db_groups.items():
+            tables_list = list(grp["tables_dict"].values())
+            
+            # Calculate summary from the latest deduplicated tables
+            tot_rows = sum(t["rows"] for t in tables_list)
+            tot_cols = sum(t["columns"] for t in tables_list)
+            tot_size = sum(t["size"] for t in tables_list)
+            
+            last_sync_str = "Just now"
+            if grp["last_sync"]:
+                import datetime
+                try:
+                    now = datetime.datetime.now()
+                    if isinstance(grp["last_sync"], datetime.datetime):
+                        diff = now - grp["last_sync"]
+                        if diff.total_seconds() < 60:
+                            last_sync_str = "Just now"
+                        else:
+                            last_sync_str = grp["last_sync"].strftime("%Y-%m-%d %H:%M:%S")
+                    else:
+                        last_sync_str = str(grp["last_sync"])
+                except Exception:
+                    last_sync_str = str(grp["last_sync"])
+            
+            external_dbs.append({
+                "external_database": grp["external_database"],
+                "table_count": len(tables_list),
+                "tables": tables_list,
+                "last_sync": last_sync_str,
+                "summary": {
+                    "total_rows": tot_rows,
+                    "total_columns": tot_cols,
+                    "data_size_mb": round(tot_size, 2)
+                }
+            })
+
         simple_topics = [r["topic"] for r in topic_rows]
-        simple_databases = [r["external_database"] for r in db_rows_deduped]
+        simple_databases = [d["external_database"] for d in external_dbs]
 
         return jsonify({
             "status":       "success",

@@ -335,7 +335,10 @@ def import_csv_data(get_db_connection):
             if not file.lower().endswith('.csv'):
                 continue
 
-            matched_file = next((f for f in files_in_folder if f.lower() == file.lower()), None)
+            matched_file = next(
+                (f for f in files_in_folder if f.lower() == file.lower() or f.lower().endswith(f"_{file.lower()}")), 
+                None
+            )
             if not matched_file:
                 continue
 
@@ -518,18 +521,50 @@ def import_csv_data(get_db_connection):
             if not already_imported:
                 table_data_size_mb = round(file_size_bytes / (1024 * 1024), 2)
                 exact_size_mb = file_size_bytes / (1024 * 1024)
-                log_query = """
-                INSERT INTO external_db_sync_log
-                (user_id,username,external_database,table_name,
-                action_type,rows_affected,session_id,new_user_db,
-                total_rows,total_columns,data_size_mb,exact_size_mb)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                """
-                cursor.execute(log_query, (
-                    user_id, username, file, table_name,
-                    "IMPORT", rows_inserted, session_id, user_db,
-                    table_total_rows, num_columns, table_data_size_mb, exact_size_mb
-                ))
+                
+                if rows_inserted > 0:
+                    log_query = """
+                    INSERT INTO external_db_sync_log
+                    (user_id,username,external_database,table_name,
+                    action_type,rows_affected,session_id,new_user_db,
+                    total_rows,total_columns,data_size_mb,exact_size_mb, sync_time)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, CURRENT_TIMESTAMP)
+                    """
+                    cursor.execute(log_query, (
+                        user_id, username, file, table_name,
+                        "IMPORT", rows_inserted, session_id, user_db,
+                        table_total_rows, num_columns, table_data_size_mb, exact_size_mb
+                    ))
+                else:
+                    update_query = """
+                    UPDATE external_db_sync_log
+                    SET sync_time = CURRENT_TIMESTAMP,
+                        total_rows = %s,
+                        total_columns = %s,
+                        data_size_mb = %s,
+                        exact_size_mb = %s
+                    WHERE session_id = %s AND external_database = %s AND table_name = %s
+                    ORDER BY id DESC LIMIT 1
+                    """
+                    cursor.execute(update_query, (
+                        table_total_rows, num_columns, table_data_size_mb, exact_size_mb,
+                        session_id, file, table_name
+                    ))
+                    
+                    if cursor.rowcount == 0:
+                        log_query = """
+                        INSERT INTO external_db_sync_log
+                        (user_id,username,external_database,table_name,
+                        action_type,rows_affected,session_id,new_user_db,
+                        total_rows,total_columns,data_size_mb,exact_size_mb)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        """
+                        cursor.execute(log_query, (
+                            user_id, username, file, table_name,
+                            "IMPORT", rows_inserted, session_id, user_db,
+                            table_total_rows, num_columns, table_data_size_mb, exact_size_mb
+                        ))
+
                 conn.commit()
 
         affected_tables_info = list(unique_tables_info.values())

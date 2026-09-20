@@ -301,55 +301,114 @@ def sync_external_database(user_id, connection_id, session_id):
         total_columns = 0
         table_summary = []
         
+        # For CSV/doc uploads: only return tables logged for THIS connection,
+        # not ALL workspace tables (which would bleed in other sources' tables).
         try:
-            target_conn = pymysql.connect(
-                host=MYSQL_CONFIG["host"],
-                user=MYSQL_CONFIG["user"],
-                password=MYSQL_CONFIG["password"],
-                database=user_db_name,
-                autocommit=True
+            log_conn_csv = pymysql.connect(
+                host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"],
+                password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"]
             )
-            
-            # For doc upload, wait up to 5 minutes for the background job to create the table
-            if db_type in ['doc_upload', 'doc_chunk_upload']:
-                import time
-                for _ in range(150):
-                    with target_conn.cursor() as cursor:
-                        cursor.execute("SHOW TABLES")
-                        current_tables = [t[0] for t in cursor.fetchall()]
-                    if "workspace_files" in current_tables:
-                        # Wait an extra few seconds to allow data insertion to complete
+            with log_conn_csv.cursor() as lc:
+                lc.execute("""
+                    SELECT table_name, rows_affected, total_rows, data_size_mb
+                    FROM external_db_sync_log
+                    WHERE session_id=%s AND new_user_db=%s
+                      AND (
+                        external_database IN (
+                            SELECT JSON_UNQUOTE(JSON_EXTRACT(credential, '$.files[0]'))
+                            FROM database_credential
+                            WHERE connection_id=%s AND user_id=%s
+                        )
+                        OR external_database IS NULL
+                      )
+                    ORDER BY id ASC
+                """, (session_id, user_db_name, connection_id, user_id))
+                log_rows = lc.fetchall()
+            log_conn_csv.close()
+
+            if log_rows:
+                # Get actual column counts from workspace DB
+                ws_conn = pymysql.connect(
+                    host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"],
+                    password=MYSQL_CONFIG["password"], database=user_db_name
+                )
+                with ws_conn.cursor() as ws_cur:
+                    for t_name, rows_affected, total_rows_log, size_mb in log_rows:
+                        rows = int(total_rows_log or rows_affected or 0)
+                        total_rows += rows
+                        cols = 0
+                        try:
+                            ws_cur.execute(f"SHOW COLUMNS FROM `{t_name}`")
+                            cols = len(ws_cur.fetchall())
+                        except Exception:
+                            pass
+                        total_columns += cols
+                        table_summary.append({"table": t_name, "rows": rows, "columns": cols})
+                ws_conn.close()
+                data_size_mb = sum(float(r[3] or 0) for r in log_rows)
+            else:
+                # Fallback: only return tables created by this specific CSV file
+                cred_conn = pymysql.connect(
+                    host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"],
+                    password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"]
+                )
+                with cred_conn.cursor() as cc:
+                    cc.execute("SELECT credential FROM database_credential WHERE connection_id=%s AND user_id=%s",
+                               (connection_id, user_id))
+                    cred_row = cc.fetchone()
+                cred_conn.close()
+                csv_file = None
+                if cred_row:
+                    import json as _json
+                    cred_data = _json.loads(cred_row[0])
+                    files = cred_data.get("files", [])
+                    if files:
+                        csv_file = files[0]
+
+                target_conn = pymysql.connect(
+                    host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"],
+                    password=MYSQL_CONFIG["password"], database=user_db_name, autocommit=True
+                )
+                if db_type in ['doc_upload', 'doc_chunk_upload']:
+                    import time
+                    for _ in range(150):
+                        with target_conn.cursor() as cursor:
+                            cursor.execute("SHOW TABLES")
+                            current_tables = [t[0] for t in cursor.fetchall()]
+                        if "workspace_files" in current_tables:
+                            time.sleep(2)
+                            break
                         time.sleep(2)
-                        break
-                    time.sleep(2)
-            
-            with target_conn.cursor() as cursor:
-                cursor.execute("SHOW TABLES")
-                tables = [t[0] for t in cursor.fetchall()]
-                for t in tables:
-                    cursor.execute(f"SELECT COUNT(*) FROM `{t}`")
-                    row_count = cursor.fetchone()[0]
-                    cursor.execute(f"SHOW COLUMNS FROM `{t}`")
-                    col_count = len(cursor.fetchall())
-                    total_rows += row_count
-                    total_columns += col_count
-                    table_summary.append({"table": t, "rows": row_count, "columns": col_count})
-                
-                # Accurately calculate data size from information_schema
-                cursor.execute("""
-                    SELECT SUM(data_length + index_length) 
-                    FROM information_schema.tables 
-                    WHERE table_schema = %s
-                """, (user_db_name,))
-                size_result = cursor.fetchone()[0]
-                total_size_bytes = size_result if size_result else 0
-                data_size_mb = round(total_size_bytes / (1024 * 1024), 2)
-                
-            target_conn.close()
+
+                with target_conn.cursor() as cursor:
+                    cursor.execute("SHOW TABLES")
+                    all_tables = [t[0] for t in cursor.fetchall()]
+                    # Only include tables whose name matches this CSV file pattern
+                    if csv_file:
+                        import re as _re
+                        csv_base = _re.sub(r'[^a-z0-9]', '_', csv_file.lower().rsplit('.', 1)[0])
+                        tables = [t for t in all_tables if t.lower().startswith(csv_base[:20])]
+                    else:
+                        tables = []
+                    for t in tables:
+                        cursor.execute(f"SELECT COUNT(*) FROM `{t}`")
+                        row_count = cursor.fetchone()[0]
+                        cursor.execute(f"SHOW COLUMNS FROM `{t}`")
+                        col_count = len(cursor.fetchall())
+                        total_rows += row_count
+                        total_columns += col_count
+                        table_summary.append({"table": t, "rows": row_count, "columns": col_count})
+                    cursor.execute("""
+                        SELECT SUM(data_length + index_length)
+                        FROM information_schema.tables WHERE table_schema = %s
+                    """, (user_db_name,))
+                    size_result = cursor.fetchone()[0]
+                    data_size_mb = round((size_result or 0) / (1024 * 1024), 2)
+                target_conn.close()
         except Exception as e:
             print("Error fetching tables for file upload:", e)
             data_size_mb = 0.0
-            
+
         return {
             "summary": {
                 "total_rows": total_rows,
@@ -361,6 +420,7 @@ def sync_external_database(user_id, connection_id, session_id):
             "situations": [],
             "new_tables": [t["table"] for t in table_summary]
         }
+
 
     if db_type == 'ftp':
         import ftplib
@@ -514,6 +574,8 @@ def sync_external_database(user_id, connection_id, session_id):
 
     if db_type == 'tally' or db_type == 'ftp':
         required_fields = ["host", "port", "database"] if db_type == 'tally' else ["host", "port", "username", "password"]
+    elif db_type == 'mssql':
+        required_fields = ["host", "port", "database"]
     else:
         required_fields = ["host", "port", "username", "password", "database"]
     for field in required_fields:
@@ -608,7 +670,10 @@ def sync_external_database(user_id, connection_id, session_id):
             selected_driver = drivers[0] if drivers else "SQL Server"
             
         driver_escaped = selected_driver.replace(" ", "+")
-        conn_str = f"DRIVER={{{selected_driver}}};SERVER={db_host},{db_port};DATABASE={external_db['database']};UID={external_db['username']};PWD={external_db['password']};Encrypt=no;TrustServerCertificate=yes"
+        if external_db.get("username"):
+            conn_str = f"DRIVER={{{selected_driver}}};SERVER={db_host},{db_port};DATABASE={external_db['database']};UID={external_db['username']};PWD={external_db.get('password', '')};Encrypt=no;TrustServerCertificate=yes"
+        else:
+            conn_str = f"DRIVER={{{selected_driver}}};SERVER={db_host},{db_port};DATABASE={external_db['database']};Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes"
         if selected_driver == "FreeTDS":
             conn_str += ";TDS_Version=7.4"
             
@@ -660,8 +725,8 @@ def sync_external_database(user_id, connection_id, session_id):
 
             log_query = f"""
             INSERT INTO `{MYSQL_CONFIG["database"]}`.external_db_sync_log
-            (user_id, new_user_db ,username, external_database, table_name, action_type, rows_affected, session_id, data_size_mb, exact_size_mb)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            (user_id, new_user_db ,username, external_database, table_name, action_type, rows_affected, session_id, data_size_mb, exact_size_mb, total_rows, total_columns, sync_time)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, CURRENT_TIMESTAMP)
             """
 
             schema_name = external_db.get("schema")
@@ -732,6 +797,15 @@ def sync_external_database(user_id, connection_id, session_id):
                     new_table_name = table_name
                 else:
                     new_table_name = f"{external_db['database']}_{table_name}"
+
+                # Auto-prefix physical workspace name on conflict so two different
+                # sources can both have a "users" table without overwriting each other.
+                # The LOG always stores the original source table_name for clean display.
+                target_tables_lower = [t.lower() for t in target_tables]
+                if new_table_name.lower() in target_tables_lower and first_sync:
+                    # Give this table a prefixed physical name in the workspace
+                    new_table_name = f"{external_db['database']}_{table_name}"
+
 
                 # ---------- NEW TABLE ----------
                 target_tables_lower = [t.lower() for t in target_tables]
@@ -810,56 +884,144 @@ def sync_external_database(user_id, connection_id, session_id):
                     data_size_mb = round(table_size_bytes / (1024 * 1024), 2)
                     exact_size_mb = round(table_size_bytes / (1024 * 1024), 6)
 
-                    #  LOG INSERT
+                    #  LOG INSERT — always use original source table_name for clean display
+                    # Delete any stale entries from previous failed syncs for this table
+                    try:
+                        _del_conn = pymysql.connect(
+                            host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"],
+                            password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"]
+                        )
+                        with _del_conn.cursor() as _dc:
+                            _dc.execute("""
+                                DELETE FROM external_db_sync_log
+                                WHERE session_id=%s AND external_database=%s AND table_name=%s
+                            """, (session_id, external_db["database"], table_name))
+                        _del_conn.commit()
+                        _del_conn.close()
+                    except Exception as _del_e:
+                        print(f"[LOG-CLEANUP] Could not delete stale log for {table_name}: {_del_e}")
+
                     target_cursor.execute(
                         log_query,
                         (   user_id,
                             new_user_db,
                             username,
                             external_db["database"],
-                            new_table_name,
+                            table_name,      # original source name (not physical new_table_name)
                             "NEW_TABLE",
                             inserted_count,
                             session_id,
                             data_size_mb,
-                            exact_size_mb
+                            exact_size_mb,
+                            inserted_count,
+                            col_count
                         )
                     )
 
                 else:
+                    # EXISTING TABLE branch
+                    # On first sync: this same table name existed from another source.
+                    # Drop and recreate so that MSSQL data wins cleanly.
+                    if first_sync:
+                        target_cursor.execute(f"DROP TABLE IF EXISTS `{new_table_name}`")
 
-                    # check new columns
-                    source_columns = get_source_columns(source_cursor, table_name, db_type, active_schema)
+                        if db_type in ["postgresql", "postgres"]:
+                            source_cursor.execute("""
+                                SELECT column_name, data_type, is_nullable, character_maximum_length
+                                FROM information_schema.columns
+                                WHERE table_name = %s AND table_schema = %s
+                                ORDER BY ordinal_position
+                            """, (table_name, active_schema))
+                            cols_info = source_cursor.fetchall()
+                            col_defs = []
+                            for col_name, data_type, is_nullable, char_len in cols_info:
+                                mysql_type = postgres_to_mysql_type(data_type, char_len)
+                                null_def = "NULL" if is_nullable == "YES" else "NOT NULL"
+                                col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
+                            create_query = f"CREATE TABLE `{new_table_name}` (\n  " + ",\n  ".join(col_defs) + "\n)"
+                        elif db_type == "mssql":
+                            source_cursor.execute("""
+                                SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, CHARACTER_MAXIMUM_LENGTH
+                                FROM INFORMATION_SCHEMA.COLUMNS
+                                WHERE TABLE_NAME = ? AND TABLE_SCHEMA = ?
+                                ORDER BY ORDINAL_POSITION
+                            """, (table_name, active_schema if active_schema else 'dbo'))
+                            cols_info = source_cursor.fetchall()
+                            col_defs = []
+                            for col_name, data_type, is_nullable, char_len in cols_info:
+                                mysql_type = mssql_to_mysql_type(data_type, char_len)
+                                null_def = "NULL" if is_nullable == "YES" else "NOT NULL"
+                                col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
+                            create_query = f"CREATE TABLE `{new_table_name}` (\n  " + ",\n  ".join(col_defs) + "\n)"
+                        else:
+                            source_cursor.execute(f"SHOW CREATE TABLE `{table_name}`")
+                            create_query = source_cursor.fetchone()[1].replace(
+                                f"CREATE TABLE `{table_name}`",
+                                f"CREATE TABLE `{new_table_name}`"
+                            )
 
-                    target_cursor.execute(f"SHOW COLUMNS FROM `{new_table_name}`")
-                    target_columns = [c[0] for c in target_cursor.fetchall()]
+                        target_cursor.execute(create_query)
+                        new_tables.append(new_table_name)
 
-                    new_columns = set(source_columns) - set(target_columns)
-                
-                    if new_columns and not first_sync:
-                        if not any(s["table"] == new_table_name and s["type"]=="SCHEMA_CHANGE" for s in situations):
-                            situations.append({
-                                "type": "SCHEMA_CHANGE",
-                                "table": new_table_name,
-                                "message": f"New columns detected in {new_table_name}: {', '.join(new_columns)}",
-                                "buttons": ["Yes", "No"]
-                            })
+                        col_list = get_source_columns_list(source_cursor, table_name, db_type, active_schema)
+                        source_col_str = get_quoted_columns(col_list, db_type)
+                        target_col_str = get_target_quoted_columns(col_list)
+                        source_cursor.execute(f"SELECT {source_col_str} FROM {get_source_table_select_name(table_name, db_type)}")
+                        rows = source_cursor.fetchall()
+                        inserted_count = 0
+                        if rows:
+                            placeholders = ", ".join(["%s"] * len(rows[0]))
+                            insert_query = f"INSERT INTO `{new_table_name}` ({target_col_str}) VALUES ({placeholders})"
+                            col_types = get_source_column_types(source_cursor, table_name, db_type, active_schema)
+                            cleaned_rows = [clean_row(row, col_types) for row in rows]
+                            target_cursor.executemany(insert_query, cleaned_rows)
+                            inserted_count = len(rows)
 
+                        target_cursor.execute(f"""
+                            SELECT (data_length + index_length)
+                            FROM information_schema.tables
+                            WHERE table_schema = '{new_user_db}' AND table_name = '{new_table_name}'
+                        """)
+                        table_size_bytes = target_cursor.fetchone()
+                        table_size_bytes = table_size_bytes[0] if table_size_bytes and table_size_bytes[0] else 0
+                        data_size_mb = round(table_size_bytes / (1024 * 1024), 2)
+                        exact_size_mb = round(table_size_bytes / (1024 * 1024), 6)
 
-                    source_cursor.execute(f"SELECT COUNT(*) FROM {get_source_table_select_name(table_name, db_type)}")
-                    source_count = source_cursor.fetchone()[0]
+                        target_cursor.execute(
+                            log_query,
+                            (user_id, new_user_db, username, external_db["database"],
+                             new_table_name, "NEW_TABLE", inserted_count, session_id,
+                             data_size_mb, exact_size_mb, inserted_count, col_count)
+                        )
+                    else:
+                        # check new columns
+                        source_columns = get_source_columns(source_cursor, table_name, db_type, active_schema)
+                        target_cursor.execute(f"SHOW COLUMNS FROM `{new_table_name}`")
+                        target_columns = [c[0] for c in target_cursor.fetchall()]
+                        new_columns = set(source_columns) - set(target_columns)
 
-                    target_cursor.execute(f"SELECT COUNT(*) FROM `{new_table_name}`")
-                    target_count = target_cursor.fetchone()[0]
+                        if new_columns:
+                            if not any(s["table"] == new_table_name and s["type"]=="SCHEMA_CHANGE" for s in situations):
+                                situations.append({
+                                    "type": "SCHEMA_CHANGE",
+                                    "table": new_table_name,
+                                    "message": f"New columns detected in {new_table_name}: {', '.join(new_columns)}",
+                                    "buttons": ["Yes", "No"]
+                                })
 
-                    if source_count > target_count and not first_sync:
-                        if not any(s["table"] == new_table_name for s in situations):
-                            situations.append({
-                                "type": "DATA_DISCREPANCY",
-                                "table": new_table_name,
-                                "message": f"I found some discrepancy in table {new_table_name}. I'm doing reconciliation.",
-                                "buttons": ["Yes", "No"]
-                            })
+                        source_cursor.execute(f"SELECT COUNT(*) FROM {get_source_table_select_name(table_name, db_type)}")
+                        source_count = source_cursor.fetchone()[0]
+                        target_cursor.execute(f"SELECT COUNT(*) FROM `{new_table_name}`")
+                        target_count = target_cursor.fetchone()[0]
+
+                        if source_count > target_count:
+                            if not any(s["table"] == new_table_name for s in situations):
+                                situations.append({
+                                    "type": "DATA_DISCREPANCY",
+                                    "table": new_table_name,
+                                    "message": f"I found some discrepancy in table {new_table_name}. I'm doing reconciliation.",
+                                    "buttons": ["Yes", "No"]
+                                })
 
             # Get actual data size in bytes for the imported tables from information_schema
             target_cursor.execute(f"""
@@ -875,21 +1037,7 @@ def sync_external_database(user_id, connection_id, session_id):
             target_cursor.execute("SET FOREIGN_KEY_CHECKS=1")
 
             if not situations and not new_tables:
-
-                target_cursor.execute(
-                    log_query,
-                    (   user_id,
-                        new_user_db,
-                        username,
-                        external_db["database"],
-                        "ALL_TABLES",
-                        "NO_CHANGE",
-                        0,
-                        session_id,
-                        0.0,
-                        0.0
-                    )
-                )
+                pass
 
     except Exception as e:
 
@@ -1148,13 +1296,16 @@ def apply_external_sync(user_id, connection_id, session_id, table):
             db_host = "127.0.0.1"
             db_port = tunnel.local_bind_port
 
-        source_conn = pymssql.connect(
-            server=db_host,
-            port=str(db_port),
-            user=external_db["username"],
-            password=external_db["password"],
-            database=external_db["database"]
-        )
+        conn_kwargs = {
+            "server": db_host,
+            "port": str(db_port),
+            "database": external_db["database"]
+        }
+        if external_db.get("username"):
+            conn_kwargs["user"] = external_db["username"]
+            conn_kwargs["password"] = external_db.get("password", "")
+
+        source_conn = pymssql.connect(**conn_kwargs)
         source_conn.autocommit(True)
 
     else:
@@ -1497,13 +1648,16 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
             db_host = "127.0.0.1"
             db_port = tunnel.local_bind_port
 
-        source_conn = pymssql.connect(
-            server=db_host,
-            port=str(db_port),
-            user=external_db["username"],
-            password=external_db["password"],
-            database=external_db["database"]
-        )
+        conn_kwargs = {
+            "server": db_host,
+            "port": str(db_port),
+            "database": external_db["database"]
+        }
+        if external_db.get("username"):
+            conn_kwargs["user"] = external_db["username"]
+            conn_kwargs["password"] = external_db.get("password", "")
+
+        source_conn = pymssql.connect(**conn_kwargs)
         source_conn.autocommit(True)
 
     else:

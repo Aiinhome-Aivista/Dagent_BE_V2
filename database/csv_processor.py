@@ -237,7 +237,7 @@ def _detect_encoding(path: str) -> str:
 
 
 def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db_port,
-                     trigger_source="csv_upload", session_id=None, user_id=None, username=None):
+                     trigger_source="csv_upload", session_id=None, user_id=None, username=None, ch_id=None):
     safe_user = quote_plus(db_user)
     safe_pass = quote_plus(db_pass)
     base_url = f"mysql+pymysql://{safe_user}:{safe_pass}@{db_host}:{db_port}"
@@ -297,6 +297,8 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
             path, dtype=str, encoding=encoding, engine="python",
             on_bad_lines="warn", nrows=SAMPLE_ROWS,
         )
+        # Drop any empty/Unnamed columns created by trailing commas or blank headers
+        sample = sample.loc[:, ~sample.columns.str.contains('^Unnamed', case=False, na=False)]
         sample.columns = [_sanitize(c) for c in sample.columns]
         
         # Dynamic Schema & Header Matching: Step 1 Priority check for exact table name match
@@ -387,6 +389,8 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
             path, chunksize=CHUNK_SIZE, dtype=str, encoding=encoding,
             engine="python", on_bad_lines="warn",
         ):
+            # Drop any empty/Unnamed columns in the chunk
+            chunk = chunk.loc[:, ~chunk.columns.str.contains('^Unnamed', case=False, na=False)]
             chunk.columns = [_sanitize(c) for c in chunk.columns]
             if column_rename_map:
                 chunk = chunk.rename(columns=column_rename_map)
@@ -452,14 +456,24 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
                 import os
                 conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
                 with conn.cursor() as cur:
-                    # check if already exists to avoid duplicates
-                    cur.execute("SELECT id FROM external_db_sync_log WHERE session_id=%s AND table_name=%s", (session_id, table_name))
-                    if not cur.fetchone():
-                        file_size_bytes = os.path.getsize(path) if os.path.exists(path) else 0
-                        table_data_size_mb = round(file_size_bytes / (1024 * 1024), 2)
-                        num_columns = len(sample.columns)
-                        exact_size_mb = file_size_bytes / (1024 * 1024)
+                    # Get actual total rows from the table after merge
+                    true_total_rows = total_rows
+                    try:
+                        with target_engine.connect() as count_conn:
+                            true_total_rows = count_conn.execute(text(f"SELECT COUNT(*) FROM `{table_name}`")).scalar() or total_rows
+                    except Exception:
+                        pass
                         
+                    # check if already exists to avoid duplicates (unless we merged new rows, then update)
+                    cur.execute("SELECT id FROM external_db_sync_log WHERE session_id=%s AND table_name=%s", (session_id, table_name))
+                    existing_log = cur.fetchone()
+                    
+                    file_size_bytes = os.path.getsize(path) if os.path.exists(path) else 0
+                    table_data_size_mb = round(file_size_bytes / (1024 * 1024), 2)
+                    num_columns = len(sample.columns)
+                    exact_size_mb = file_size_bytes / (1024 * 1024)
+                    
+                    if not existing_log:
                         log_query = """
                         INSERT INTO external_db_sync_log
                         (user_id,username,external_database,table_name,
@@ -470,12 +484,38 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
                         cur.execute(log_query, (
                             user_id, username or "unknown", os.path.basename(path), table_name,
                             "IMPORT", processed_rows, session_id, allocated_db_name,
-                            total_rows, num_columns, table_data_size_mb, exact_size_mb
+                            true_total_rows, num_columns, table_data_size_mb, exact_size_mb
                         ))
-                        conn.commit()
+                    else:
+                        if processed_rows > 0:
+                            update_query = """
+                            UPDATE external_db_sync_log
+                            SET rows_affected = rows_affected + %s,
+                                total_rows = %s,
+                                total_columns = %s,
+                                sync_time = CURRENT_TIMESTAMP
+                            WHERE id = %s
+                            """
+                            cur.execute(update_query, (processed_rows, true_total_rows, num_columns, existing_log[0]))
+                        else:
+                            cur.execute("UPDATE external_db_sync_log SET sync_time = CURRENT_TIMESTAMP WHERE id = %s", (existing_log[0],))
+                            
+                    conn.commit()
                 conn.close()
             except Exception as e:
                 print(f"Failed to log CSV import to external_db_sync_log: {e}")
+
+    if ch_id and session_id and user_id:
+        try:
+            from database.config import MYSQL_CONFIG
+            import pymysql
+            conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
+            with conn.cursor() as cur:
+                cur.execute("UPDATE connection_history SET status='Success' WHERE id = %s", (ch_id,))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Failed to update connection_history status: {e}")
 
     print("\n🎉 All files processed successfully!")
     # ──────────────────────────────────────────────────────────────

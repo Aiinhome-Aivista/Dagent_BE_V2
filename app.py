@@ -898,7 +898,44 @@ def export_domestic_sales_report():
 def export_domestic_sales_preview():
     return export_domestic_sales_preview_controller(get_db_connection)
 
+from controllers.master_data_controller import (
+    get_data_categories, create_data_category, update_data_category, delete_data_category,
+    get_prompt_types_crud, create_prompt_type, update_prompt_type, delete_prompt_type
+)
 
+# --- Data Categories CRUD ---
+@app.route("/api/data-categories", methods=["GET"])
+def api_get_data_categories():
+    return get_data_categories(get_db_connection)
+
+@app.route("/api/data-categories", methods=["POST"])
+def api_create_data_category():
+    return create_data_category(get_db_connection)
+
+@app.route("/api/data-categories/<int:id>", methods=["PUT"])
+def api_update_data_category(id):
+    return update_data_category(get_db_connection, id)
+
+@app.route("/api/data-categories/<int:id>", methods=["DELETE"])
+def api_delete_data_category(id):
+    return delete_data_category(get_db_connection, id)
+
+# --- Prompt Types CRUD ---
+@app.route("/api/prompt-types-crud", methods=["GET"])
+def api_get_prompt_types_crud():
+    return get_prompt_types_crud(get_db_connection)
+
+@app.route("/api/prompt-types-crud", methods=["POST"])
+def api_create_prompt_type():
+    return create_prompt_type(get_db_connection)
+
+@app.route("/api/prompt-types-crud/<int:id>", methods=["PUT"])
+def api_update_prompt_type(id):
+    return update_prompt_type(get_db_connection, id)
+
+@app.route("/api/prompt-types-crud/<int:id>", methods=["DELETE"])
+def api_delete_prompt_type(id):
+    return delete_prompt_type(get_db_connection, id)
 
 # ==========================================
 # Report Recipients API
@@ -943,4 +980,4 @@ if __name__ == '__main__':
     scheduler.start()
 
 
-    app.run(host="0.0.0.0", port=3020, debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=3019, debug=True, use_reloader=False)
