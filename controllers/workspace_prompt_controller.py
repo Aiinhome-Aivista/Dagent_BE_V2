@@ -87,7 +87,7 @@ def set_workspace_prompt(get_db_connection):
         query = """
             INSERT INTO workspace_prompts (workspace_id, prompt_type, custom_prompt, data_category) 
             VALUES (%s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE custom_prompt = VALUES(custom_prompt)
+            ON DUPLICATE KEY UPDATE custom_prompt = VALUES(custom_prompt), updated_at = CURRENT_TIMESTAMP
         """
         cursor.execute(query, (workspace_id, prompt_type, custom_prompt, data_category))
         conn.commit()
