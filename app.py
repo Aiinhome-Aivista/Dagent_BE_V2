@@ -96,6 +96,11 @@ from controllers.ftp_connector_controller import (
     ftp_fetch_log_controller,
 )
 from controllers.dashboard_visuals import graph_metrics_controller,extract_graph_data_controller, default_dashboard_metrics_controller
+from controllers.llm_config_controller import (
+    get_providers_controller, create_provider_controller, update_provider_controller,
+    delete_provider_controller, test_provider_controller,
+    get_assignments_controller, update_assignments_controller
+)
 
 
 from controllers.scheduled_reports_controller import (
@@ -150,6 +155,37 @@ executor = ThreadPoolExecutor(max_workers=8)
 
 
 # ---------------------------------- API Endpoints ---------------------------------
+
+# ══════════════════════════════════════════════
+# LLM Config Routes (Dynamic LLM Switcher)
+# ══════════════════════════════════════════════
+@app.route('/api/llm/providers', methods=['GET', 'OPTIONS'])
+def llm_get_providers():
+    return get_providers_controller(get_db_connection) if request.method != 'OPTIONS' else ('', 204)
+
+@app.route('/api/llm/providers', methods=['POST', 'OPTIONS'])
+def llm_create_provider():
+    return create_provider_controller(get_db_connection) if request.method != 'OPTIONS' else ('', 204)
+
+@app.route('/api/llm/providers/<int:provider_id>', methods=['PUT', 'OPTIONS'])
+def llm_update_provider(provider_id):
+    return update_provider_controller(get_db_connection, provider_id) if request.method != 'OPTIONS' else ('', 204)
+
+@app.route('/api/llm/providers/<int:provider_id>', methods=['DELETE', 'OPTIONS'])
+def llm_delete_provider(provider_id):
+    return delete_provider_controller(get_db_connection, provider_id) if request.method != 'OPTIONS' else ('', 204)
+
+@app.route('/api/llm/providers/<int:provider_id>/test', methods=['POST', 'OPTIONS'])
+def llm_test_provider(provider_id):
+    return test_provider_controller(get_db_connection, provider_id) if request.method != 'OPTIONS' else ('', 204)
+
+@app.route('/api/llm/assignments', methods=['GET', 'OPTIONS'])
+def llm_get_assignments():
+    return get_assignments_controller(get_db_connection) if request.method != 'OPTIONS' else ('', 204)
+
+@app.route('/api/llm/assignments', methods=['PUT', 'OPTIONS'])
+def llm_update_assignments():
+    return update_assignments_controller(get_db_connection) if request.method != 'OPTIONS' else ('', 204)
 
 # Insight
 @app.route("/insight", methods=["POST"])
@@ -622,6 +658,8 @@ def update_scheduled_report(schedule_id):
 @app.route("/api/scheduled-reports/<int:schedule_id>", methods=["DELETE"])
 def delete_scheduled_report(schedule_id):
     return delete_schedule_controller(schedule_id)
+
+
 
 if __name__ == '__main__':
     # Start APScheduler
