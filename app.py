@@ -150,6 +150,8 @@ from controllers.company_controller import (
 )
 
 from flask_socketio import SocketIO
+from controllers.hub_data_controller import store_hub_data_controller
+
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 CORS(app)
@@ -969,6 +971,16 @@ def delete_scheduled_report(schedule_id):
 def rollback_kgraph():
     return rollback_kgraph_controller(get_db_connection)
 
+@app.route("/api/store-chat-session", methods=["POST"])
+def api_store_hub_data():
+    return store_hub_data_controller(get_db_connection)
+
+@app.route("/hub-chat", methods=["POST"])
+def hub_chat():
+    return store_hub_data_controller(get_db_connection)
+
+
+
 if __name__ == '__main__':
     # Start APScheduler
     scheduler = BackgroundScheduler()
@@ -980,4 +992,4 @@ if __name__ == '__main__':
     scheduler.start()
 
 
-    app.run(host="0.0.0.0", port=3020, debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=3019, debug=True, use_reloader=False)
