@@ -137,7 +137,12 @@ def _call_openai(messages, json_mode, temperature, api_key, model_name, base_url
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    target_url = f"{base_url}/chat/completions" if base_url else "https://api.openai.com/v1/chat/completions"
+    # target_url = f"{base_url}/chat/completions" if base_url else "https://api.openai.com/v1/chat/completions"
+    target_url = (
+        f"{base_url.rstrip('/')}/chat/completions"
+        if base_url
+        else "https://api.openai.com/v1/chat/completions"
+    )
     res = http_session.post(target_url, json=payload, headers=headers, timeout=timeout)
     res.raise_for_status()
     return res.json()["choices"][0]["message"]["content"].strip()
@@ -187,6 +192,15 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
                     return _call_mistral_local(messages, json_mode, temperature, model_name, base_url)
                 elif provider == "openai":
                     return _call_openai(messages, json_mode, temperature, api_key, model_name, base_url)
+                elif provider == "openrouter":
+                    return _call_openai(
+                        messages,
+                        json_mode,
+                        temperature,
+                        api_key,
+                        model_name,
+                        base_url or "https://openrouter.ai/api/v1"
+                    )
                 else:
                     print(f"[LLM Client] Unknown provider '{provider}', falling back to .env config")
                     return json.dumps({"error": "Invalid config"}) if json_mode else "[LLM Error] Invalid config"
