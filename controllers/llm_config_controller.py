@@ -216,7 +216,7 @@ def test_provider_controller(get_conn, provider_id):
                 0.1,
                 provider["api_key"],
                 provider["model_name"],
-                provider["base_url"] or "https://openrouter.ai/api/v1",
+                provider.get("base_url"),
                 timeout=30
             )
         else:
