@@ -227,11 +227,18 @@ def test_provider_controller(get_conn, provider_id):
     except Exception as e:
         err_str = str(e).lower()
         short_msg = "Test Failed"
-        print(f"OpenRouter Error: {repr(e)}")
+
+        print(f"[LLM TEST] Provider: {provider_id}")
+        print(f"[LLM TEST] Error: {repr(e)}")
+        
         if "401" in err_str or "unauthorized" in err_str:
-            short_msg = "API Key is invalid or expired."
-        elif "429" in err_str or "quota" in err_str or "billing" in err_str or "too many requests" in err_str:
-            short_msg = "API quota exceeded."
+            short_msg = "Invalid API Key"
+        elif "402" in err_str or "payment required" in err_str:
+            short_msg = "Insufficient OpenRouter credits"
+        elif "403" in err_str or "forbidden" in err_str:
+            short_msg = "Access denied"
+        elif "429" in err_str or "quota" in err_str:
+            short_msg = "Rate limit or quota exceeded"
         elif "404" in err_str or "not found" in err_str:
             if "model" in err_str:
                 short_msg = "Invalid Model Name."
