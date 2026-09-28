@@ -209,6 +209,16 @@ def test_provider_controller(get_conn, provider_id):
             result = _call_mistral_local(test_messages, False, 0.1, provider["model_name"], provider["base_url"], timeout=5)
         elif ptype == "openai":
             result = _call_openai(test_messages, False, 0.1, provider["api_key"], provider["model_name"], provider["base_url"], timeout=5)
+        elif ptype.strip().lower() == "openrouter":
+            result = _call_openai(
+                test_messages,
+                False,
+                0.1,
+                provider["api_key"],
+                provider["model_name"],
+                provider["base_url"] or "https://openrouter.ai/api/v1",
+                timeout=30
+            )
         else:
             return jsonify({"status": False, "msg": f"Unknown provider type: {ptype}"})
 
