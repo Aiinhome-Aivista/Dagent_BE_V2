@@ -202,13 +202,23 @@ def test_provider_controller(get_conn, provider_id):
         )
 
         if ptype == "gemini":
-            result = _call_gemini(test_messages, False, 0.1, provider["api_key"], provider["model_name"], timeout=5)
+            result = _call_gemini(test_messages, False, 0.1, provider["api_key"], provider["model_name"], provider.get("base_url"), timeout=60)
         elif ptype == "mistral_cloud":
-            result = _call_mistral_cloud(test_messages, False, 0.1, provider["api_key"], provider["model_name"], timeout=5)
+            result = _call_mistral_cloud(test_messages, False, 0.1, provider["api_key"], provider["model_name"], provider.get("base_url"), timeout=60)
         elif ptype == "mistral_local":
-            result = _call_mistral_local(test_messages, False, 0.1, provider["model_name"], provider["base_url"], timeout=5)
+            result = _call_mistral_local(test_messages, False, 0.1, provider.get("api_key"), provider["model_name"], provider["base_url"], timeout=600)
         elif ptype == "openai":
-            result = _call_openai(test_messages, False, 0.1, provider["api_key"], provider["model_name"], provider["base_url"], timeout=5)
+            result = _call_openai(test_messages, False, 0.1, provider["api_key"], provider["model_name"], provider["base_url"], timeout=60)
+        elif ptype.strip().lower() == "openrouter":
+            result = _call_openai(
+                test_messages,
+                False,
+                0.1,
+                provider["api_key"],
+                provider["model_name"],
+                provider.get("base_url"),
+                timeout=60
+            )
         else:
             return jsonify({"status": False, "msg": f"Unknown provider type: {ptype}"})
 
@@ -217,11 +227,18 @@ def test_provider_controller(get_conn, provider_id):
     except Exception as e:
         err_str = str(e).lower()
         short_msg = "Test Failed"
+
+        print(f"[LLM TEST] Provider: {provider_id}")
+        print(f"[LLM TEST] Error: {repr(e)}")
         
         if "401" in err_str or "unauthorized" in err_str:
-            short_msg = "API Key is invalid or expired."
-        elif "429" in err_str or "quota" in err_str or "billing" in err_str or "too many requests" in err_str:
-            short_msg = "API quota exceeded."
+            short_msg = "Invalid API Key"
+        elif "402" in err_str or "payment required" in err_str:
+            short_msg = "Insufficient OpenRouter credits"
+        elif "403" in err_str or "forbidden" in err_str:
+            short_msg = "Access denied"
+        elif "429" in err_str or "quota" in err_str:
+            short_msg = "Rate limit or quota exceeded"
         elif "404" in err_str or "not found" in err_str:
             if "model" in err_str:
                 short_msg = "Invalid Model Name."

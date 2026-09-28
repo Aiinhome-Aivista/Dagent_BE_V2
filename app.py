@@ -150,6 +150,8 @@ from controllers.company_controller import (
 )
 
 from flask_socketio import SocketIO
+from controllers.hub_data_controller import store_hub_data_controller, update_hub_chat_controller
+
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 CORS(app)
@@ -561,6 +563,14 @@ def session_chat():
         return execute_dynamic_controller(workspace_id, "rag_chat_controller_code", session_rag_chat_controller, get_db_connection)
     return session_rag_chat_controller(get_db_connection)
 
+@app.route("/api/store-chat-session", methods=["POST"])
+def store_chat_session():
+    return store_hub_data_controller(get_db_connection)
+
+@app.route("/api/update-chat-session", methods=["POST"])
+def update_chat_session():
+    return update_hub_chat_controller(get_db_connection)
+
 @app.route('/api/apply_bulk_sync', methods=['POST']) 
 def apply_bulk_sync_route():
     return apply_bulk_sync()
@@ -968,6 +978,12 @@ def delete_scheduled_report(schedule_id):
 @app.route("/kgraph-rollback", methods=["POST"])
 def rollback_kgraph():
     return rollback_kgraph_controller(get_db_connection)
+
+@app.route("/api/store-chat-session", methods=["POST"])
+def api_store_hub_data():
+    return store_hub_data_controller(get_db_connection)
+
+
 
 if __name__ == '__main__':
     # Start APScheduler
