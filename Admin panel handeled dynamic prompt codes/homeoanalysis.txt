@@ -1,0 +1,877 @@
+import hashlib
+import re
+import json
+import requests
+import mysql.connector
+from flask import request, jsonify
+from database.config import MISTRAL_API_KEY, MISTRAL_MODEL, MYSQL_CONFIG
+
+from pyvis.network import Network
+import os
+import uuid
+from arango import ArangoClient
+from database.config import (
+    GRAPH_FOLDER, BASE_URL,
+    ARANGO_HOST, ARANGO_USER, ARANGO_PASS, ARANGO_DB
+)
+
+MISTRAL_URL    = "https://api.mistral.ai/v1/chat/completions"
+MAX_ROWS       = 100
+MAX_CTX_CHARS  = 80000
+
+
+
+
+
+
+
+
+def detect_cross_source_relationships(table_columns: dict, web_data: list, db_data: list) -> dict:
+    db_summary = {}
+    for db in db_data:
+        for tbl in db["tables"]:
+            db_summary[tbl["table_name"]] = {
+                "columns": tbl.get("columns", []),
+                "sample_rows": tbl.get("sample_rows", [])
+            }
+
+    web_summary = []
+    for w in web_data:
+        for item in w["items"]:
+            web_summary.append({
+                "topic": w["topic"],
+                "title": item["title"],
+                "brief": (item.get("brief") or "")[:200]
+            })
+
+    prompt = f"""
+You are an expert Knowledge Graph Builder specializing in Homeopathy and alternative medicine.
+
+Analyze the uploaded homeopathy dataset and generate a RICH, HIERARCHICAL, medical-focused Knowledge Graph.
+The graph MUST reflect the full homeopathic relationships visible in the data.
+
+## DB Tables and Sample Data:
+{json.dumps(db_summary, indent=2, default=str)}
+
+## Web Data:
+{json.dumps(web_summary, indent=2, default=str)}
+
+---
+
+## MANDATORY GRAPH STRUCTURE
+
+### LEVEL 1 — Remedy Nodes
+Create one node per unique remedy found in the data (e.g., Aconite, Belladonna, Arnica).
+Node type: "Remedy"
+
+### LEVEL 2 — Remedy Family Nodes
+Create one node per unique remedy family or kingdom (e.g., Plant, Mineral, Animal, Tissue Salt).
+Node type: "RemedyFamily"
+
+### LEVEL 3 — Condition / Disease Nodes
+Create one node per unique clinical condition, disease, or ailment (e.g., Fever, Cough, Trauma).
+Node type: "Condition"
+
+### LEVEL 4 — Symptom Nodes
+Create one node per unique symptom or indication.
+Node type: "Symptom"
+
+### LEVEL 5 — Body System Nodes
+Create one node per body system affected (e.g., Respiratory, Digestive, Nervous).
+Node type: "BodySystem"
+
+### LEVEL 6 — Potency / Dose Nodes
+Create one node per potency or dose recommendation (e.g., 30C, 200C, 6X).
+Node type: "Potency"
+
+### LEVEL 7 — Modality Nodes
+Create nodes for modalities (aggravation/amelioration).
+Node type: "Modality"
+
+## MANDATORY EDGES (Only create if supported by data)
+
+1. MEDICAL HIERARCHY
+   - (Remedy) --[BELONGS_TO]--> (RemedyFamily)
+   - (Remedy) --[TREATS]--> (Condition)
+   - (Remedy) --[HAS_SYMPTOM]--> (Symptom)
+   - (Condition) --[AFFECTS]--> (BodySystem)
+   - (Remedy) --[AFFECTS_SYSTEM]--> (BodySystem)
+   - (Remedy) --[REQUIRES_DOSE]--> (Potency)
+   - (Symptom) --[MODIFIED_BY]--> (Modality)
+
+---
+
+## NUMERICAL PROPERTIES (store as node/edge properties, NEVER as separate nodes)
+- Include any severity, frequency, or numerical data as properties in nodes or edges.
+
+---
+
+## OUTPUT FORMAT
+Return EXACTLY this JSON (no markdown, no extra text):
+{{
+  "nodes": [
+    {{"id": "rem_aconite", "label": "Aconite", "type": "Remedy", "properties": {{}}}},
+    {{"id": "fam_plant", "label": "Plant Kingdom", "type": "RemedyFamily", "properties": {{}}}},
+    {{"id": "cond_fever", "label": "Fever", "type": "Condition", "properties": {{}}}},
+    {{"id": "symp_thirst", "label": "Intense Thirst", "type": "Symptom", "properties": {{}}}},
+    {{"id": "sys_resp", "label": "Respiratory", "type": "BodySystem", "properties": {{}}}},
+    {{"id": "pot_30c", "label": "30C", "type": "Potency", "properties": {{}}}},
+    {{"id": "mod_cold", "label": "Worse from cold", "type": "Modality", "properties": {{}}}}
+  ],
+  "edges": [
+    {{"from": "rem_aconite", "to": "fam_plant", "label": "BELONGS_TO", "properties": {{}}}},
+    {{"from": "rem_aconite", "to": "cond_fever", "label": "TREATS", "properties": {{}}}},
+    {{"from": "rem_aconite", "to": "symp_thirst", "label": "HAS_SYMPTOM", "properties": {{}}}},
+    {{"from": "cond_fever", "to": "sys_resp", "label": "AFFECTS", "properties": {{}}}}
+  ]
+}}
+
+## RULES
+1. Use ONLY node IDs you defined in the "nodes" array for "from"/"to" in edges.
+2. Extract actual values from the sample data — do NOT invent remedies or conditions that do not exist in the data provided.
+3. Node IDs must be unique strings with no spaces (use underscores).
+4. Limit to the top 25 most frequent/significant entities to avoid overwhelming the graph, but ensure core relationships are captured.
+"""
+
+    try:
+        resp = requests.post(
+            MISTRAL_URL,
+            headers={
+                "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": MISTRAL_MODEL,
+                "messages":[{"role":"user","content":prompt}],
+                "temperature":0.1,
+                "response_format": {"type": "json_object"}
+            },
+            timeout=120
+        )
+
+        text = resp.json()["choices"][0]["message"]["content"]
+        result = json.loads(text)
+        result.setdefault("nodes", [])
+        result.setdefault("edges", [])
+        return result
+
+    except Exception as e:
+        print("Homeopathy Knowledge Graph detection error:", e)
+        return {"nodes": [], "edges": []}
+
+
+def generate_session_graph(session_id, web_data, db_data, target_arango_db=None):
+
+    net = Network(
+        height="850px",
+        width="100%",
+        bgcolor="#222222",
+        font_color="white",
+        directed=True
+    )
+
+    type_colors = {
+        "Remedy": "#4caf50",       # Green
+        "RemedyFamily": "#8bc34a", # Light Green
+        "Condition": "#f44336",    # Red
+        "Symptom": "#ff9800",      # Orange
+        "BodySystem": "#2196f3",   # Blue
+        "Potency": "#9c27b0",      # Purple
+        "Modality": "#795548",     # Brown
+        "WebTopic": "#e91e63",     # Pink
+        "WebTitle": "#ffc107"      # Amber
+    }
+
+    table_columns = {}
+    for db in db_data:
+        for table in db["tables"]:
+            table_columns[table["table_name"]] = table.get("columns", [])
+
+    graph_data = detect_cross_source_relationships(table_columns, web_data, db_data)
+    nodes = graph_data.get("nodes", [])
+    edges = graph_data.get("edges", [])
+
+    session_node = f"session_{session_id}"
+    net.add_node(session_node, label=f"Session {session_id}", color="#00bfa5", size=35, type="Session")
+    existing_ids = {session_node}
+
+    for w in web_data:
+        topic = str(w["topic"]).replace(" ", "_")
+        if topic not in existing_ids:
+            net.add_node(topic, label=w["topic"], color=type_colors["WebTopic"], size=20, type="WebTopic")
+            net.add_edge(session_node, topic, label="SEARCHED")
+            existing_ids.add(topic)
+
+        for item in w["items"]:
+            title_id = hashlib.sha256(item["title"].encode()).hexdigest()[:8]
+            if title_id not in existing_ids:
+                net.add_node(title_id, label=item["title"][:40], color=type_colors["WebTitle"], size=15, type="WebTitle")
+                net.add_edge(topic, title_id, label="FOUND_IN")
+                existing_ids.add(title_id)
+
+    for n in nodes:
+        node_id = str(n.get("id"))
+        if not node_id: continue
+        label = str(n.get("label", node_id))
+        ntype = str(n.get("type", "Entity"))
+        
+        props = n.get("properties", {})
+        title_lines = [f"{k}: {v}" for k, v in props.items()]
+        title = "\n".join(title_lines) if title_lines else ntype
+
+        color = type_colors.get(ntype, "#b0bec5")
+        
+        net.add_node(node_id, label=label, title=title, color=color, size=25, type=ntype)
+        existing_ids.add(node_id)
+        if ntype in ["Remedy", "Condition", "RemedyFamily"]:
+            net.add_edge(session_node, node_id, label="ANALYZED")
+
+    for e in edges:
+        from_node = str(e.get("from"))
+        to_node = str(e.get("to"))
+        label = str(e.get("label", ""))
+
+        if from_node in existing_ids and to_node in existing_ids:
+            props = e.get("properties", {})
+            title_lines = [f"{k}: {v}" for k, v in props.items()]
+            title = "\n".join(title_lines) if title_lines else label
+            
+            net.add_edge(from_node, to_node, label=label, title=title, color="#ff5252", width=2)
+        else:
+            print(f"[Graph] Skipped edge due to missing nodes: {from_node} -> {to_node}")
+
+    html_filename = f"graph_{uuid.uuid4().hex[:8]}.html"
+    html_path = os.path.join(GRAPH_FOLDER, html_filename)
+
+    net.save_graph(html_path)
+
+    # --- Sync to ArangoDB ---
+    try:
+        _sync_to_arango(session_id, net.nodes, net.edges, target_arango_db)
+    except Exception as e:
+        print(f"[ArangoDB] Sync failed: {e}")
+
+    graph_url = f"{BASE_URL}/graphs/{html_filename}"
+
+    return graph_url
+
+# ══════════════════════════════════════════════════════
+# ARANGODB SYNC
+# ══════════════════════════════════════════════════════
+
+def _safe_key(val: str) -> str:
+    """ArangoDB _key allows only [a-zA-Z0-9_:.@()-]+"""
+    return re.sub(r'[^a-zA-Z0-9_:.@()-]', '_', str(val))
+
+def _sync_to_arango(session_id: str, nodes: list, edges: list, target_arango_db: str = None):
+    print(f"[ArangoDB] Connecting to {ARANGO_HOST} ...")
+    client = ArangoClient(hosts=ARANGO_HOST)
+    sys_db = client.db('_system', username=ARANGO_USER, password=ARANGO_PASS)
+
+    db_to_use = target_arango_db if target_arango_db else ARANGO_DB
+
+    # Ensure database exists
+    if not sys_db.has_database(db_to_use):
+        sys_db.create_database(db_to_use)
+    
+    db = client.db(db_to_use, username=ARANGO_USER, password=ARANGO_PASS)
+
+    # Ensure collections exist
+    nodes_col_name = "session_nodes"
+    edges_col_name = "session_edges"
+
+    if not db.has_collection(nodes_col_name):
+        db.create_collection(nodes_col_name)
+    if not db.has_collection(edges_col_name):
+        db.create_collection(edges_col_name, edge=True)
+
+    # --- Auto Create Graph Profile ---
+    graph_name = "SessionGraph"
+    if not db.has_graph(graph_name):
+        db.create_graph(
+            graph_name,
+            edge_definitions=[
+                {
+                    "edge_collection": edges_col_name,
+                    "from_vertex_collections": [nodes_col_name],
+                    "to_vertex_collections": [nodes_col_name]
+                }
+            ]
+        )
+    # ---------------------------------
+
+    print("[DEBUG] _sync_to_arango: REACHED BACKUP BLOCK", flush=True)
+    from database.kgraph_backup_service import backup_kgraph_collections
+    bkp_result = backup_kgraph_collections(db, nodes_col_name, edges_col_name)
+    print(f"[DEBUG] _sync_to_arango: BACKUP DONE -- skipped={bkp_result.get('skipped')}", flush=True)
+
+    nodes_col = db.collection(nodes_col_name)
+    edges_col = db.collection(edges_col_name)
+
+    # Sync Nodes
+    print(f"[ArangoDB] Syncing {len(nodes)} nodes...")
+    for n in nodes:
+        key = _safe_key(n["id"])
+        doc = {
+            "_key": key,
+            "session_id": session_id,
+            "label": n.get("label", ""),
+            "original_id": n["id"],
+            "type": n.get("type") or (n["id"].split('_')[0] if '_' in n["id"] else "unknown")
+        }
+        try:
+            if nodes_col.has(key):
+                nodes_col.update(doc)
+            else:
+                nodes_col.insert(doc)
+        except Exception as e:
+            print(f"[ArangoDB] skip node {key}: {e}")
+
+    # Sync Edges
+    print(f"[ArangoDB] Syncing {len(edges)} edges...")
+    for e in edges:
+        from_key = _safe_key(e["from"])
+        to_key   = _safe_key(e["to"])
+        edge_key = _safe_key(f"{from_key}_to_{to_key}")
+        
+        doc = {
+            "_key": edge_key,
+            "_from": f"{nodes_col_name}/{from_key}",
+            "_to": f"{nodes_col_name}/{to_key}",
+            "session_id": session_id,
+            "label": e.get("label", "relation"),
+            "title": e.get("title", "")
+        }
+        try:
+            if edges_col.has(edge_key):
+                edges_col.update(doc)
+            else:
+                edges_col.insert(doc)
+        except Exception as ex:
+            print(f"[ArangoDB] skip edge {edge_key}: {ex}")
+
+    print("[ArangoDB] Sync Complete!")
+# ══════════════════════════════════════════════════════
+# DATA FETCHERS
+# ══════════════════════════════════════════════════════
+
+def _fetch_web_data(session_id: str, topics: list, conn) -> list:
+    """Fetch saved_web_results filtered by session_id + topic list."""
+    if not topics:
+        return []
+    cursor = None
+    results = []
+    try:
+        cursor = conn.cursor(dictionary=True)
+        placeholders = ",".join(["%s"] * len(topics))
+        cursor.execute(f"""
+            SELECT topic, title, url, brief, saved_at
+            FROM saved_web_results
+            WHERE session_id = %s
+              AND topic IN ({placeholders})
+            ORDER BY topic, saved_at DESC
+        """, [session_id] + topics)
+        rows = cursor.fetchall()
+
+        # Group by topic
+        grouped = {}
+        for r in rows:
+            t = r["topic"]
+            if t not in grouped:
+                grouped[t] = []
+            grouped[t].append({
+                "title":    r["title"],
+                "url":      r["url"],
+                "brief":    r.get("brief", ""),
+                "saved_at": str(r["saved_at"]) if r["saved_at"] else None
+            })
+
+        for topic, items in grouped.items():
+            results.append({
+                "source_type":  "web",
+                "topic":        topic,
+                "result_count": len(items),
+                "items":        items
+            })
+    except Exception as e:
+        print(f"[Analysis] web fetch error: {e}")
+    finally:
+        if cursor: cursor.close()
+    return results
+
+def _fetch_db_data(session_id: str, databaseses: list, conn) -> list:
+    """
+    For each requested database:
+      1. Get new_user_db from external_db_sync_log
+      2. Connect to new_user_db and read all tables (up to MAX_ROWS each)
+    """
+
+    if not databaseses:
+        return []
+
+    cursor = None
+    results = []
+
+    try:
+        cursor = conn.cursor(dictionary=True)
+
+        placeholders = ",".join(["%s"] * len(databaseses))
+
+        cursor.execute(f"""
+            SELECT DISTINCT external_database, new_user_db
+            FROM external_db_sync_log
+            WHERE session_id = %s
+              AND external_database IN ({placeholders})
+              AND new_user_db IS NOT NULL
+              AND new_user_db != ''
+        """, [session_id] + databaseses)
+
+        rows = cursor.fetchall()
+
+        db_map = {r["external_database"]: r["new_user_db"] for r in rows}
+
+        print(f"[Analysis] DB MAP -> {db_map}")
+
+    except Exception as e:
+        print(f"[Analysis] db_map error: {e}")
+        return []
+
+    finally:
+        if cursor:
+            cursor.close()
+
+    # We need to query each unique new_user_db only once, otherwise if multiple files map to the same workspace database (e.g. document uploads), we'll duplicate the data.
+    unique_new_dbs = list(set(db_map.values()))
+
+    for new_db in unique_new_dbs:
+        # Find which external_databases map to this new_db to list as the source
+        mapped_ext_dbs = [ext for ext, ndb in db_map.items() if ndb == new_db]
+        display_name_str = ", ".join(mapped_ext_dbs)
+
+        db_result = {
+            "source_type": "database",
+            "external_database": display_name_str,
+            "new_user_db": new_db,
+            "tables": []
+        }
+
+        ext_conn = None
+        ext_cur = None
+
+        try:
+
+            print(f"[Analysis] Connecting DB -> {new_db}")
+
+            ext_conn = mysql.connector.connect(
+                host=MYSQL_CONFIG["host"],
+                port=MYSQL_CONFIG["port"],
+                user=MYSQL_CONFIG["user"],
+                password=MYSQL_CONFIG["password"],
+                database=new_db,
+                connection_timeout=10
+            )
+
+            ext_cur = ext_conn.cursor(dictionary=True)
+
+            # Fetch tables
+            ext_cur.execute("SHOW TABLES")
+            tables_raw = ext_cur.fetchall()
+
+            tables = [list(r.values())[0] for r in tables_raw]
+
+            print(f"[Analysis] Tables in {new_db} -> {tables}")
+
+            for t in tables:
+
+                print(f"[Analysis] Reading table -> {t}")
+
+                try:
+
+                    if t == 'workspace_files':
+                        ext_cur.execute(f"SELECT * FROM `{t}` ORDER BY id DESC LIMIT %s", (MAX_ROWS,))
+                    else:
+                        ext_cur.execute(f"SELECT * FROM `{t}` LIMIT %s", (MAX_ROWS,))
+                    rows = ext_cur.fetchall()
+
+                    row_count = len(rows)
+
+                    if row_count > 0:
+                        cols = list(rows[0].keys())
+                    else:
+                        cols = []
+
+                    # Column statistics
+                    col_stats = {}
+
+                    if row_count > 0:
+
+                        for col in cols:
+
+                            vals = []
+
+                            for r in rows:
+                                val = r.get(col)
+
+                                if val is None:
+                                    continue
+
+                                val_str = str(val).strip()
+
+                                if val_str:
+                                    vals.append(val_str)
+
+                            distinct_vals = list(dict.fromkeys(vals))
+
+                            col_stats[col] = {
+                                "total_values": len(vals),
+                                "distinct_values": len(distinct_vals),
+                                "sample": distinct_vals[:10]
+                            }
+
+                    if t == 'workspace_files':
+                        for r in rows:
+                            try:
+                                import json
+                                if isinstance(r.get('file_data'), str):
+                                    file_data = json.loads(r['file_data'])
+                                else:
+                                    file_data = r.get('file_data') or {}
+                                    
+                                # Grab the file name to use as the display name for the db node
+                                file_name = r.get('file_name', 'Document')
+                                db_result["display_name"] = file_name
+                                    
+                                structured = file_data.get('structured_content')
+                                if structured:
+                                    # Add Paragraphs as a virtual table
+                                    paragraphs = structured.get('paragraphs', [])
+                                    if paragraphs:
+                                        db_result["tables"].append({
+                                            "table_name": "Document_Paragraphs",
+                                            "row_count": len(paragraphs),
+                                            "columns": ["title", "text"],
+                                            "column_stats": {},
+                                            "sample_rows": paragraphs[:5]
+                                        })
+                                    # Add each PDF table as a virtual table
+                                    for idx, vtable in enumerate(structured.get('tables', [])):
+                                        vname = vtable.get('table_name', f"PDF_Table_{idx+1}")
+                                        vcols = vtable.get('headers', [])
+                                        
+                                        seen_cols = {}
+                                        dedup_cols = []
+                                        for c in vcols:
+                                            base = str(c).strip() if c else "Column"
+                                            if base in seen_cols:
+                                                seen_cols[base] += 1
+                                                dedup_cols.append(f"{base} ({seen_cols[base]})")
+                                            else:
+                                                seen_cols[base] = 1
+                                                dedup_cols.append(base)
+
+                                        sample_vrows = []
+                                        for vrow in vtable.get('rows', [])[:5]:
+                                            row_dict = {}
+                                            for i, col in enumerate(dedup_cols):
+                                                row_dict[col] = vrow[i] if i < len(vrow) else ""
+                                            sample_vrows.append(row_dict)
+                                            
+                                        db_result["tables"].append({
+                                            "table_name": vname,
+                                            "row_count": len(vtable.get('rows', [])),
+                                            "columns": dedup_cols,
+                                            "column_stats": {},
+                                            "sample_rows": sample_vrows
+                                        })
+                            except Exception as e:
+                                print(f"Error parsing workspace_files json: {e}")
+                    else:
+                        db_result["tables"].append({
+                            "table_name": t,
+                            "row_count": row_count,
+                            "columns": cols,
+                            "column_stats": col_stats,
+                            "sample_rows": rows[:5] if rows else []
+                        })
+
+                except Exception as table_error:
+                    print(f"[Analysis] table {t} error -> {table_error}")
+
+        except Exception as db_error:
+            print(f"[Analysis] connect {new_db} error -> {db_error}")
+
+        finally:
+
+            if ext_cur:
+                try:
+                    ext_cur.close()
+                except:
+                    pass
+
+            if ext_conn:
+                try:
+                    ext_conn.close()
+                except:
+                    pass
+
+        results.append(db_result)
+
+    return results
+
+
+
+
+
+# ══════════════════════════════════════════════════════
+# CONTEXT BUILDER
+# ══════════════════════════════════════════════════════
+
+def _build_context(web_data: list, db_data: list) -> str:
+    parts = []
+
+    for w in web_data:
+        lines = [f"=== WEB TOPIC: {w['topic']} ({w['result_count']} results) ==="]
+        for item in w["items"]:
+            lines.append(f"  Title : {item['title']}")
+            lines.append(f"  URL   : {item['url']}")
+            if item.get("brief"):
+                lines.append(f"  Brief : {item['brief'][:300]}")
+        parts.append("\n".join(lines))
+
+    for d in db_data:
+        lines = [f"=== DATABASE: {d['external_database']} (stored as: {d['new_user_db']}) ==="]
+        for tbl in d["tables"]:
+            lines.append(f"\n  Table: {tbl['table_name']} ({tbl['row_count']} rows)")
+            lines.append(f"  Columns: {', '.join(tbl['columns'])}")
+            # Column stats
+            for col, stats in tbl["column_stats"].items():
+                lines.append(
+                    f"    {col}: {stats['distinct_values']} distinct values — "
+                    f"sample: {', '.join(str(v) for v in stats['sample'][:8])}"
+                )
+            # Sample rows
+            lines.append(f"  Sample rows (up to 5):")
+            for i, row in enumerate(tbl["sample_rows"], 1):
+                r_str = " | ".join(f"{k}:{v}" for k,v in row.items()
+                                   if v is not None and str(v).strip())
+                lines.append(f"    Row{i}: {r_str}")
+        parts.append("\n".join(lines))
+
+    ctx = "\n\n".join(parts)
+    if len(ctx) > MAX_CTX_CHARS:
+        ctx = ctx[:MAX_CTX_CHARS] + "\n\n[... truncated ...]"
+    return ctx
+
+
+# ══════════════════════════════════════════════════════
+# MISTRAL
+# ══════════════════════════════════════════════════════
+
+def _call_mistral(context: str, topics: list, databaseses: list) -> dict:
+    source_desc = []
+    if topics:    source_desc.append(f"web topics: {', '.join(topics)}")
+    if databaseses: source_desc.append(f"databaseses: {', '.join(databaseses)}")
+
+    system = """You are an expert in Homeopathy and natural medicine.
+
+Your task is to analyze the provided homeopathy reference document data dynamically.
+
+STEP 1 — PROFILE THE DATA
+Identify homeopathy specific entities: Remedy Families, Remedies, Potencies, Body Systems, Conditions, and Symptoms.
+
+STEP 2 — DETECT DATA PATTERNS
+Look for patterns in how remedies are associated with specific symptoms, modalities, and body systems.
+
+STEP 3 — GENERATE KPIs DYNAMICALLY
+Generate at least 4-6 KPIs related to homeopathy. For example: Total Remedies, Remedy Families, Conditions Covered, Body Systems mentioned.
+
+STEP 4 — SELECT VISUALIZATIONS
+Generate at least 4-6 charts. Use pie charts for Remedy Families, bar charts for Conditions by Body System, or Top Potencies.
+
+STEP 5 — DATA ACCURACY
+Use only values and entities present in the dataset. Do not invent remedies, symptoms, or potencies.
+
+STEP 6 — INSIGHTS
+Provide concise insights based strictly on the available homeopathy data.
+
+STEP 7 — OUTPUT
+Respond ONLY in valid JSON containing three keys: "report", "kpis", and "charts".
+Your report text must be written as ONE continuous plain text — like a medical reference chapter. Mix paragraphs and bullet points naturally. Minimum 15-20 lines of content. Use actual values, names, and numbers from the data. Never be vague or generic."""
+
+    user = f"""
+Analyze the following homeopathy data ({'; '.join(source_desc)}):
+
+{context}
+
+Based on the data, return ONLY this JSON structure:
+{{
+  "report": "TITLE: <descriptive title here>\\n\\n<Opening paragraph — introducing the homeopathy data analyzed, key highlights.>\\n\\n<Second paragraph — describe the main remedies, families, and sections found.>\\n\\n• <Bullet: specific remedy with actual value/symptom from data>\\n• <Bullet: another specific metric or condition>\\n• <Bullet: notable modality or pattern found>\\n• <Bullet: another important data point>\\n\\n<Third paragraph — deeper analysis: relationships between remedies, body systems, and conditions.>\\n\\n• <Bullet: cross-entity insight>\\n• <Bullet: most prominent body system or condition>\\n• <Bullet: interesting finding regarding potency or dosage>\\n\\n<Fourth paragraph — data completeness and structure observations.>\\n\\n• <Bullet: missing or null value observation>\\n\\n<Fifth paragraph — summary and conclusions.>\\n\\n• <Bullet: actionable conclusion>\\n• <Bullet: another conclusion>",
+  
+  "kpis": [
+    {{
+      "title": "<Name of the Metric (e.g., Total Remedies, Conditions)>",
+      "value": "<Actual numeric value extracted from data>",
+      "description": "<Short explanation of this KPI>",
+      "trend": "up"
+    }}
+  ],
+  
+  "charts": [
+    {{
+      "chart_type": "<bar or pie or line>",
+      "title": "<Descriptive title for the chart>",
+      "description": "<What this chart represents>",
+      "labels": ["<Category 1>", "<Category 2>", "<Category 3>"],
+      "datasets": [
+        {{
+          "label": "<Metric Name (e.g., Count)>",
+          "data": [1, 2, 3]
+        }}
+      ]
+    }}
+  ]
+}}
+"""
+    headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}",
+               "Content-Type": "application/json", "Accept": "application/json"}
+    payload = {
+        "model": MISTRAL_MODEL,
+        "messages": [{"role":"system","content":system},
+                     {"role":"user","content":user}],
+        "response_format": {"type":"json_object"},
+        "temperature": 0.2
+    }
+    try:
+        resp = requests.post(MISTRAL_URL, headers=headers, json=payload, timeout=120)
+        resp.raise_for_status()
+        return json.loads(resp.json()["choices"][0]["message"]["content"])
+    except Exception as e:
+        print(f"[Mistral] {e}")
+        return None
+
+
+# ══════════════════════════════════════════════════════
+# MAIN CONTROLLER  —  POST /session-analysis
+# ══════════════════════════════════════════════════════
+
+def session_analysis_controller(get_connection_func):
+    data       = request.json or {}
+    print(f"DEBUG /session-analysis RAW JSON: {data}")
+    session_id = (data.get("session_id") or "").strip()
+    topics     = [t.strip() for t in (data.get("topics")    or []) if str(t).strip()]
+    raw_databases = data.get("databases") or data.get("databaseses") or []
+    databaseses  = [d.strip() for d in raw_databases if str(d).strip()]
+    print(f"DEBUG parsed topics: {topics}, parsed databases: {databaseses}")
+
+    if not session_id:
+        return jsonify({
+            "status":"failed","statusCode":400,
+            "message":"Field 'session_id' is required."
+        }), 400
+
+    if not topics and not databaseses:
+        return jsonify({
+            "status":"failed","statusCode":400,
+            "message":"At least one of 'topics' or 'databaseses' must be provided."
+        }), 400
+
+    conn = None
+    try:
+        conn = get_connection_func()
+        
+        target_arango_db = None
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT workspace_arango_db FROM workspaces WHERE session_id = %s", (session_id,))
+            row = cursor.fetchone()
+            if row and row.get("workspace_arango_db"):
+                target_arango_db = row["workspace_arango_db"]
+            cursor.close()
+        except Exception as e:
+            print(f"[Analysis] DB fetch target_arango_db error: {e}")
+            
+        # Check if files are still processing for this workspace
+        from controllers.uploads_controller import is_workspace_processing
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT workspace_db FROM workspaces WHERE session_id = %s", (session_id,))
+        ws = cur.fetchone()
+        cur.close()
+        
+        if ws and ws.get("workspace_db"):
+            if is_workspace_processing(ws["workspace_db"]):
+                return jsonify({
+                    "status": "error",
+                    "statusCode": 400,
+                    "message": "Documents are still being processed in the background. Please wait a few minutes before running the analysis."
+                }), 400
+
+        web_data = _fetch_web_data(session_id, topics, conn)
+        db_data  = _fetch_db_data(session_id, databaseses, conn)
+
+        if not web_data and not db_data:
+            return jsonify({
+                "status":"no_data","statusCode":200,
+                "session_id":session_id,
+                "message":"No matching data found for the provided topics/databaseses."
+            }), 200
+
+        # Build raw data summary (always returned)
+        raw_summary = {
+            "web_sources":      web_data,
+            "database_sources": [
+                {
+                    "external_database": d["external_database"],
+                    "new_user_db":       d["new_user_db"],
+                    "tables": [
+                        {
+                            "table_name":  t["table_name"],
+                            "row_count":   t["row_count"],
+                            "columns":     t["columns"],
+                            "sample_rows": t["sample_rows"]
+                        }
+                        for t in d["tables"]
+                    ]
+                }
+                for d in db_data
+            ]
+        }
+        import json
+        raw_summary = json.loads(json.dumps(raw_summary, default=str))
+
+        # Build LLM context
+        context = _build_context(web_data, db_data)
+
+        # Call Mistral for analysis
+        analysis = _call_mistral(context, topics, databaseses)
+        # Generate Graph
+        graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db)
+
+        if not analysis:
+            return jsonify({
+                "status":"partial","statusCode":200,
+                "session_id":session_id,
+                "message":"LLM analysis failed, returning raw data only.",
+                "raw_data": raw_summary
+            }), 200
+
+        return jsonify({
+            "status":     "success",
+            "statusCode": 200,
+            "session_id": session_id,
+            "requested": {
+                "topics":    topics,
+                "databaseses": databaseses
+            },
+            "report": analysis.get("report", ""),
+            "report_content": analysis,
+            "graph_url": graph_url,
+            "raw_data":  raw_summary
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "status":"error","statusCode":500,
+            "message":str(e)
+        }), 500
+    finally:
+        if conn: conn.close()

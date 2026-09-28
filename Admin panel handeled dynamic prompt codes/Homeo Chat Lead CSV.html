@@ -1,0 +1,350 @@
+/**
+* Homeo Remedy Hub
+* Chat Lead CSV Saver
+*/
+
+add_action('rest_api_init', function () {
+
+register_rest_route('homeo/v1', '/save-lead', array(
+
+'methods' => 'POST',
+
+'callback' => 'homeo_save_chat_lead',
+
+'permission_callback' => '__return_true',
+
+));
+
+});
+
+
+function homeo_save_chat_lead(WP_REST_Request $request)
+{
+$name = sanitize_text_field(
+$request->get_param('name')
+);
+
+$email = sanitize_email(
+$request->get_param('email')
+);
+
+$age = absint(
+$request->get_param('age')
+);
+
+$gender = sanitize_text_field(
+$request->get_param('gender')
+);
+
+$query = sanitize_textarea_field(
+$request->get_param('query')
+);
+
+
+/* =========================
+VALIDATION
+========================= */
+
+if (empty($name)) {
+
+return new WP_REST_Response(
+array(
+'success' => false,
+'message' => 'Name is required.'
+),
+400
+);
+
+}
+
+
+if (empty($email)) {
+
+return new WP_REST_Response(
+array(
+'success' => false,
+'message' => 'Email is required.'
+),
+400
+);
+
+}
+
+
+if ($age < 1 || $age> 120) {
+
+    return new WP_REST_Response(
+    array(
+    'success' => false,
+    'message' => 'Valid age is required.'
+    ),
+    400
+    );
+
+    }
+
+
+    if (empty($gender)) {
+
+    return new WP_REST_Response(
+    array(
+    'success' => false,
+    'message' => 'Gender is required.'
+    ),
+    400
+    );
+
+    }
+
+
+    if (empty($query)) {
+
+    return new WP_REST_Response(
+    array(
+    'success' => false,
+    'message' => 'Query is required.'
+    ),
+    400
+    );
+
+    }
+
+
+    /* =========================
+    EMAIL VALIDATION
+    ========================= */
+
+    if (!preg_match(
+    '/^[^\s@]+@[^\s@]+\.com$/i',
+    $email
+    )) {
+
+    return new WP_REST_Response(
+    array(
+    'success' => false,
+    'message' =>
+    'Please enter a valid .com email address.'
+    ),
+    400
+    );
+
+    }
+
+
+    /* =========================
+    GENDER VALIDATION
+    ========================= */
+
+    $allowed_gender = array(
+    'Male',
+    'Female',
+    'Other',
+    'Prefer not to say'
+    );
+
+
+    if (!in_array(
+    $gender,
+    $allowed_gender,
+    true
+    )) {
+
+    return new WP_REST_Response(
+    array(
+    'success' => false,
+    'message' => 'Invalid gender value.'
+    ),
+    400
+    );
+
+    }
+
+
+    /* =========================
+    CSV LOCATION
+    ========================= */
+
+    $upload_dir =
+    wp_upload_dir();
+
+    $directory =
+    $upload_dir['basedir'];
+
+    $csv_file =
+    $directory . '/homeo-chat-leads.csv';
+
+
+    $file_exists =
+    file_exists($csv_file);
+
+
+    /* =========================
+    OPEN CSV
+    ========================= */
+
+    $file =
+    fopen($csv_file, 'a');
+
+
+    if (!$file) {
+
+    return new WP_REST_Response(
+    array(
+    'success' => false,
+    'message' =>
+    'Unable to open CSV file.'
+    ),
+    500
+    );
+
+    }
+
+
+    /* =========================
+    LOCK CSV
+    ========================= */
+
+    if (!flock(
+    $file,
+    LOCK_EX
+    )) {
+
+    fclose($file);
+
+    return new WP_REST_Response(
+    array(
+    'success' => false,
+    'message' =>
+    'Unable to lock CSV file.'
+    ),
+    500
+    );
+
+    }
+
+
+    /* =========================
+    CSV HEADER
+    ========================= */
+
+    if (
+    !$file_exists ||
+    filesize($csv_file) === 0
+    ) {
+
+    fputcsv(
+    $file,
+    array(
+    'id',
+    'timestamp',
+    'name',
+    'email',
+    'age',
+    'gender',
+    'query'
+    ),
+    ',',
+    '"',
+    '\\'
+    );
+
+    }
+
+
+    /* =========================
+    UNIQUE ID
+    ========================= */
+
+    $id =
+    wp_generate_uuid4();
+
+
+    /* =========================
+    TIMESTAMP
+    ========================= */
+
+    $timestamp =
+    current_time('mysql');
+
+
+    /* =========================
+    WRITE CSV ROW
+    ========================= */
+
+    fputcsv(
+    $file,
+    array(
+    $id,
+    $timestamp,
+    $name,
+    $email,
+    $age,
+    $gender,
+    $query
+    ),
+    ',',
+    '"',
+    '\\'
+    );
+
+
+    /* =========================
+    CLOSE FILE
+    ========================= */
+
+    fflush($file);
+
+    flock(
+    $file,
+    LOCK_UN
+    );
+
+    fclose($file);
+
+
+    /* =========================
+    SAVE LEAD TO DAGENT
+    ========================= */
+
+    $session_id = sanitize_text_field(
+    $request->get_param('chat_session_id')
+    );
+
+    $dagent_saved = false;
+
+    if (!empty($session_id)) {
+
+    $dagent_response = wp_remote_post(
+    'https://aivista.co.in/dagentme/api/store-chat-session',
+    array(
+    'method' => 'POST',
+    'timeout' => 30,
+    'headers' => array(
+    'Content-Type' => 'application/json',
+    'Accept' => 'application/json',
+    ),
+    'body' => wp_json_encode(array(
+    'session_id' => $session_id,
+    'name' => $name,
+    'email' => $email,
+    'age' => $age,
+    'gender' => $gender,
+    'question' => $query,
+    )),
+    )
+    );
+
+    if (
+    !is_wp_error($dagent_response) &&
+    wp_remote_retrieve_response_code($dagent_response) >= 200 &&
+    wp_remote_retrieve_response_code($dagent_response) < 300 ) { $dagent_saved=true; } }
+        /*=========================SUCCESS=========================*/ return new WP_REST_Response( array( 'success'=>
+        true,
+        'message' =>
+        'Chat lead saved successfully.',
+        'dagent_saved' => $dagent_saved,
+        ),
+        200
+        );
+
+        }

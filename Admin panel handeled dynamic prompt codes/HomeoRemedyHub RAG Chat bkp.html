@@ -1,0 +1,243 @@
+HomeoRemedyHub RAG Chat
+
+
+add_action('rest_api_init', function () {
+
+register_rest_route('homeo/v1', '/rag-chat', [
+'methods' => ['POST', 'GET'],
+'callback' => 'homeo_rag_chat',
+'permission_callback' => '__return_true',
+]);
+
+});
+
+
+function homeo_rag_chat(WP_REST_Request $request)
+{
+
+/*
+* Get question
+*/
+
+$question =
+$request->get_param('question');
+
+$question =
+sanitize_textarea_field($question);
+
+
+/*
+* Validate question
+*/
+
+if (empty($question)) {
+
+return new WP_REST_Response(
+[
+'success' => false,
+'message' => 'Question is required.'
+],
+400
+);
+
+}
+
+
+/*
+* Get age
+*/
+
+$user_age =
+$request->get_param('user_age');
+
+if (
+$user_age !== null &&
+$user_age !== ''
+) {
+
+$user_age =
+absint($user_age);
+
+} else {
+
+$user_age = null;
+
+}
+
+
+/*
+* Get gender
+*/
+
+$user_gender =
+$request->get_param('user_gender');
+
+if (
+$user_gender !== null &&
+$user_gender !== ''
+) {
+
+$user_gender =
+sanitize_text_field($user_gender);
+
+} else {
+
+$user_gender = null;
+
+}
+
+
+/*
+* Existing RAG session
+*/
+
+$rag_session_id =
+'2abc311e-1ce4-4f0a-ba88-2ef20044956f';
+
+
+/*
+* Build API payload
+*/
+
+$payload = [
+'session_id' =>
+$rag_session_id,
+
+'question' =>
+$question,
+];
+
+
+/*
+* Add age
+*/
+
+if ($user_age !== null) {
+
+$payload['user_age'] =
+$user_age;
+
+}
+
+
+/*
+* Add gender
+*/
+
+if (!empty($user_gender)) {
+
+$payload['user_gender'] =
+$user_gender;
+
+}
+
+
+/*
+* Call RAG API
+*/
+
+$response =
+wp_remote_post(
+'https://aivista.co.in/dagentme/session-chat',
+[
+'timeout' => 300,
+
+'connect_timeout' => 30,
+
+'headers' => [
+'Content-Type' =>
+'application/json',
+
+'Accept' =>
+'application/json',
+],
+
+'body' =>
+wp_json_encode(
+$payload
+),
+]
+);
+
+
+/*
+* Connection error
+*/
+
+if (is_wp_error($response)) {
+
+return new WP_REST_Response(
+[
+'success' => false,
+
+'message' =>
+'Sorry, we’re having a temporary issue right now. Please try again in a few moments.',
+],
+502
+);
+
+}
+
+
+/*
+* Get API response
+*/
+
+$status_code =
+wp_remote_retrieve_response_code(
+$response
+);
+
+$body =
+wp_remote_retrieve_body(
+$response
+);
+
+
+/*
+* Decode JSON
+*/
+
+$json =
+json_decode(
+$body,
+true
+);
+
+
+/*
+* API returned JSON
+*/
+
+if ($json !== null) {
+
+return new WP_REST_Response(
+[
+'success' =>
+(
+$status_code >= 200 &&
+$status_code < 300 ), 'data'=>
+    $json,
+    ],
+    $status_code
+    );
+
+    }
+
+
+    /*
+    * API returned non-JSON
+    */
+
+    return new WP_REST_Response(
+    [
+    'success' =>
+    (
+    $status_code >= 200 &&
+    $status_code < 300 ), 'data'=>
+        $body,
+        ],
+        $status_code
+        );
+
+        }
