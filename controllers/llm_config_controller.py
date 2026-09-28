@@ -16,15 +16,15 @@ def _mask_key(key: str) -> str:
     if not key:
         return ""
     if len(key) <= 6:
-        return "\u2022" * 6
-    return key[:6] + "\u2022" * 8
+        return "••••••"
+    return key[:6] + "••••••••"
 
 
 def _is_masked(key: str) -> bool:
     """Check if a key is the masked placeholder (shouldn't be saved)."""
     if not key:
         return True
-    return "\u2022\u2022" in key or "**" in key
+    return "••" in key
 
 
 # ── Known scenarios (for seeding / validation) ───────────────────────────────
@@ -35,6 +35,10 @@ KNOWN_SCENARIOS = [
     "knowledge", "sheet_processing",
 ]
 
+
+# ── Table init (auto-create on first use) ────────────────────────────────────
+# The _ensure_tables function has been removed. 
+# Tables must be created manually via SQL script.
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Provider CRUD
@@ -84,12 +88,6 @@ def create_provider_controller(get_conn):
     if not name or not provider_type or not model_name:
         return jsonify({"status": False, "msg": "name, provider_type, and model_name are required"}), 400
 
-    # Local models do not use API keys
-    if provider_type == "mistral_local" or not api_key:
-        final_api_key = None
-    else:
-        final_api_key = api_key
-
     conn = get_conn()
     if not conn:
         return jsonify({"status": False, "msg": "DB connection failed"}), 500
@@ -98,12 +96,13 @@ def create_provider_controller(get_conn):
         cursor.execute(
             "INSERT INTO llm_providers (name, provider_type, api_key, model_name, base_url, is_active) "
             "VALUES (%s, %s, %s, %s, %s, %s)",
-            (name, provider_type, final_api_key, model_name, base_url or None, is_active)
+            (name, provider_type, api_key if api_key else None, model_name, base_url, is_active)
         )
         conn.commit()
         new_id = cursor.lastrowid
         cursor.close()
 
+      
         return jsonify({"status": True, "msg": "Provider created", "id": new_id}), 201
     except Exception as e:
         return jsonify({"status": False, "msg": str(e)}), 500
@@ -135,11 +134,9 @@ def update_provider_controller(get_conn, provider_id):
         base_url = data.get("base_url", existing["base_url"] or "").strip()
         is_active = data.get("is_active", existing["is_active"])
 
-        # API key: for mistral_local force None, otherwise update if new non-masked key provided
+        # API key: only update if a new non-masked key is provided
         new_key = (data.get("api_key") or "").strip()
-        if provider_type == "mistral_local":
-            api_key = None
-        elif new_key and not _is_masked(new_key):
+        if new_key and not _is_masked(new_key):
             api_key = new_key
         else:
             api_key = existing["api_key"]
@@ -147,11 +144,12 @@ def update_provider_controller(get_conn, provider_id):
         cursor.execute(
             "UPDATE llm_providers SET name=%s, provider_type=%s, api_key=%s, "
             "model_name=%s, base_url=%s, is_active=%s WHERE id=%s",
-            (name, provider_type, api_key, model_name, base_url or None, is_active, provider_id)
+            (name, provider_type, api_key, model_name, base_url, is_active, provider_id)
         )
         conn.commit()
         cursor.close()
 
+      
         return jsonify({"status": True, "msg": "Provider updated"})
     except Exception as e:
         return jsonify({"status": False, "msg": str(e)}), 500
@@ -174,6 +172,7 @@ def delete_provider_controller(get_conn, provider_id):
         if affected == 0:
             return jsonify({"status": False, "msg": "Provider not found"}), 404
 
+      
         return jsonify({"status": True, "msg": "Provider deleted"})
     except Exception as e:
         return jsonify({"status": False, "msg": str(e)}), 500
@@ -193,7 +192,7 @@ def test_provider_controller(get_conn, provider_id):
         cursor.close()
 
         if not provider:
-            return jsonify({"status": False, "msg": "Provider not found"}), 404
+            return jsonify({"status": False, "msg": "Provider not found"})
 
         ptype = provider["provider_type"]
         test_messages = [{"role": "user", "content": "Say 'OK' in one word."}]
@@ -203,13 +202,23 @@ def test_provider_controller(get_conn, provider_id):
         )
 
         if ptype == "gemini":
-            result = _call_gemini(test_messages, False, 0.1, provider["api_key"], provider["model_name"], timeout=15)
+            result = _call_gemini(test_messages, False, 0.1, provider["api_key"], provider["model_name"], provider.get("base_url"), timeout=60)
         elif ptype == "mistral_cloud":
-            result = _call_mistral_cloud(test_messages, False, 0.1, provider["api_key"], provider["model_name"], timeout=15)
+            result = _call_mistral_cloud(test_messages, False, 0.1, provider["api_key"], provider["model_name"], provider.get("base_url"), timeout=60)
         elif ptype == "mistral_local":
-            result = _call_mistral_local(test_messages, False, 0.1, provider["model_name"], provider["base_url"], timeout=15)
+            result = _call_mistral_local(test_messages, False, 0.1, provider.get("api_key"), provider["model_name"], provider["base_url"], timeout=600)
         elif ptype == "openai":
-            result = _call_openai(test_messages, False, 0.1, provider["api_key"], provider["model_name"], provider["base_url"], timeout=15)
+            result = _call_openai(test_messages, False, 0.1, provider["api_key"], provider["model_name"], provider["base_url"], timeout=60)
+        elif ptype.strip().lower() == "openrouter":
+            result = _call_openai(
+                test_messages,
+                False,
+                0.1,
+                provider["api_key"],
+                provider["model_name"],
+                provider.get("base_url"),
+                timeout=60
+            )
         else:
             return jsonify({"status": False, "msg": f"Unknown provider type: {ptype}"})
 
@@ -217,31 +226,29 @@ def test_provider_controller(get_conn, provider_id):
 
     except Exception as e:
         err_str = str(e).lower()
-        detail = str(e)
-        if hasattr(e, "response") and getattr(e, "response") is not None:
-            try:
-                resp_text = e.response.text
-                if resp_text:
-                    detail += f" ({resp_text.strip()[:150]})"
-            except Exception:
-                pass
+        short_msg = "Test Failed"
 
-        if "401" in err_str or "unauthorized" in err_str or "invalid api key" in err_str:
-            short_msg = f"API Key is invalid or expired. [{detail}]"
-        elif "429" in err_str or "quota" in err_str or "billing" in err_str or "too many requests" in err_str:
-            short_msg = f"API quota exceeded. [{detail}]"
+        print(f"[LLM TEST] Provider: {provider_id}")
+        print(f"[LLM TEST] Error: {repr(e)}")
+        
+        if "401" in err_str or "unauthorized" in err_str:
+            short_msg = "Invalid API Key"
+        elif "402" in err_str or "payment required" in err_str:
+            short_msg = "Insufficient OpenRouter credits"
+        elif "403" in err_str or "forbidden" in err_str:
+            short_msg = "Access denied"
+        elif "429" in err_str or "quota" in err_str:
+            short_msg = "Rate limit or quota exceeded"
         elif "404" in err_str or "not found" in err_str:
             if "model" in err_str:
-                short_msg = f"Invalid Model Name. [{detail}]"
+                short_msg = "Invalid Model Name."
             else:
-                short_msg = f"API Endpoint / URL Not Found (404). [{detail}]"
+                short_msg = "The provider API URL is incorrect."
         elif "timeout" in err_str:
-            short_msg = f"Server took too long to respond. [{detail}]"
-        elif "connection refused" in err_str or "failed to establish" in err_str or "max retries exceeded" in err_str:
-            short_msg = f"Server is offline or unreachable. [{detail}]"
-        else:
-            short_msg = f"Test Failed: {detail}"
-
+            short_msg = "Server took too long to respond."
+        elif "connection refused" in err_str or "failed to establish" in err_str:
+            short_msg = "The server is offline or unreachable."
+        
         return jsonify({"status": False, "msg": short_msg})
     finally:
         conn.close()
@@ -259,7 +266,7 @@ def get_assignments_controller(get_conn):
     try:
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
-            SELECT sa.scenario, sa.provider_id, sa.temperature, sa.max_tokens, p.name AS provider_name, p.provider_type
+            SELECT sa.scenario, sa.provider_id, sa.temperature, sa.max_tokens, sa.timeout, p.name AS provider_name, p.provider_type
             FROM llm_scenario_assignments sa
             LEFT JOIN llm_providers p ON sa.provider_id = p.id
             ORDER BY sa.scenario
@@ -295,22 +302,19 @@ def update_assignments_controller(get_conn):
             provider_id = a.get("provider_id")  # can be None
             temperature = a.get("temperature", 0.3)
             max_tokens = a.get("max_tokens", 4096)
+            timeout = a.get("timeout")
+            if timeout == "":
+                timeout = None
             if not scenario:
                 continue
             cursor.execute(
-                """
-                INSERT INTO llm_scenario_assignments (scenario, provider_id, temperature, max_tokens)
-                VALUES (%s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    provider_id = VALUES(provider_id),
-                    temperature = VALUES(temperature),
-                    max_tokens  = VALUES(max_tokens)
-                """,
-                (scenario, provider_id, temperature, max_tokens)
+                "UPDATE llm_scenario_assignments SET provider_id = %s, temperature = %s, max_tokens = %s, timeout = %s WHERE scenario = %s",
+                (provider_id, temperature, max_tokens, timeout, scenario)
             )
         conn.commit()
         cursor.close()
 
+      
         return jsonify({"status": True, "msg": "Assignments updated"})
     except Exception as e:
         return jsonify({"status": False, "msg": str(e)}), 500
