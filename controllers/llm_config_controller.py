@@ -227,7 +227,7 @@ def test_provider_controller(get_conn, provider_id):
     except Exception as e:
         err_str = str(e).lower()
         short_msg = "Test Failed"
-        
+        print(f"OpenRouter Error: {repr(e)}")
         if "401" in err_str or "unauthorized" in err_str:
             short_msg = "API Key is invalid or expired."
         elif "429" in err_str or "quota" in err_str or "billing" in err_str or "too many requests" in err_str:
