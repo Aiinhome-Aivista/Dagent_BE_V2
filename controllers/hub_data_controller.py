@@ -10,7 +10,6 @@ def store_hub_data_controller(get_db_connection):
     email = data.get("email")
     age = data.get("age")
     gender = data.get("gender")
-    # UI হয়তো 'query' পাঠাচ্ছে, কিন্তু মেইন চ্যাট API 'question' খোঁজে, তাই দুটোর সাপোর্ট রাখলাম
     query_text = data.get("question") or data.get("query") 
 
     if not session_id:
@@ -20,11 +19,17 @@ def store_hub_data_controller(get_db_connection):
     if not conn:
         return jsonify({"status": "error", "message": "Database connection failed"}), 500
 
+    cursor = None
     try:
         cursor = conn.cursor()
         
-        # ১. ইউজারের লিড ডাটা সেভ করা হচ্ছে
-        if name or email or age or gender:
+        # 1. Save user lead data
+        if name or email or age or gender or query_text:
+            chat_data_array = []
+            if query_text:
+                new_chat_entry = json.dumps({"query": query_text})
+                chat_data_array.append(new_chat_entry)
+            
             lead_query = """
                 INSERT INTO user_chat_leads (session_id, name, email, age, gender, chat_data)
                 VALUES (%s, %s, %s, %s, %s, JSON_ARRAY())
@@ -35,53 +40,76 @@ def store_hub_data_controller(get_db_connection):
                     gender = COALESCE(VALUES(gender), gender);
             """
             cursor.execute(lead_query, (session_id, name, email, age, gender))
+            
+            if query_text:
+                new_chat_entry = json.dumps({"query": query_text})
+                chat_query = """
+                    UPDATE user_chat_leads 
+                    SET chat_data = JSON_ARRAY_APPEND(COALESCE(chat_data, JSON_ARRAY()), '$', CAST(%s AS JSON))
+                    WHERE session_id = %s;
+                """
+                cursor.execute(chat_query, (new_chat_entry, session_id))
+                
             conn.commit()
             
-        # ২. প্রক্সি: যদি প্রশ্ন (query) থাকে, তবে মেইন চ্যাট API-কে ইন্টারনালি কল করবে
-        if query_text:
-            # অরিজিনাল হেডারগুলো কপি করা হচ্ছে (host/content-length বাদে)
-            headers = {k: v for k, v in request.headers if k.lower() not in ['host', 'content-length']}
-            
-            # মেইন চ্যাট API-এর URL ডাইনামিক্যালি তৈরি হচ্ছে
-            chat_url = request.host_url.rstrip('/') + "/session-chat"
-            
-            # মেইন API-তে ডাটা ফরোয়ার্ড করা হচ্ছে
-            forward_data = data.copy()
-            if "question" not in forward_data and query_text:
-                forward_data["question"] = query_text
-                
-            try:
-                # মেইন চ্যাট API (LLM) কল হচ্ছে
-                chat_resp = requests.post(chat_url, json=forward_data, headers=headers, timeout=120)
-                chat_result = chat_resp.json()
-                
-                # LLM থেকে আসা উত্তরটি বের করে আনা হচ্ছে
-                response_text = chat_result.get("answer", "")
-                
-                if response_text:
-                    # ৩. প্রশ্ন এবং উত্তরটি ডাটাবেসের JSON-এ সেভ করা হচ্ছে
-                    new_chat_entry = json.dumps({"query": query_text, "response": response_text})
-                    chat_query = """
-                        INSERT INTO user_chat_leads (session_id, chat_data) 
-                        VALUES (%s, JSON_ARRAY(CAST(%s AS JSON)))
-                        ON DUPLICATE KEY UPDATE 
-                            chat_data = JSON_ARRAY_APPEND(COALESCE(chat_data, JSON_ARRAY()), '$', CAST(%s AS JSON));
-                    """
-                    cursor.execute(chat_query, (session_id, new_chat_entry, new_chat_entry))
-                    conn.commit()
-                
-                # ৪. মেইন চ্যাট API থেকে পাওয়া রেসপন্সটাই হুবহু UI-কে ফেরত দেওয়া হচ্ছে!
-                return jsonify(chat_result), chat_resp.status_code
-                
-            except requests.exceptions.RequestException as e:
-                return jsonify({"status": "error", "message": f"Error calling main chat API: {str(e)}"}), 500
-
-        # যদি কোনো প্রশ্ন না থাকে, শুধু লিড সেভের সাকসেস মেসেজ দেবে
         return jsonify({"status": "success", "message": "Lead data stored successfully"}), 200
         
     except Exception as e:
         if conn: conn.rollback()
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+def update_hub_chat_controller(get_db_connection):
+    data = request.json or {}
+    
+    session_id = data.get("session_id")
+    query_text = data.get("query")
+    answer_text = data.get("answer")
+    
+    if not session_id:
+        return jsonify({"status": "error", "message": "session_id is required"}), 400
+        
+    if not query_text or not answer_text:
+        return jsonify({"status": "error", "message": "query and answer are required"}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Database connection failed"}), 500
+
+    cursor = None
+    try:
+        cursor = conn.cursor()
+        
+        new_chat_entry = json.dumps({"query": query_text, "response": answer_text})
+        
+        chat_query = """
+            UPDATE user_chat_leads 
+            SET chat_data = JSON_ARRAY_APPEND(COALESCE(chat_data, JSON_ARRAY()), '$', CAST(%s AS JSON))
+            WHERE session_id = %s;
+        """
+        cursor.execute(chat_query, (new_chat_entry, session_id))
+        
+        # If no row was updated, the session_id doesn't exist
+        if cursor.rowcount == 0:
+            # We can optionally insert it if it doesn't exist, but usually update is enough
+            insert_query = """
+                INSERT INTO user_chat_leads (session_id, chat_data) 
+                VALUES (%s, JSON_ARRAY(CAST(%s AS JSON)))
+            """
+            cursor.execute(insert_query, (session_id, new_chat_entry))
+            
+        conn.commit()
+        return jsonify({"status": "success", "message": "Chat data updated successfully"}), 200
+        
+    except Exception as e:
+        if conn: conn.rollback()
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()

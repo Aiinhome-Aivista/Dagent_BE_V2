@@ -150,7 +150,7 @@ from controllers.company_controller import (
 )
 
 from flask_socketio import SocketIO
-from controllers.hub_data_controller import store_hub_data_controller
+from controllers.hub_data_controller import store_hub_data_controller, update_hub_chat_controller
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -562,6 +562,14 @@ def session_chat():
     if workspace_id is not None:
         return execute_dynamic_controller(workspace_id, "rag_chat_controller_code", session_rag_chat_controller, get_db_connection)
     return session_rag_chat_controller(get_db_connection)
+
+@app.route("/api/store-chat-session", methods=["POST"])
+def store_chat_session():
+    return store_hub_data_controller(get_db_connection)
+
+@app.route("/api/update-chat-session", methods=["POST"])
+def update_chat_session():
+    return update_hub_chat_controller(get_db_connection)
 
 @app.route('/api/apply_bulk_sync', methods=['POST']) 
 def apply_bulk_sync_route():
@@ -975,10 +983,6 @@ def rollback_kgraph():
 def api_store_hub_data():
     return store_hub_data_controller(get_db_connection)
 
-@app.route("/hub-chat", methods=["POST"])
-def hub_chat():
-    return store_hub_data_controller(get_db_connection)
-
 
 
 if __name__ == '__main__':
@@ -992,4 +996,4 @@ if __name__ == '__main__':
     scheduler.start()
 
 
-    app.run(host="0.0.0.0", port=3019, debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=3020, debug=True, use_reloader=False)
