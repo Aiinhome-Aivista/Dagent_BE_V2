@@ -63,6 +63,25 @@ def get_assigned_llm_config(scenario):
         return None
 
 
+def _get_fallback_mistral_local_config():
+    """Fetch the active mistral_local provider from the DB for fallback purposes."""
+    try:
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            query = text("""
+                SELECT api_key, model_name, base_url
+                FROM llm_providers
+                WHERE provider_type = 'mistral_local' AND is_active = TRUE
+                LIMIT 1
+            """)
+            result = conn.execute(query)
+            row = result.mappings().fetchone()
+            return dict(row) if row else None
+    except Exception as e:
+        print(f"[LLM Fallback] DB fetch error for mistral_local fallback: {e}")
+        return None
+
+
 def _call_gemini(messages, json_mode, temperature, api_key, model_name, base_url=None, timeout=90):
     if not api_key or not model_name:
         raise ValueError("api_key and model_name are required for gemini")
@@ -185,17 +204,25 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
     config = get_assigned_llm_config(scenario)
 
     if not config:
-        err_msg = f"No DB config found for scenario '{scenario}'"
-        print(f"[LLM Error] {err_msg}")
-        return json.dumps({"error": err_msg}) if json_mode else f"[LLM Error] {err_msg}"
-
-    provider = config['provider_type']
-    api_key = config['api_key']
-    model_name = config['model_name']
-    base_url = config['base_url']
-    if config['temperature'] is not None:
-        temperature = config['temperature']
-    print(f"[LLM Client] DB Routing Active -> Scenario: {scenario} | Provider: {provider} | Model: {model_name}")
+        print(f"[LLM Error] No DB config found for scenario '{scenario}'. Attempting mistral_local fallback.")
+        fallback_config = _get_fallback_mistral_local_config()
+        if not fallback_config:
+            err_msg = f"No DB config found for scenario '{scenario}' and no active mistral_local provider available in DB."
+            return json.dumps({"error": err_msg}) if json_mode else f"[LLM Error] {err_msg}"
+        
+        provider = "mistral_local"
+        api_key = fallback_config.get("api_key")
+        model_name = fallback_config.get("model_name")
+        base_url = fallback_config.get("base_url")
+        print(f"[LLM Client] DB Routing Active -> Scenario: {scenario} | Provider: {provider} | Model: {model_name} (FALLBACK)")
+    else:
+        provider = config['provider_type']
+        api_key = config['api_key']
+        model_name = config['model_name']
+        base_url = config['base_url']
+        if config['temperature'] is not None:
+            temperature = config['temperature']
+        print(f"[LLM Client] DB Routing Active -> Scenario: {scenario} | Provider: {provider} | Model: {model_name}")
 
     try:
         # 3. Execute with whichever provider was selected, with retry logic
@@ -219,6 +246,20 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
 
     except Exception as e:
         print(f"[LLM Error] Provider '{provider}' failed after retries: {e}")
+        if provider != "mistral_local":
+            print("[LLM Error] Attempting ultimate fallback to mistral_local from DB...")
+            try:
+                fallback_config = _get_fallback_mistral_local_config()
+                if fallback_config:
+                    return _call_mistral_local(messages, json_mode, temperature, fallback_config.get("api_key"), fallback_config.get("model_name"), fallback_config.get("base_url"))
+                else:
+                    raise ValueError("No active mistral_local provider found in DB")
+            except Exception as fallback_err:
+                print(f"[LLM Error] Both primary and local fallback failed. Error: {fallback_err}")
+                if json_mode:
+                    return json.dumps({"error": "LLM failed completely", "details": str(fallback_err)})
+                return f"[LLM Error] Both primary and local fallback failed. Error: {str(fallback_err)}"
+        
         if json_mode:
             return json.dumps({"error": "LLM failed completely", "details": str(e)})
         return f"[LLM Error] LLM failed completely. Error: {str(e)}"
