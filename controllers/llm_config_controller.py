@@ -202,11 +202,11 @@ def test_provider_controller(get_conn, provider_id):
         )
 
         if ptype == "gemini":
-            result = _call_gemini(test_messages, False, 0.1, provider["api_key"], provider["model_name"], timeout=5)
+            result = _call_gemini(test_messages, False, 0.1, provider["api_key"], provider["model_name"], provider.get("base_url"), timeout=5)
         elif ptype == "mistral_cloud":
-            result = _call_mistral_cloud(test_messages, False, 0.1, provider["api_key"], provider["model_name"], timeout=5)
+            result = _call_mistral_cloud(test_messages, False, 0.1, provider["api_key"], provider["model_name"], provider.get("base_url"), timeout=5)
         elif ptype == "mistral_local":
-            result = _call_mistral_local(test_messages, False, 0.1, provider["model_name"], provider["base_url"], timeout=5)
+            result = _call_mistral_local(test_messages, False, 0.1, provider.get("api_key"), provider["model_name"], provider["base_url"], timeout=5)
         elif ptype == "openai":
             result = _call_openai(test_messages, False, 0.1, provider["api_key"], provider["model_name"], provider["base_url"], timeout=5)
         elif ptype.strip().lower() == "openrouter":

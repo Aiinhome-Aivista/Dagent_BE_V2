@@ -4,7 +4,7 @@ import time
 from flask import request, has_request_context
 # pyrefly: ignore [missing-import]
 import google.generativeai as genai
-from database.config import engine, ACTIVE_LLM, GEMINI_API_KEY, MODEL_NAME, MISTRAL_API_KEY, MISTRAL_MODEL, MISTRAL_LOCAL_URL, MISTRAL_LOCAL_MODEL
+from database.config import engine
 
 # Global HTTP Session for connection pooling
 http_session = requests.Session()
@@ -63,8 +63,15 @@ def get_assigned_llm_config(scenario):
         return None
 
 
-def _call_gemini(messages, json_mode, temperature, api_key, model_name, timeout=90):
-    genai.configure(api_key=api_key or GEMINI_API_KEY)
+def _call_gemini(messages, json_mode, temperature, api_key, model_name, base_url=None, timeout=90):
+    if not api_key or not model_name:
+        raise ValueError("api_key and model_name are required for gemini")
+        
+    kwargs = {"api_key": api_key}
+    if base_url:
+        kwargs["client_options"] = {"api_endpoint": base_url}
+    genai.configure(**kwargs)
+    
     system_instruction = None
     contents = []
     for msg in messages:
@@ -82,7 +89,7 @@ def _call_gemini(messages, json_mode, temperature, api_key, model_name, timeout=
     if temperature is not None:
         generation_config["temperature"] = temperature
     model = genai.GenerativeModel(
-        model_name=model_name or MODEL_NAME,
+        model_name=model_name,
         system_instruction=system_instruction,
         generation_config=generation_config
     )
@@ -90,42 +97,12 @@ def _call_gemini(messages, json_mode, temperature, api_key, model_name, timeout=
     return model.generate_content(contents).text.strip()
 
 
-def _call_mistral_cloud(messages, json_mode, temperature, api_key, model_name, timeout=90):
-    url = "https://api.mistral.ai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key or MISTRAL_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": model_name or MISTRAL_MODEL,
-        "messages": messages,
-        "temperature": temperature
-    }
-    if json_mode:
-        payload["response_format"] = {"type": "json_object"}
-    res = http_session.post(url, json=payload, headers=headers, timeout=timeout)
-    res.raise_for_status()
-    return res.json()["choices"][0]["message"]["content"].strip()
-
-
-def _call_mistral_local(messages, json_mode, temperature, model_name, base_url, timeout=600):
-    start_time = time.time()
-    payload = {
-        "model": model_name or MISTRAL_LOCAL_MODEL,
-        "messages": messages,
-        "stream": False,
-        "options": {"temperature": temperature}
-    }
-    if json_mode:
-        payload["format"] = "json"
-    target_url = f"{base_url or MISTRAL_LOCAL_URL}/api/chat"
-    res = http_session.post(target_url, json=payload, timeout=timeout)
-    res.raise_for_status()
-    print(f"[LLM Client] Local Mistral responded in {time.time() - start_time:.2f} seconds")
-    return res.json()["message"]["content"].strip()
-
-
-def _call_openai(messages, json_mode, temperature, api_key, model_name, base_url, timeout=90):
+def _call_mistral_cloud(messages, json_mode, temperature, api_key, model_name, base_url=None, timeout=90):
+    if not api_key or not model_name or not base_url:
+        raise ValueError("api_key, model_name, and base_url are required for mistral_cloud")
+        
+    url = base_url if base_url.endswith("/chat/completions") else f"{base_url.rstrip('/')}/chat/completions"
+        
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
@@ -137,15 +114,63 @@ def _call_openai(messages, json_mode, temperature, api_key, model_name, base_url
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    # target_url = f"{base_url}/chat/completions" if base_url else "https://api.openai.com/v1/chat/completions"
-    target_url = (
-        f"{base_url.rstrip('/')}/chat/completions"
-        if base_url
-        else "https://api.openai.com/v1/chat/completions"
-    )
+    res = http_session.post(url, json=payload, headers=headers, timeout=timeout)
+    res.raise_for_status()
+    return res.json()["choices"][0]["message"]["content"].strip()
+
+
+def _call_mistral_local(messages, json_mode, temperature, api_key, model_name, base_url, timeout=600):
+    if not model_name or not base_url:
+        raise ValueError("model_name and base_url are required for mistral_local")
+        
+    start_time = time.time()
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": temperature}
+    }
+    if json_mode:
+        payload["format"] = "json"
+    target_url = f"{base_url.rstrip('/')}/api/chat"
+    res = http_session.post(target_url, json=payload, timeout=timeout)
+    res.raise_for_status()
+    print(f"[LLM Client] Local Mistral responded in {time.time() - start_time:.2f} seconds")
+    return res.json()["message"]["content"].strip()
+
+
+def _call_openai(messages, json_mode, temperature, api_key, model_name, base_url, timeout=90):
+    if not api_key or not model_name or not base_url:
+        raise ValueError("api_key, model_name, and base_url are required for openai/openrouter")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://traverseai.com",  # Optional, required by some providers like OpenRouter
+        "X-Title": "D-Agent"
+    }
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "temperature": temperature
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+        
+    target_url = base_url if base_url.endswith("/chat/completions") else f"{base_url.rstrip('/')}/chat/completions"
+        
     res = http_session.post(target_url, json=payload, headers=headers, timeout=timeout)
     res.raise_for_status()
     return res.json()["choices"][0]["message"]["content"].strip()
+
+
+PROVIDER_HANDLERS = {
+    "gemini": _call_gemini,
+    "mistral_cloud": _call_mistral_cloud,
+    "mistral_local": _call_mistral_local,
+    "openai": _call_openai,
+    "openrouter": _call_openai,
+}
 
 
 def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 0.3, scenario: str = None) -> str:
@@ -159,23 +184,18 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
         scenario = get_current_scenario()
     config = get_assigned_llm_config(scenario)
 
-    # 1. Start with baseline .env defaults (so nothing previous breaks)
-    provider = ACTIVE_LLM 
-    api_key = None
-    model_name = None
-    base_url = None
+    if not config:
+        err_msg = f"No DB config found for scenario '{scenario}'"
+        print(f"[LLM Error] {err_msg}")
+        return json.dumps({"error": err_msg}) if json_mode else f"[LLM Error] {err_msg}"
 
-    # 2. If DB has an active assignment for this scenario, override the .env defaults
-    if config:
-        provider = config['provider_type']
-        api_key = config['api_key']
-        model_name = config['model_name']
-        base_url = config['base_url']
-        if config['temperature'] is not None:
-            temperature = config['temperature']
-        print(f"[LLM Client] DB Routing Active -> Scenario: {scenario} | Provider: {provider} | Model: {model_name}")
-    else:
-        print(f"[LLM Client] No DB config for scenario '{scenario}' -> Falling back to .env ACTIVE_LLM: {ACTIVE_LLM}")
+    provider = config['provider_type']
+    api_key = config['api_key']
+    model_name = config['model_name']
+    base_url = config['base_url']
+    if config['temperature'] is not None:
+        temperature = config['temperature']
+    print(f"[LLM Client] DB Routing Active -> Scenario: {scenario} | Provider: {provider} | Model: {model_name}")
 
     try:
         # 3. Execute with whichever provider was selected, with retry logic
@@ -184,25 +204,11 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
         
         for attempt in range(max_retries + 1):
             try:
-                if provider == "gemini":
-                    return _call_gemini(messages, json_mode, temperature, api_key, model_name)
-                elif provider == "mistral_cloud":
-                    return _call_mistral_cloud(messages, json_mode, temperature, api_key, model_name)
-                elif provider == "mistral_local":
-                    return _call_mistral_local(messages, json_mode, temperature, model_name, base_url)
-                elif provider == "openai":
-                    return _call_openai(messages, json_mode, temperature, api_key, model_name, base_url)
-                elif provider == "openrouter":
-                    return _call_openai(
-                        messages,
-                        json_mode,
-                        temperature,
-                        api_key,
-                        model_name,
-                        base_url or "https://openrouter.ai/api/v1"
-                    )
+                handler = PROVIDER_HANDLERS.get(provider.strip().lower())
+                if handler:
+                    return handler(messages, json_mode, temperature, api_key, model_name, base_url)
                 else:
-                    print(f"[LLM Client] Unknown provider '{provider}', falling back to .env config")
+                    print(f"[LLM Client] Unknown provider '{provider}'")
                     return json.dumps({"error": "Invalid config"}) if json_mode else "[LLM Error] Invalid config"
             except Exception as loop_e:
                 last_err = loop_e
@@ -212,15 +218,10 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
                 time.sleep(1)
 
     except Exception as e:
-        print(f"[LLM Error] Primary provider '{provider}' failed after retries: {e}. Attempting local mistral fallback...")
-        try:
-            # 4. Ultimate safety fallback to local mistral if the primary API fails (prevents complete app breakage)
-            return _call_mistral_local(messages, json_mode, temperature, None, None)
-        except Exception as fallback_err:
-            print(f"[LLM Error] Both primary and local fallback failed. Error: {fallback_err}")
-            if json_mode:
-                return json.dumps({"error": "LLM failed completely", "details": str(fallback_err)})
-            return f"[LLM Error] Both primary and local fallback failed. Error: {str(fallback_err)}"
+        print(f"[LLM Error] Provider '{provider}' failed after retries: {e}")
+        if json_mode:
+            return json.dumps({"error": "LLM failed completely", "details": str(e)})
+        return f"[LLM Error] LLM failed completely. Error: {str(e)}"
 
 
 def call_llm(prompt: str, scenario: str = None) -> str:
