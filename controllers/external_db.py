@@ -139,6 +139,10 @@ def connect_external_db():
                     cred_row = cur.fetchone()
                     cred_data = json.loads(cred_row[0]) if cred_row else {}
                     merged_path = cred_data.get("merged_path", "")
+                    if not merged_path:
+                        filename = cred_data.get("files", [""])[0] if cred_data.get("files") else "document"
+                        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                        merged_path = os.path.join(base_dir, "uploads", filename)
                     
                     cur.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s", (session_id,))
                     ws_row = cur.fetchone()
