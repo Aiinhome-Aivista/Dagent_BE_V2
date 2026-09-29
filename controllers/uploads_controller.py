@@ -345,7 +345,7 @@ def upload_chunk_controller(get_db_connection):
                 func=process_doc_job,
                 args=[merged_path, allocated_db_name, MYSQL_CONFIG.get("host"), MYSQL_CONFIG.get("user"), MYSQL_CONFIG.get("password"), MYSQL_CONFIG.get("port", 3306), session_id, user_id, username, ch_id],
                 trigger='date',
-                id=str(uuid.uuid4()),
+                id=f"doc_job_{ch_id}",
                 replace_existing=True
             )
             print(f"Scheduled Document processing job: {job.id}")
@@ -370,7 +370,7 @@ def upload_chunk_controller(get_db_connection):
                     session_id, user_id, username, ch_id
                 ],
                 trigger='date',
-                id=str(uuid.uuid4()),
+                id=f"csv_job_{ch_id}",
                 replace_existing=True
             )
             print(f"Scheduled CSV processing job: {job.id}")

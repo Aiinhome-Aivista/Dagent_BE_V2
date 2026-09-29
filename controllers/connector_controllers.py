@@ -1727,6 +1727,18 @@ def delete_connection_history_controller(get_db_connection):
         # because those apply to the ENTIRE session (which may contain other active connections).
         # We only delete the specific connector credential and history.
         
+        # Cancel any running background jobs associated with this connection
+        try:
+            from controllers.uploads_controller import scheduler
+            if scheduler.get_job(f"doc_job_{item_id}"):
+                scheduler.remove_job(f"doc_job_{item_id}")
+                print(f"Canceled background document job doc_job_{item_id}")
+            if scheduler.get_job(f"csv_job_{item_id}"):
+                scheduler.remove_job(f"csv_job_{item_id}")
+                print(f"Canceled background CSV job csv_job_{item_id}")
+        except Exception as e:
+            print(f"Failed to cancel background jobs for {item_id}: {e}")
+            
         db_conn.commit()
 
         return jsonify({"status": "success", "message": "Connection and associated tables deleted successfully."}), 200
