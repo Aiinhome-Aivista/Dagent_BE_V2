@@ -209,5 +209,15 @@ def process_doc_job(file_path, allocated_db_name, db_host, db_user, db_pass, db_
 
     except Exception as e:
         print(f"Error processing document job for {file_path}: {e}")
-        # Could also log failure to connection_history here if ch_id is passed
-        print(f"Error processing document job for {file_path}: {e}")
+        if ch_id:
+            try:
+                import pymysql
+                from database.config import MYSQL_CONFIG
+                err_conn = pymysql.connect(host=db_host, user=db_user, password=db_pass, port=int(db_port))
+                with err_conn.cursor() as cur:
+                    cur.execute(f"USE `{MYSQL_CONFIG['database']}`")
+                    cur.execute("UPDATE connection_history SET status='Failed' WHERE id=%s", (ch_id,))
+                err_conn.commit()
+                err_conn.close()
+            except Exception as inner_e:
+                print(f"Could not update status to failed: {inner_e}")

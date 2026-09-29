@@ -125,7 +125,52 @@ def connect_external_db():
             except Exception as sync_e:
                 print(f"[!] Auto-Sync failed for Tally ({cid}): {sync_e}")
                 return jsonify({"status": False, "statuscode": 500, "message": str(sync_e), "error": str(sync_e)}), 500
-        elif ctype not in ('doc_upload', 'doc_chunk_upload', 'csv_upload', 'csv_chunk_upload', 'saved_web_result', 'web_search'):
+        elif ctype in ('doc_upload', 'doc_chunk_upload', 'csv_upload', 'csv_chunk_upload'):
+            try:
+                import pymysql, json, os
+                from database.config import MYSQL_CONFIG
+                from database.doc_processor import process_doc_job
+                from database.csv_processor import process_csv_job
+                from apscheduler.schedulers.background import BackgroundScheduler
+
+                conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
+                with conn.cursor() as cur:
+                    cur.execute("SELECT credential FROM database_credential WHERE connection_id=%s", (cid,))
+                    cred_row = cur.fetchone()
+                    cred_data = json.loads(cred_row[0]) if cred_row else {}
+                    merged_path = cred_data.get("merged_path", "")
+                    
+                    cur.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s", (session_id,))
+                    ws_row = cur.fetchone()
+                    allocated_db_name = ws_row[0] if ws_row else ""
+                    
+                    cur.execute("SELECT name, email FROM users WHERE id=%s", (user_id,))
+                    u_row = cur.fetchone()
+                    username = u_row[0] if u_row else "unknown"
+                    email = u_row[1] if u_row else "unknown"
+                    csv_username = email.split("@")[0]
+                    
+                    # Update status to processing
+                    cur.execute("UPDATE connection_history SET status='processing' WHERE id=%s", (cid,))
+                    conn.commit()
+                conn.close()
+
+                # Start a temporary scheduler or use thread to run it
+                from threading import Thread
+                if ctype in ('doc_upload', 'doc_chunk_upload'):
+                    print(f"[*] Triggering background processing for document: {merged_path}")
+                    t = Thread(target=process_doc_job, args=(merged_path, allocated_db_name, MYSQL_CONFIG.get("host"), MYSQL_CONFIG.get("user"), MYSQL_CONFIG.get("password"), MYSQL_CONFIG.get("port", 3306), session_id, user_id, username, cid))
+                    t.start()
+                else:
+                    print(f"[*] Triggering background processing for CSV: {merged_path}")
+                    t = Thread(target=process_csv_job, args=([merged_path], allocated_db_name, MYSQL_CONFIG.get("host"), MYSQL_CONFIG.get("user"), MYSQL_CONFIG.get("password"), MYSQL_CONFIG.get("port", 3306), ctype, session_id, user_id, csv_username, cid))
+                    t.start()
+                    
+                sync_res = {} # It will finish in the background
+            except Exception as sync_e:
+                print(f"[!] Auto-Sync failed for Doc/CSV ({cid}): {sync_e}")
+                import traceback; traceback.print_exc()
+        elif ctype not in ('saved_web_result', 'web_search'):
             try:
                 sync_res = sync_external_database(user_id, cid, session_id)
             except Exception as sync_e:

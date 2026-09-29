@@ -305,7 +305,7 @@ def upload_chunk_controller(get_db_connection):
         db_type_hist = 'sql_chunk_upload' if filename.lower().endswith('.sql') else 'doc_chunk_upload' if filename.lower().endswith(('.pdf', '.doc', '.docx')) else 'csv_chunk_upload'
         db_type_cred = 'sql_upload' if filename.lower().endswith('.sql') else 'doc_upload' if filename.lower().endswith(('.pdf', '.doc', '.docx')) else 'csv_upload'
 
-        initial_status = 'processing' if filename.lower().endswith(('.pdf', '.txt', '.doc', '.docx', '.md', '.csv')) else 'Success'
+        initial_status = 'Success'
 
         cursor.execute("""
             INSERT INTO connection_history
@@ -315,7 +315,7 @@ def upload_chunk_controller(get_db_connection):
 
         ch_id = cursor.lastrowid
 
-        cred_json = json.dumps({"files":[filename]})
+        cred_json = json.dumps({"files":[filename], "merged_path": merged_path})
 
         cursor.execute("""
             INSERT INTO database_credential
@@ -339,41 +339,7 @@ def upload_chunk_controller(get_db_connection):
         cursor.close()
         db_conn.close()
 
-        # Trigger background job for PDF/DOC/TXT files
-        if filename.lower().endswith(('.pdf', '.txt', '.doc', '.docx', '.md')):
-            job = scheduler.add_job(
-                func=process_doc_job,
-                args=[merged_path, allocated_db_name, MYSQL_CONFIG.get("host"), MYSQL_CONFIG.get("user"), MYSQL_CONFIG.get("password"), MYSQL_CONFIG.get("port", 3306), session_id, user_id, username, ch_id],
-                trigger='date',
-                id=f"doc_job_{ch_id}",
-                replace_existing=True
-            )
-            print(f"Scheduled Document processing job: {job.id}")
-            
-        elif filename.lower().endswith('.csv'):
-            from database.csv_processor import process_csv_job
-            import pymysql
-            
-            temp_conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
-            with temp_conn.cursor(pymysql.cursors.DictCursor) as temp_cursor:
-                temp_cursor.execute("SELECT email FROM users WHERE id=%s", (user_id,))
-                user_row = temp_cursor.fetchone()
-                username = user_row['email'].split("@")[0] if user_row else "unknown"
-            temp_conn.close()
-            
-            job = scheduler.add_job(
-                func=process_csv_job,
-                args=[
-                    [merged_path], allocated_db_name, MYSQL_CONFIG.get("host"), 
-                    MYSQL_CONFIG.get("user"), MYSQL_CONFIG.get("password"), 
-                    int(MYSQL_CONFIG.get("port", 3306)), "csv_chunk_upload", 
-                    session_id, user_id, username, ch_id
-                ],
-                trigger='date',
-                id=f"csv_job_{ch_id}",
-                replace_existing=True
-            )
-            print(f"Scheduled CSV processing job: {job.id}")
+        # REMOVED: Automatic triggering of background jobs. They will be triggered during "Import" via external_db.py.
 
         import shutil
         shutil.rmtree(session_folder)
