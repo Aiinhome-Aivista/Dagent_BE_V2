@@ -1149,6 +1149,7 @@ def get_workspace_history_controller(get_db_connection):
         cursor.execute(query_conn, (session_id,))
         raw_history = cursor.fetchall() 
 
+
         # [AUTO-FIX STUCK RECORDS]
         # Automatically change any 'Processing'/'Pending' status to 'Success' for records older than 2 hours
         import datetime
