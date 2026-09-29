@@ -13,6 +13,11 @@ http_session = requests.Session()
 _config_cache = {}
 CACHE_TTL = 300  # 5 minutes
 
+def clear_llm_cache():
+    """Clear the in-memory LLM configuration cache."""
+    _config_cache.clear()
+    print("[LLM Client] Configuration cache cleared.")
+
 
 def get_current_scenario():
     """Automatically determine the scenario based on the active API endpoint."""

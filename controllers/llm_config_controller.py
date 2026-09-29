@@ -148,7 +148,8 @@ def update_provider_controller(get_conn, provider_id):
         )
         conn.commit()
         cursor.close()
-
+        from model.llm_client import clear_llm_cache
+        clear_llm_cache()
       
         return jsonify({"status": True, "msg": "Provider updated"})
     except Exception as e:
@@ -316,7 +317,8 @@ def update_assignments_controller(get_conn):
             )
         conn.commit()
         cursor.close()
-
+        from model.llm_client import clear_llm_cache
+        clear_llm_cache()
       
         return jsonify({"status": True, "msg": "Assignments updated"})
     except Exception as e:
