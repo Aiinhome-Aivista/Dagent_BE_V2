@@ -266,7 +266,7 @@ def get_assignments_controller(get_conn):
     try:
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
-            SELECT sa.scenario, sa.provider_id, sa.temperature, sa.max_tokens, p.name AS provider_name, p.provider_type
+            SELECT sa.scenario, sa.provider_id, sa.temperature, sa.max_tokens, sa.timeout, p.name AS provider_name, p.provider_type
             FROM llm_scenario_assignments sa
             LEFT JOIN llm_providers p ON sa.provider_id = p.id
             ORDER BY sa.scenario
@@ -301,12 +301,18 @@ def update_assignments_controller(get_conn):
             scenario = a.get("scenario", "").strip()
             provider_id = a.get("provider_id")  # can be None
             temperature = a.get("temperature", 0.3)
-            max_tokens = a.get("max_tokens", 4096)
+            raw_tokens = a.get("max_tokens")
+            max_tokens = int(raw_tokens) if raw_tokens else 4096
+            
+            # Handle timeout - default to None if empty or invalid
+            raw_timeout = a.get("timeout")
+            timeout_val = int(raw_timeout) if raw_timeout else None
+
             if not scenario:
                 continue
             cursor.execute(
-                "UPDATE llm_scenario_assignments SET provider_id = %s, temperature = %s, max_tokens = %s WHERE scenario = %s",
-                (provider_id, temperature, max_tokens, scenario)
+                "UPDATE llm_scenario_assignments SET provider_id = %s, temperature = %s, max_tokens = %s, timeout = %s WHERE scenario = %s",
+                (provider_id, temperature, max_tokens, timeout_val, scenario)
             )
         conn.commit()
         cursor.close()

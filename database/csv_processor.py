@@ -101,6 +101,23 @@ def _best_date_format(series: pd.Series):
 def _infer_schema(sample: pd.DataFrame) -> dict:
     """Map each (already-sanitized) column name -> dict(kind, fmt)."""
     schema = {}
+    
+    # [NEW] Deduplicate column names. If a CSV has "id" and "ID", pandas usually loads them
+    # as "id" and "id.1", but our _sanitize lowercases them both to "id". When two columns
+    # have the exact same name, sample[col] returns a DataFrame, not a Series, causing
+    # AttributeError: 'DataFrame' object has no attribute 'str' during .str.strip().
+    dedup_cols = []
+    seen = {}
+    for c in sample.columns:
+        base = _sanitize(c)
+        if base in seen:
+            seen[base] += 1
+            dedup_cols.append(f"{base}_{seen[base]}")
+        else:
+            seen[base] = 0
+            dedup_cols.append(base)
+    sample.columns = dedup_cols
+
     for col in sample.columns:
         col_lower = col.lower()
         nonblank = sample[col].dropna().astype(str).str.strip()
@@ -261,6 +278,8 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
     schema_map = {}
     with target_engine.connect() as conn:
         for t in existing_tables:
+            if t.startswith("temp_"):
+                continue  # Skip temp tables to avoid concurrency / lock issues
             cols_res = conn.execute(text(f"SHOW COLUMNS FROM `{t}`"))
             schema_map[t] = set([row[0] for row in cols_res])
 
@@ -299,7 +318,19 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
         )
         # Drop any empty/Unnamed columns created by trailing commas or blank headers
         sample = sample.loc[:, ~sample.columns.str.contains('^Unnamed', case=False, na=False)]
-        sample.columns = [_sanitize(c) for c in sample.columns]
+        
+        # [NEW] Deduplicate columns exactly as in _infer_schema to avoid Series/DataFrame ambiguity
+        dedup_cols = []
+        seen = {}
+        for c in sample.columns:
+            base = _sanitize(c)
+            if base in seen:
+                seen[base] += 1
+                dedup_cols.append(f"{base}_{seen[base]}")
+            else:
+                seen[base] = 0
+                dedup_cols.append(base)
+        sample.columns = dedup_cols
         
         # Dynamic Schema & Header Matching: Step 1 Priority check for exact table name match
         matched_table = None
@@ -391,7 +422,19 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
         ):
             # Drop any empty/Unnamed columns in the chunk
             chunk = chunk.loc[:, ~chunk.columns.str.contains('^Unnamed', case=False, na=False)]
-            chunk.columns = [_sanitize(c) for c in chunk.columns]
+            
+            # [NEW] Deduplicate chunk columns exactly like sample
+            dedup_cols_chunk = []
+            seen_chunk = {}
+            for c in chunk.columns:
+                base = _sanitize(c)
+                if base in seen_chunk:
+                    seen_chunk[base] += 1
+                    dedup_cols_chunk.append(f"{base}_{seen_chunk[base]}")
+                else:
+                    seen_chunk[base] = 0
+                    dedup_cols_chunk.append(base)
+            chunk.columns = dedup_cols_chunk
             if column_rename_map:
                 chunk = chunk.rename(columns=column_rename_map)
             chunk = _apply_schema(chunk, schema)

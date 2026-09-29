@@ -45,7 +45,7 @@ def get_assigned_llm_config(scenario):
         from sqlalchemy import text
         with engine.connect() as conn:
             query = text("""
-                SELECT p.provider_type, p.api_key, p.model_name, p.base_url, a.temperature, a.max_tokens
+                SELECT p.provider_type, p.api_key, p.model_name, p.base_url, a.temperature, a.max_tokens, a.timeout
                 FROM llm_scenario_assignments a
                 JOIN llm_providers p ON a.provider_id = p.id
                 WHERE a.scenario = :scenario AND p.is_active = TRUE
@@ -214,6 +214,7 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
         api_key = fallback_config.get("api_key")
         model_name = fallback_config.get("model_name")
         base_url = fallback_config.get("base_url")
+        timeout_val = 600
         print(f"[LLM Client] DB Routing Active -> Scenario: {scenario} | Provider: {provider} | Model: {model_name} (FALLBACK)")
     else:
         provider = config['provider_type']
@@ -222,6 +223,9 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
         base_url = config['base_url']
         if config['temperature'] is not None:
             temperature = config['temperature']
+        timeout_val = config.get('timeout')
+        if timeout_val is None:
+            timeout_val = 600 if provider == "mistral_local" else 90
         print(f"[LLM Client] DB Routing Active -> Scenario: {scenario} | Provider: {provider} | Model: {model_name}")
 
     try:
@@ -233,7 +237,7 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
             try:
                 handler = PROVIDER_HANDLERS.get(provider.strip().lower())
                 if handler:
-                    return handler(messages, json_mode, temperature, api_key, model_name, base_url)
+                    return handler(messages, json_mode, temperature, api_key, model_name, base_url, timeout=timeout_val)
                 else:
                     print(f"[LLM Client] Unknown provider '{provider}'")
                     return json.dumps({"error": "Invalid config"}) if json_mode else "[LLM Error] Invalid config"

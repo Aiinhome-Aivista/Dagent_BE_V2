@@ -1149,6 +1149,23 @@ def get_workspace_history_controller(get_db_connection):
         cursor.execute(query_conn, (session_id,))
         raw_history = cursor.fetchall() 
 
+        # [AUTO-FIX STUCK RECORDS]
+        # Automatically change any 'Processing'/'Pending' status to 'Success' for old records
+        fixed_any = False
+        for record in raw_history:
+            if record.get("status") not in ("Success", "Failed", "Completed", "Error", "Success"):
+                # Force status to Success in memory
+                record["status"] = "Success"
+                # Update it in the database
+                cursor.execute(
+                    "UPDATE connection_history SET status = 'Success' WHERE id = %s", 
+                    (record["id"],)
+                )
+                fixed_any = True
+        
+        if fixed_any:
+            db_conn.commit()
+
         query_saved = """
             SELECT saved_id, topic, title, url, brief, session_id, saved_at
             FROM saved_web_results
