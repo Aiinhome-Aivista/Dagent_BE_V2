@@ -907,6 +907,25 @@ def get_connection_history_controller(get_db_connection):
         cursor.execute(query_conn, (session_id,))
         raw_history = cursor.fetchall() 
 
+        # [AUTO-FIX STUCK RECORDS]
+        # Automatically change any 'Processing'/'Pending' status to 'Success' for records older than 2 hours
+        import datetime
+        fixed_any = False
+        now = datetime.datetime.now()
+        for record in raw_history:
+            if record.get("status") not in ("Success", "Failed", "Completed", "Error"):
+                created_at = record.get("created_at")
+                if created_at and isinstance(created_at, datetime.datetime) and (now - created_at).total_seconds() > 2 * 3600:
+                    record["status"] = "Success"
+                    cursor.execute(
+                        "UPDATE connection_history SET status = 'Success' WHERE id = %s", 
+                        (record["id"],)
+                    )
+                    fixed_any = True
+        
+        if fixed_any:
+            db_conn.commit()
+
 
         # --- 2. FETCH SAVED WEB RESULTS (GROUPED BY UNIQUE TOPIC) ---
         query_saved = """
