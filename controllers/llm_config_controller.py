@@ -46,15 +46,23 @@ KNOWN_SCENARIOS = [
 
 def get_providers_controller(get_conn):
     """GET /api/llm/providers — List all providers (keys masked)."""
+    company_id = request.args.get('company_id')
     conn = get_conn()
     if not conn:
         return jsonify({"status": False, "msg": "DB connection failed"}), 500
     try:
         cursor = conn.cursor(dictionary=True)
-        cursor.execute(
-            "SELECT id, name, provider_type, api_key, model_name, base_url, is_active, "
-            "created_at, updated_at FROM llm_providers ORDER BY created_at ASC"
-        )
+        if company_id:
+            cursor.execute(
+                "SELECT id, name, provider_type, api_key, model_name, base_url, is_active, "
+                "created_at, updated_at, company_id FROM llm_providers "
+                "WHERE company_id = %s OR company_id IS NULL ORDER BY created_at ASC", (company_id,)
+            )
+        else:
+            cursor.execute(
+                "SELECT id, name, provider_type, api_key, model_name, base_url, is_active, "
+                "created_at, updated_at, company_id FROM llm_providers ORDER BY created_at ASC"
+            )
         rows = cursor.fetchall()
         cursor.close()
 
@@ -84,6 +92,7 @@ def create_provider_controller(get_conn):
     api_key = (data.get("api_key") or "").strip()
     base_url = (data.get("base_url") or "").strip()
     is_active = data.get("is_active", True)
+    company_id = data.get("company_id")
 
     if not name or not provider_type or not model_name:
         return jsonify({"status": False, "msg": "name, provider_type, and model_name are required"}), 400
@@ -94,9 +103,9 @@ def create_provider_controller(get_conn):
     try:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO llm_providers (name, provider_type, api_key, model_name, base_url, is_active) "
-            "VALUES (%s, %s, %s, %s, %s, %s)",
-            (name, provider_type, api_key if api_key else None, model_name, base_url, is_active)
+            "INSERT INTO llm_providers (name, provider_type, api_key, model_name, base_url, is_active, company_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (name, provider_type, api_key if api_key else None, model_name, base_url, is_active, company_id)
         )
         conn.commit()
         new_id = cursor.lastrowid
@@ -261,17 +270,40 @@ def test_provider_controller(get_conn, provider_id):
 
 def get_assignments_controller(get_conn):
     """GET /api/llm/assignments — Get all scenario → provider mappings."""
+    company_id = request.args.get('company_id')
     conn = get_conn()
     if not conn:
         return jsonify({"status": False, "msg": "DB connection failed"}), 500
     try:
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("""
-            SELECT sa.scenario, sa.provider_id, sa.temperature, sa.max_tokens, sa.timeout, p.name AS provider_name, p.provider_type
-            FROM llm_scenario_assignments sa
-            LEFT JOIN llm_providers p ON sa.provider_id = p.id
-            ORDER BY sa.scenario
-        """)
+        
+        if company_id == 'all':
+            query = """
+                SELECT sa.scenario, sa.provider_id, sa.temperature, sa.max_tokens, sa.timeout, sa.company_id, p.name AS provider_name, p.provider_type
+                FROM llm_scenario_assignments sa
+                LEFT JOIN llm_providers p ON sa.provider_id = p.id
+                ORDER BY sa.company_id, sa.scenario
+            """
+            cursor.execute(query)
+        elif company_id:
+            query = """
+                SELECT sa.scenario, sa.provider_id, sa.temperature, sa.max_tokens, sa.timeout, sa.company_id, p.name AS provider_name, p.provider_type
+                FROM llm_scenario_assignments sa
+                LEFT JOIN llm_providers p ON sa.provider_id = p.id
+                WHERE sa.company_id = %s
+                ORDER BY sa.scenario
+            """
+            cursor.execute(query, (company_id,))
+        else:
+            query = """
+                SELECT sa.scenario, sa.provider_id, sa.temperature, sa.max_tokens, sa.timeout, sa.company_id, p.name AS provider_name, p.provider_type
+                FROM llm_scenario_assignments sa
+                LEFT JOIN llm_providers p ON sa.provider_id = p.id
+                WHERE sa.company_id IS NULL
+                ORDER BY sa.scenario
+            """
+            cursor.execute(query)
+            
         rows = cursor.fetchall()
         cursor.close()
         return jsonify({"status": True, "assignments": rows})
@@ -284,11 +316,11 @@ def get_assignments_controller(get_conn):
 def update_assignments_controller(get_conn):
     """
     PUT /api/llm/assignments — Bulk-update scenario assignments.
-    Body: { "assignments": [ { "scenario": "rag_chat", "provider_id": 1, "temperature": 0.3, "max_tokens": 4096 }, ... ] }
-    Set provider_id to null to revert to .env default.
+    Body: { "assignments": [ { "scenario": "rag_chat", "provider_id": 1, "temperature": 0.3, "max_tokens": 4096 }, ... ], "company_id": 123 }
     """
     data = request.get_json(silent=True) or {}
     assignments = data.get("assignments", [])
+    company_id = data.get("company_id")
 
     if not assignments:
         return jsonify({"status": False, "msg": "No assignments provided"}), 400
@@ -297,7 +329,7 @@ def update_assignments_controller(get_conn):
     if not conn:
         return jsonify({"status": False, "msg": "DB connection failed"}), 500
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
         for a in assignments:
             scenario = a.get("scenario", "").strip()
             provider_id = a.get("provider_id")  # can be None
@@ -305,22 +337,61 @@ def update_assignments_controller(get_conn):
             raw_tokens = a.get("max_tokens")
             max_tokens = int(raw_tokens) if raw_tokens else 4096
             
-            # Handle timeout - default to None if empty or invalid
             raw_timeout = a.get("timeout")
             timeout_val = int(raw_timeout) if raw_timeout else None
 
             if not scenario:
                 continue
-            cursor.execute(
-                "UPDATE llm_scenario_assignments SET provider_id = %s, temperature = %s, max_tokens = %s, timeout = %s WHERE scenario = %s",
-                (provider_id, temperature, max_tokens, timeout_val, scenario)
-            )
+                
+            if company_id:
+                cursor.execute("SELECT id FROM llm_scenario_assignments WHERE scenario = %s AND company_id = %s", (scenario, company_id))
+            else:
+                cursor.execute("SELECT id FROM llm_scenario_assignments WHERE scenario = %s AND company_id IS NULL", (scenario,))
+                
+            row = cursor.fetchone()
+            
+            if row:
+                cursor.execute(
+                    "UPDATE llm_scenario_assignments SET provider_id = %s, temperature = %s, max_tokens = %s, timeout = %s WHERE id = %s",
+                    (provider_id, temperature, max_tokens, timeout_val, row['id'])
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO llm_scenario_assignments (scenario, provider_id, temperature, max_tokens, timeout, company_id) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (scenario, provider_id, temperature, max_tokens, timeout_val, company_id)
+                )
         conn.commit()
         cursor.close()
         from model.llm_client import clear_llm_cache
         clear_llm_cache()
       
         return jsonify({"status": True, "msg": "Assignments updated"})
+    except Exception as e:
+        return jsonify({"status": False, "msg": str(e)}), 500
+    finally:
+        conn.close()
+
+def delete_assignments_controller(get_conn):
+    """
+    DELETE /api/llm/assignments?company_id=123
+    """
+    company_id = request.args.get("company_id")
+    if not company_id:
+        return jsonify({"status": False, "msg": "company_id is required"}), 400
+
+    conn = get_conn()
+    if not conn:
+        return jsonify({"status": False, "msg": "DB connection failed"}), 500
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM llm_scenario_assignments WHERE company_id = %s", (company_id,))
+        conn.commit()
+        cursor.close()
+        
+        from model.llm_client import clear_llm_cache
+        clear_llm_cache()
+      
+        return jsonify({"status": True, "msg": "Company configuration deleted successfully"})
     except Exception as e:
         return jsonify({"status": False, "msg": str(e)}), 500
     finally:

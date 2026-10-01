@@ -139,7 +139,7 @@ from controllers.workspace_types_controller import get_workspace_types_controlle
 from controllers.llm_config_controller import (
     get_providers_controller, create_provider_controller, update_provider_controller,
     delete_provider_controller, get_assignments_controller, update_assignments_controller,
-    test_provider_controller
+    test_provider_controller, delete_assignments_controller
 )
 
 from controllers.company_controller import (
@@ -178,6 +178,8 @@ def test_provider(id): return test_provider_controller(get_db_connection, id) if
 def get_assignments(): return get_assignments_controller(get_db_connection) if request.method != 'OPTIONS' else ('', 204)
 @app.route('/api/llm/assignments', methods=['PUT', 'OPTIONS'])
 def update_assignments(): return update_assignments_controller(get_db_connection) if request.method != 'OPTIONS' else ('', 204)
+@app.route('/api/llm/assignments', methods=['DELETE', 'OPTIONS'])
+def delete_assignments(): return delete_assignments_controller(get_db_connection) if request.method != 'OPTIONS' else ('', 204)
 
 # Create necessary folders if not exist
 for folder in [GRAPH_FOLDER, UPLOAD_FOLDER, TEMP_UPLOAD_FOLDER]:
