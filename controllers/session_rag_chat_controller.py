@@ -2218,6 +2218,10 @@ Return ONLY valid JSON:
                                     break
                 
                 if cur_sql:
+                    try:
+                        cur_sql.execute("SET SESSION sql_mode=''")
+                    except Exception as e:
+                        print(f"[SQL_GEN] Failed to disable ONLY_FULL_GROUP_BY: {e}")
                     for _attempt in range(2):
                         try:
                             cur_sql.execute(sql_query)
