@@ -1972,7 +1972,7 @@ Do not add monthly, yearly, trend, or detailed breakdowns unless explicitly requ
 
 12. Never hallucinate business results.
 
-13. PRESERVE EXACT DECIMALS: Never round monetary values in SQL unless explicitly asked. Return the exact sum with decimals intact.
+13. ROUNDING & LABELS: Always ROUND monetary and aggregated numeric values in SQL to 2 decimal places using `ROUND(SUM(col), 2)` for readability. Never label monetary value columns (Invoice_Value_INR) as "Quantity" or "Volume" in your SQL aliases or final output. Use accurate names like "Total Sales" or "Revenue".
 14. NEGATIVE VALUES: NEVER add `> 0` or `>= 0` filters to sales or invoice columns unless the user explicitly asks to "exclude returns" or "only show positive sales". If a dealer's total sales are negative (e.g. -19022.00), that is a valid exact figure and must be included.
 
 COLUMN HYGIENE
