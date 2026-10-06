@@ -1529,23 +1529,29 @@ def _build_geography_prompt(table_cols):
         if "customer" in t.lower() and _norm_ident(g["customer_fk"]) in ncols:
             cust_tbl = t
             break
+    has_target = "sales_target" in norm_tables
+
     if not cust_tbl or g["territory_table"] not in table_cols or g["region_table"] not in table_cols:
         return ""
 
-    return (
+    prompt = (
         f"\n\nGEOGRAPHY CHAIN (MANDATORY — region/zone are NEVER columns on "
-        f"`{cust_tbl}` or the fact table; both joins below are required, in order):\n"
-        f"1. JOIN `{g['territory_table']}` ON "
-        f"CAST(`{cust_tbl}`.`{g['customer_fk']}` AS CHAR) = `{g['territory_table']}`.`{g['territory_key']}`\n"
-        f"2. JOIN `{g['region_table']}` ON "
-        f"`{g['territory_table']}`.`{g['region_fk']}` = CAST(`{g['region_table']}`.`{g['region_key']}` AS CHAR)\n"
-        f"   -- always CAST the BIGINT side to CHAR; never CAST the text side to "
-        f"UNSIGNED (silently coerces non-numeric values to 0 and breaks the join).\n"
-        f"`{g['region_key']}`, `zone`, `region_name` exist ONLY on `{g['region_table']}`, reachable "
-        f"only after both joins above. `{cust_tbl}` and any alias of it (e.g. `cm`) "
-        f"NEVER owns `zone` or `{g['region_key']}` — referencing them there is INVALID.\n"
-        f"   -- CRITICAL: `{g['region_table']}`'s ID column is `{g['region_key']}`. DO NOT use `{g['region_fk']}` on `{g['region_table']}`."
+        f"`{cust_tbl}` or the fact table):\n"
+        f"- To get Region/Zone from Sales Data (via Customer):\n"
+        f"  1. JOIN `{g['territory_table']}` ON CAST(`{cust_tbl}`.`{g['customer_fk']}` AS CHAR) = `{g['territory_table']}`.`{g['territory_key']}`\n"
+        f"  2. JOIN `{g['region_table']}` ON `{g['territory_table']}`.`{g['region_fk']}` = CAST(`{g['region_table']}`.`{g['region_key']}` AS CHAR)\n"
     )
+    if has_target:
+        prompt += (
+            f"- To get Region/Zone from Target Data (sales_target):\n"
+            f"  1. JOIN `{g['territory_table']}` ON CAST(`sales_target`.`Terr_Code` AS CHAR) = `{g['territory_table']}`.`{g['territory_key']}`\n"
+            f"  2. JOIN `{g['region_table']}` ON `{g['territory_table']}`.`{g['region_fk']}` = CAST(`{g['region_table']}`.`{g['region_key']}` AS CHAR)\n"
+        )
+    prompt += (
+        f"   -- always CAST the BIGINT side to CHAR; never CAST the text side to UNSIGNED.\n"
+        f"`{g['region_key']}`, `zone`, `region_name` exist ONLY on `{g['region_table']}`. DO NOT use `{g['region_fk']}` on `{g['region_table']}`."
+    )
+    return prompt
 
 
 def _detect_group_columns(question, biz):
@@ -1865,6 +1871,8 @@ BUSINESS DEFINITIONS
 - Region Performance = SUM(invoice_value) grouped by region
 - Zone Performance = SUM(invoice_value) grouped by zone
 - Average Realization = SUM(invoice_value) / NULLIF(SUM(qty),0)
+- Target Sales = SUM(`sales_target`.`Value`) or SUM(`sales_target`.`Qty`). If asked for Target, query `sales_target` instead of `sales_data`.
+- Target Achievement = Requires joining aggregated `sales_data` (Actual) and `sales_target` (Target) using a CTE. Example for Region: `WITH actual AS (SELECT region_name, SUM(Invoice_Value_INR) as act_sales FROM sales_data ...), target AS (SELECT region_name, SUM(Value) as tgt_sales FROM sales_target ...) SELECT a.region_name, a.act_sales, t.tgt_sales, (a.act_sales / t.tgt_sales)*100 as achievement FROM actual a LEFT JOIN target t ON a.region_name = t.region_name`.
 
 
 
