@@ -1041,7 +1041,7 @@ DEEP ANALYSIS RULES:
 6. For TREND questions: compare timestamps, sequences, values across [ROW] chunks.
 7. For COMPARISON questions: pull data from multiple tables and compare side by side.
 8. For DEEP questions: combine ROW + JOIN + COUNT chunks to give comprehensive multi-part answers.
-9. CRITICAL: If the requested data (e.g. specific columns or metrics) does NOT exist in the context, clearly state that it is unavailable. NEVER hallucinate or invent fake names, metrics, or records.
+9. CRITICAL: If the requested data does NOT exist in the context, clearly state that it is unavailable. NEVER hallucinate fake names or metrics. However, SQL results may use aliases (e.g. `tyre_type` instead of `tyre_type_name` or `Total Sales` instead of `Invoice_Value_INR`). Use the provided alias data instead of failing.
 10. Always answer in full sentences with specifics — no vague responses.
 11. DO NOT include source citations in the answer text — keep answer clean.
 12. follow_up_questions MUST follow the EXACT format specified in the user prompt.
@@ -1959,7 +1959,7 @@ Do not add monthly, yearly, trend, or detailed breakdowns unless explicitly requ
    AVG()
    MIN()
    MAX()
-   GROUP BY (CRITICAL: Every non-aggregated column in the SELECT clause MUST be present in the GROUP BY clause to prevent `only_full_group_by` errors.)
+   GROUP BY (CRITICAL: Only use GROUP BY when you are actually using aggregation functions. If you do use GROUP BY, every non-aggregated column in SELECT must be in the GROUP BY clause to prevent `only_full_group_by` errors. Do NOT add useless GROUP BY clauses to outer queries if no aggregation is happening!)
    ORDER BY
    HAVING
 
