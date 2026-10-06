@@ -115,6 +115,10 @@ app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 CORS(app)
 
+@app.route('/', methods=['GET'])
+def health_check():
+    return "api is running"
+
 # Create necessary folders if not exist
 for folder in [GRAPH_FOLDER, UPLOAD_FOLDER, TEMP_UPLOAD_FOLDER]:
     os.makedirs(folder, exist_ok=True)
