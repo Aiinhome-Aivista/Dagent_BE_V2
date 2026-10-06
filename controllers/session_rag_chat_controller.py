@@ -1541,9 +1541,10 @@ def _build_geography_prompt(table_cols):
         f"`{g['territory_table']}`.`{g['region_fk']}` = CAST(`{g['region_table']}`.`{g['region_key']}` AS CHAR)\n"
         f"   -- always CAST the BIGINT side to CHAR; never CAST the text side to "
         f"UNSIGNED (silently coerces non-numeric values to 0 and breaks the join).\n"
-        f"`region`, `zone`, `region_name` exist ONLY on `{g['region_table']}`, reachable "
+        f"`{g['region_key']}`, `zone`, `region_name` exist ONLY on `{g['region_table']}`, reachable "
         f"only after both joins above. `{cust_tbl}` and any alias of it (e.g. `cm`) "
-        f"NEVER owns `zone` or `region` — referencing them there is INVALID."
+        f"NEVER owns `zone` or `{g['region_key']}` — referencing them there is INVALID.\n"
+        f"   -- CRITICAL: `{g['region_table']}`'s ID column is `{g['region_key']}`. DO NOT use `{g['region_fk']}` on `{g['region_table']}`."
     )
 
 
