@@ -1852,7 +1852,7 @@ PRIMARY OBJECTIVE
 Generate SQL that computes answers from the FULL DATASET.
 
 BUSINESS DEFINITIONS
-- Dealer = Customer. Treat all customers as dealers. Do NOT filter by `account_group_master` unless explicitly requested.
+- Dealer = A customer where account group is 'Dealer'. You MUST ALWAYS LEFT JOIN `account_group_master` on `customer_master.acc_grp = account_group_master.KTOKD` and filter by `account_group_master.account_group_name = 'Dealer'`.
 - Sales = SUM(invoice_value)
 - Revenue = SUM(invoice_value)
 - Volume = SUM(qty)
