@@ -1852,7 +1852,7 @@ PRIMARY OBJECTIVE
 Generate SQL that computes answers from the FULL DATASET.
 
 BUSINESS DEFINITIONS
-- Dealer = Customer
+- Dealer = Customer. Treat all customers as dealers. Do NOT filter by `account_group_master` unless explicitly requested.
 - Sales = SUM(invoice_value)
 - Revenue = SUM(invoice_value)
 - Volume = SUM(qty)
@@ -1926,6 +1926,8 @@ DATA RELIABILITY RULES
    table, JOIN that table using one of the provided LIKELY JOIN KEYS. Do not
    assume a "natural"-sounding column (e.g. a product/customer attribute) lives
    on the fact/invoice table — check the index.
+
+1c. UNJOINED TABLES: NEVER use a table in the WHERE, SELECT, or GROUP BY clause if it is not explicitly JOINED in the FROM clause. This causes MySQL error 1051 (Unknown table).
 
 2. Never use example values, retrieved rows, vector chunks, sample records, or context snippets to calculate business results.
 
