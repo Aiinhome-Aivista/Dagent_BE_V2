@@ -130,7 +130,10 @@ def _get_embed_model():
             if _EMBED_MODEL is None:
                 from sentence_transformers import SentenceTransformer
                 print("[RAG] Loading SentenceTransformer globally...")
-                _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+                import os
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                model_path = os.path.join(base_dir, 'local_models', 'all-MiniLM-L6-v2')
+                _EMBED_MODEL = SentenceTransformer(model_path)
                 print("[RAG] SentenceTransformer ready")
     return _EMBED_MODEL
 

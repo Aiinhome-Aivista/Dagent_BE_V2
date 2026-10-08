@@ -31,7 +31,10 @@ engine = create_engine(MYSQL_URL, pool_pre_ping=True)
 sessions = {}
 
 # Load embedding model
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+import os
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+model_path = os.path.join(base_dir, 'local_models', 'all-MiniLM-L6-v2')
+embedding_model = SentenceTransformer(model_path)
 
 # ------------------------ ChromaDB Init ------------------------
 chroma_client = chromadb.PersistentClient(path="./chroma_store")
