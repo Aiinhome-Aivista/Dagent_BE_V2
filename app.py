@@ -22,7 +22,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from urllib.parse import quote_plus
 from sqlalchemy import create_engine
-from controllers.auth_controller import login , register_user_controller, admin_login_auth
+from controllers.auth_controller import login , register_user_controller, admin_login_auth, change_password_controller, get_admin_password_controller
 from controllers.external_db import connect_external_db, apply_external_sync, apply_bulk_sync
 from controllers.external_sync_controller import sync_external_csv
 from controllers.tracker import get_tracker_data
@@ -46,7 +46,7 @@ from database.llm_service import LLMService
 from database.database_service import DatabaseService
 from controllers.orchestrator_controller import process_books
 from controllers.admin_login import staff_login_controller, create_staff_account_controller,get_all_staff_controller
-from controllers.kgraph_controller import rollback_kgraph_controller
+from controllers.kgraph_controller import rollback_kgraph_controller, get_all_kgraphs_controller
 load_dotenv()
 from controllers.captcha_controller import generate_captcha_controller
 from flask import send_from_directory
@@ -673,6 +673,18 @@ def create_user():
 @app.route("/edit_user/<int:user_id>", methods=["POST"])
 def edit_user(user_id):
     return edit_user_controller(get_db_connection, user_id)
+
+@app.route("/change_password", methods=["POST"])
+def change_password():
+    return change_password_controller()
+
+@app.route("/api/user/password", methods=["GET"])
+def get_admin_password():
+    return get_admin_password_controller()
+
+@app.route("/api/kgraphs", methods=["GET"])
+def get_all_kgraphs():
+    return get_all_kgraphs_controller(get_db_connection)
 
 
 @app.route("/delete_user/<int:user_id>", methods=["DELETE"])

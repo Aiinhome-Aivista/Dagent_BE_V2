@@ -108,3 +108,21 @@ def rollback_kgraph_controller(get_db_connection):
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
+
+def get_all_kgraphs_controller(get_db_connection):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("SELECT id, session_name, graph_url, created_at FROM graph ORDER BY created_at DESC")
+            graphs = cursor.fetchall()
+            return jsonify({"status": "success", "graphs": graphs}), 200
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
+        finally:
+            cursor.close()
+            conn.close()
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500

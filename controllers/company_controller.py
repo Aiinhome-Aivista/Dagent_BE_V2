@@ -27,6 +27,13 @@ def create_company_controller(get_db_connection):
 
     try:
         cur = conn.cursor()
+        
+        cur.execute("SELECT COUNT(*) FROM companies")
+        count = cur.fetchone()[0]
+        
+        if count >= 1:
+            return jsonify({"status": "error", "message": "A company already exists. You can only update it."}), 400
+            
         query = """
             INSERT INTO companies (company_name, company_type, address, phone_number, plan_type)
             VALUES (%s, %s, %s, %s, %s)

@@ -203,3 +203,57 @@ def admin_login_auth():
         },
         "msg": "Login successful"
     }), 200
+
+def change_password_controller():
+    from flask import request, jsonify
+    from database.db_connection import get_db_connection
+    from utils.crypto_utils import encrypt_password
+    
+    data = request.json
+    user_id = data.get("user_id")
+    new_password = data.get("new_password")
+    
+    if not user_id or not new_password:
+        return jsonify({"status": False, "msg": "User ID and new password are required"}), 400
+        
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    hashed_password = encrypt_password(new_password)
+    
+    try:
+        cursor.execute("UPDATE users SET password = %s WHERE id = %s", (hashed_password, user_id))
+        conn.commit()
+        return jsonify({"status": True, "msg": "Password updated successfully"}), 200
+    except Exception as e:
+        return jsonify({"status": False, "msg": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+def get_admin_password_controller():
+    from flask import request, jsonify
+    from database.db_connection import get_db_connection
+    from utils.crypto_utils import decrypt_password
+    
+    user_id = request.args.get("user_id")
+    if not user_id:
+        return jsonify({"status": False, "msg": "user_id is required"}), 400
+        
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute("SELECT password FROM users WHERE id = %s", (user_id,))
+        user = cursor.fetchone()
+        if not user:
+            return jsonify({"status": False, "msg": "User not found"}), 404
+            
+        decrypted_password = decrypt_password(user["password"])
+        return jsonify({"status": True, "password": decrypted_password}), 200
+    except Exception as e:
+        return jsonify({"status": False, "msg": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
