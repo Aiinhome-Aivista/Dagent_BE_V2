@@ -143,7 +143,7 @@ def _call_mistral_cloud(messages, json_mode, temperature, api_key, model_name, b
     return res.json()["choices"][0]["message"]["content"].strip()
 
 
-def _call_mistral_local(messages, json_mode, temperature, api_key, model_name, base_url, timeout=600):
+def _call_local(messages, json_mode, temperature, api_key, model_name, base_url, timeout=600):
     if not model_name or not base_url:
         raise ValueError("model_name and base_url are required for mistral_local")
         
@@ -191,7 +191,7 @@ def _call_openai(messages, json_mode, temperature, api_key, model_name, base_url
 PROVIDER_HANDLERS = {
     "gemini": _call_gemini,
     "mistral_cloud": _call_mistral_cloud,
-    "mistral_local": _call_mistral_local,
+    "local": _call_local,
     "openai": _call_openai,
     "openrouter": _call_openai,
 }
@@ -215,7 +215,7 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
             err_msg = f"No DB config found for scenario '{scenario}' and no active mistral_local provider available in DB."
             return json.dumps({"error": err_msg}) if json_mode else f"[LLM Error] {err_msg}"
         
-        provider = "mistral_local"
+        provider = "local"
         api_key = fallback_config.get("api_key")
         model_name = fallback_config.get("model_name")
         base_url = fallback_config.get("base_url")
@@ -230,7 +230,7 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
             temperature = config['temperature']
         timeout_val = config.get('timeout')
         if timeout_val is None:
-            timeout_val = 600 if provider == "mistral_local" else 90
+            timeout_val = 600 if provider == "local" else 90
         print(f"[LLM Client] DB Routing Active -> Scenario: {scenario} | Provider: {provider} | Model: {model_name}")
 
     try:
@@ -248,7 +248,7 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
                     return json.dumps({"error": "Invalid config"}) if json_mode else "[LLM Error] Invalid config"
             except Exception as loop_e:
                 last_err = loop_e
-                if provider == "mistral_local" or attempt == max_retries:
+                if provider == "local" or attempt == max_retries:
                     raise last_err
                 print(f"[LLM Client] Attempt {attempt + 1} failed for {provider}: {loop_e}. Retrying...")
                 time.sleep(1)
@@ -260,7 +260,7 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
             try:
                 fallback_config = _get_fallback_mistral_local_config()
                 if fallback_config:
-                    return _call_mistral_local(messages, json_mode, temperature, fallback_config.get("api_key"), fallback_config.get("model_name"), fallback_config.get("base_url"))
+                    return _call_local(messages, json_mode, temperature, fallback_config.get("api_key"), fallback_config.get("model_name"), fallback_config.get("base_url"))
                 else:
                     raise ValueError("No active mistral_local provider found in DB")
             except Exception as fallback_err:
