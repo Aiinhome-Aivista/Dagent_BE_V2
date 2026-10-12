@@ -163,7 +163,6 @@ typing-inspection==0.4.2
 typing-extensions==4.11.0
 tzdata==2024.1
 paramiko<3.4.0
-urllib3==2.2.1
 uritemplate==4.2.0
 urllib3==2.6.3
 uvicorn==0.41.0
