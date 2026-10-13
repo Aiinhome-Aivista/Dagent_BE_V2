@@ -438,7 +438,10 @@ def _load_db(session_id, get_fn):
                         # Convert non-serialisable types (dates, Decimal, etc.)
                         for row in rows:
                             for k, v in row.items():
-                                if v is not None and not isinstance(v, (str, int, float, bool)):
+                                if type(v).__name__ == 'Decimal':
+                                    f_val = float(v)
+                                    row[k] = 0 if abs(f_val) < 1e-6 else (int(f_val) if f_val.is_integer() else round(f_val, 2))
+                                elif v is not None and not isinstance(v, (str, int, float, bool)):
                                     row[k] = str(v)
 
                         all_rows_pg[qualified] = rows
@@ -2013,7 +2016,60 @@ JOINS AND MISSING DIMENSIONS (CRITICAL)
 - NEVER use an `INNER JOIN` (or plain `JOIN`) that might drop valid records just because the dimension data is missing.
 - When selecting ANY name from a dimension table (whether inside a CTE or in the final MAIN query), you MUST wrap it in `COALESCE` to prevent nulls in the JSON output. 
   Example: `SELECT COALESCE(cm.Cname, 'N/A') AS dealer_name`
+- ALWAYS INCLUDE ENTITY IDENTIFIER: In any customer, dealer, product, or category ranking/comparison query, you MUST ALWAYS select the Entity Name (or Code) as the FIRST column in the final SELECT (e.g. `COALESCE(customer_master.cname, 'N/A') AS customer_name`). Never omit the entity name/code from the query result.
 - SUPER CRITICAL BUG FIX: When grouping or selecting after a LEFT JOIN, ALWAYS use the foreign key from the FACT table (e.g., `sales_data.customer`), NEVER the primary key from the DIMENSION table (e.g., `customer_master.KUNNR`). Grouping by the dimension key will lump all unmatched records into a single NULL bucket! This applies to ALL dimension tables.
+
+YEAR-OVER-YEAR (YoY) & PERIOD GROWTH COMPARISONS (CUSTOMER VS OVERALL)
+- When calculating or comparing growth between two years/periods (e.g., "compare customer growth with overall sales growth" or "growth in 2026 vs 2025"):
+  1. NEVER use LAG() over customer_id or arbitrary entity order! LAG() over an entity list compares one customer to another, which is completely INVALID and produces nonsense growth rates.
+  2. NEVER use LAG() over a single un-partitioned row (LAG() over a single grand-total row produces NULL, causing overall_growth_rate_pct to be NULL for every row).
+  3. ALWAYS calculate period sales via conditional aggregation (CASE WHEN) pivoted by year/period:
+     - For Customer / Entity level:
+       SUM(CASE WHEN YEAR(sales_data.billing__doc_date) = 2025 THEN sales_data.invoice_value_inr ELSE 0 END) AS sales_2025,
+       SUM(CASE WHEN YEAR(sales_data.billing__doc_date) = 2026 THEN sales_data.invoice_value_inr ELSE 0 END) AS sales_2026
+     - For Overall / Grand Total level:
+       SUM(CASE WHEN YEAR(sales_data.billing__doc_date) = 2025 THEN sales_data.invoice_value_inr ELSE 0 END) AS overall_sales_2025,
+       SUM(CASE WHEN YEAR(sales_data.billing__doc_date) = 2026 THEN sales_data.invoice_value_inr ELSE 0 END) AS overall_sales_2026
+  4. Compute Growth Rates using safe division:
+     - Customer Growth:
+       CASE WHEN sales_2025 = 0 OR sales_2025 IS NULL THEN NULL 
+            ELSE ROUND(((sales_2026 - sales_2025) / sales_2025) * 100, 2) END AS customer_growth_rate_pct
+     - Overall Growth:
+       CASE WHEN overall_sales_2025 = 0 OR overall_sales_2025 IS NULL THEN NULL 
+            ELSE ROUND(((overall_sales_2026 - overall_sales_2025) / overall_sales_2025) * 100, 2) END AS overall_growth_rate_pct
+  5. To combine Customer rows with Overall Total, CROSS JOIN the overall aggregate CTE with the customer aggregate CTE:
+     Example Pattern:
+     WITH customer_yearly AS (
+         SELECT 
+             sales_data.customer AS customer_key,
+             COALESCE(customer_master.cname, 'N/A') AS customer_name,
+             SUM(CASE WHEN YEAR(sales_data.billing__doc_date) = 2025 THEN sales_data.invoice_value_inr ELSE 0 END) AS sales_2025,
+             SUM(CASE WHEN YEAR(sales_data.billing__doc_date) = 2026 THEN sales_data.invoice_value_inr ELSE 0 END) AS sales_2026
+         FROM sales_data
+         LEFT JOIN customer_master ON sales_data.customer = customer_master.kunnr
+         WHERE sales_data.billing__doc_date IS NOT NULL
+         GROUP BY sales_data.customer, customer_master.cname
+     ),
+     overall_yearly AS (
+         SELECT 
+             SUM(CASE WHEN YEAR(sales_data.billing__doc_date) = 2025 THEN sales_data.invoice_value_inr ELSE 0 END) AS overall_sales_2025,
+             SUM(CASE WHEN YEAR(sales_data.billing__doc_date) = 2026 THEN sales_data.invoice_value_inr ELSE 0 END) AS overall_sales_2026
+         FROM sales_data
+         WHERE sales_data.billing__doc_date IS NOT NULL
+     )
+     SELECT 
+         cy.customer_name,
+         cy.sales_2025,
+         cy.sales_2026,
+         oy.overall_sales_2025,
+         oy.overall_sales_2026,
+         CASE WHEN cy.sales_2025 = 0 OR cy.sales_2025 IS NULL THEN NULL 
+              ELSE ROUND(((cy.sales_2026 - cy.sales_2025) / cy.sales_2025) * 100, 2) END AS customer_growth_rate_pct,
+         CASE WHEN oy.overall_sales_2025 = 0 OR oy.overall_sales_2025 IS NULL THEN NULL 
+              ELSE ROUND(((oy.overall_sales_2026 - oy.overall_sales_2025) / oy.overall_sales_2025) * 100, 2) END AS overall_growth_rate_pct
+     FROM customer_yearly cy
+     CROSS JOIN overall_yearly oy
+     ORDER BY cy.sales_2026 DESC;
 
 MULTI-LEVEL BREAKDOWN ("Top/Worst N along with their X-wise breakup")
 ENTITY RESOLUTION FOR BREAKDOWN QUERIES
@@ -2223,11 +2279,17 @@ Return ONLY valid JSON:
                             rows = cur_sql.fetchall()
                             sql_results = [dict(r) for r in rows]
 
-                            # Convert non-serializable objects to string
+                            # Convert non-serializable objects to string & clean 0E-8 / null names
                             for row in sql_results:
                                 for k, v in row.items():
-                                    if v is not None and not isinstance(v, (str, int, float, bool)):
+                                    if type(v).__name__ == 'Decimal':
+                                        f_val = float(v)
+                                        row[k] = 0 if abs(f_val) < 1e-6 else (int(f_val) if f_val.is_integer() else round(f_val, 2))
+                                    elif v is not None and not isinstance(v, (str, int, float, bool)):
                                         row[k] = str(v)
+
+                                if "customer_name" in row and not row["customer_name"]:
+                                    row["customer_name"] = "N/A"
 
                             agg_sql_error = None
                             print(f"[SQL_EXEC] Success! Returned {len(sql_results)} rows.")
@@ -2607,6 +2669,7 @@ CRITICAL INSTRUCTIONS FOR ALL VISUALIZATIONS:
 1. The object keys inside the "data" array MUST exactly match what you specify for "xKey" and "yKey".
 2. Only include categories/points that ACTUALLY EXIST in the data. Do NOT invent missing categories with 0 values.
 3. PRESERVE SORT ORDER: When building the "data" array (especially for tables), you MUST preserve the EXACT row order returned by the SQL Results. NEVER sort or re-order the rows alphabetically or otherwise.
+4. TABLE REQUIREMENT: When generating a customer-level comparison or ranking table, the FIRST column MUST ALWAYS be the Customer Name or Customer Code (e.g. key: "customer_name", label: "Customer Name"). Never omit the entity identifier from the table columns and data array.
 
 Supported visualization types:
 

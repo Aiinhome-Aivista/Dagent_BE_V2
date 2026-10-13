@@ -2445,11 +2445,17 @@ Return ONLY: {{"suggested_questions":["What ...?","What ...?","What ...?"]}}
                             rows = cur_sql.fetchall()
                             sql_results = [dict(r) for r in rows]
 
-                            # Convert non-serializable objects to string
+                            # Convert non-serializable objects to string & clean 0E-8 / null names
                             for row in sql_results:
                                 for k, v in row.items():
-                                    if v is not None and not isinstance(v, (str, int, float, bool)):
+                                    if type(v).__name__ == 'Decimal':
+                                        f_val = float(v)
+                                        row[k] = 0 if abs(f_val) < 1e-6 else (int(f_val) if f_val.is_integer() else round(f_val, 2))
+                                    elif v is not None and not isinstance(v, (str, int, float, bool)):
                                         row[k] = str(v)
+
+                                if "customer_name" in row and not row["customer_name"]:
+                                    row["customer_name"] = "N/A"
 
                             agg_sql_error = None
                             print(f"[SQL_EXEC] Success! Returned {len(sql_results)} rows.")
