@@ -5,6 +5,10 @@ import re, json, time, hashlib, math, requests, mysql.connector, threading, os
 from collections import defaultdict
 from flask import request, jsonify
 from database.config import MISTRAL_API_KEY, MISTRAL_MODEL, MYSQL_CONFIG
+try:
+    from utils.logger_service import log_system_error
+except Exception:
+    def log_system_error(*args, **kwargs): pass
 
 # ChromaDB persistent storage — vectors survive server restarts
 CHROMA_PERSIST_DIR = os.path.join(
@@ -1108,6 +1112,7 @@ def session_rag_chat_controller(get_connection_func):
     try:
         all_chunks, bm25_idx, col = _build_store(session_id, get_connection_func)
     except Exception as e:
+        log_system_error(session_id, "homeorag_store", f"Store error: {e}", error_type="store_error")
         return jsonify({"status":"error","statusCode":500,
                         "message":f"Store error: {e}"}), 500
 
@@ -1132,6 +1137,7 @@ Reference actual remedy names and conditions from the data.
 Return ONLY: {{"suggested_questions":["What ...?","Which ...?","What ...?"]}}
 """)
         if not res:
+            log_system_error(session_id, "homeorag_suggest", "LLM failed in suggest mode", error_type="llm_error")
             return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
         return jsonify({
             "status":              "success",
@@ -1170,6 +1176,7 @@ Return ONLY:
 }}
 """)
         if not res:
+            log_system_error(session_id, "homeorag_graph", "LLM failed in graph generation", error_type="llm_error")
             return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
         _advance_turn(session_id)
         fuq = res.get("follow_up_questions",[])
@@ -1213,6 +1220,7 @@ Return ONLY:
 }}
 """)
         if not res:
+            log_system_error(session_id, "homeorag_report", "LLM failed in report generation", error_type="llm_error")
             return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
         _advance_turn(session_id)
         fuq = res.get("follow_up_questions",[])
@@ -1339,6 +1347,7 @@ Return ONLY valid JSON (answer must be a plain text string):
 {{"reasoning":"Step 1: Is it related to homeopathy? Step 2: Does context have exact or general info?", "answer":"...", "follow_up_questions":["{ftype} ...?"], "visualizations":[]}}
 """)
     if not res:
+        log_system_error(session_id, "homeorag_answer", "LLM failed in answer generation", error_type="llm_error")
         return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
 
     clean_answer = _to_str(res.get("answer",""))

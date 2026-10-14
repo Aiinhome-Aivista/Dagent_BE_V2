@@ -13,6 +13,10 @@ from controllers.query_branches import execute_hybrid
 from database.config import MISTRAL_API_KEY, MISTRAL_MODEL, MYSQL_CONFIG
 from controllers.kgraph_service import (
     load_kgraph, build_sql_rules, resolve_grouping, detect_drilldown, validate_sql)
+try:
+    from utils.logger_service import log_system_error
+except Exception:
+    def log_system_error(*args, **kwargs): pass
 # ChromaDB persistent storage — vectors survive server restarts
 CHROMA_PERSIST_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_store"
@@ -1717,6 +1721,7 @@ def session_rag_chat_controller(get_connection_func):
     try:
         all_chunks, bm25_idx, col = _build_store(session_id, get_connection_func)
     except Exception as e:
+        log_system_error(session_id, "rag_chat_store", f"Store error: {e}", error_type="store_error")
         return jsonify({"status":"error","statusCode":500,
                         "message":f"Store error: {e}"}), 500
 
@@ -2298,6 +2303,7 @@ Return ONLY valid JSON:
                             agg_sql_error = str(ex)
                             print(f"[SQL_EXEC] Attempt {_attempt + 1} failed: {ex}")
                             if _attempt == 1:
+                                log_system_error(session_id, "rag_chat_sql", f"SQL execution failed after retry: {ex} | Query: {sql_query}", error_type="sql_error")
                                 break
                             # Self-heal: send the error back to the model once.
                             repair_user = (
@@ -2323,6 +2329,7 @@ Return ONLY valid JSON:
             except Exception as e:
                 agg_sql_error = str(e)
                 print(f"[SQL_EXEC] Execution failed: {e}")
+                log_system_error(session_id, "rag_chat_sql", f"SQL database connection/execution crashed: {e}", error_type="sql_error")
             finally:
                 if cur_sql: 
                     try: cur_sql.close() 
@@ -2492,6 +2499,7 @@ Return ONLY:
 }}
 """)
         if not res:
+            log_system_error(session_id, "rag_chat_report", "LLM failed for report generation", error_type="llm_error")
             return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
         _advance_turn(session_id)
         fuq = res.get("follow_up_questions",[])
@@ -2721,6 +2729,7 @@ Return ONLY valid JSON (answer must be a plain text string):
 """)
 
     if not res:
+        log_system_error(session_id, "rag_chat_answer", "LLM failed for answer generation", error_type="llm_error")
         return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
 
     clean_answer = _to_str(res.get("answer",""))

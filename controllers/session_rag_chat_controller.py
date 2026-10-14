@@ -59,6 +59,10 @@ from controllers.kgraph_service import (
 from controllers.intent_router import classify_intent
 from controllers.query_branches import execute_hybrid
 from helper.email_action_handler import is_email_action_request, execute_email_action
+try:
+    from utils.logger_service import log_system_error
+except Exception:
+    def log_system_error(*args, **kwargs): pass
 # ChromaDB persistent storage — vectors survive server restarts
 CHROMA_PERSIST_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_store"
@@ -1835,6 +1839,7 @@ def session_rag_chat_controller(get_connection_func):
     try:
         all_chunks, bm25_idx, col = _build_store(session_id, get_connection_func)
     except Exception as e:
+        log_system_error(session_id, "rag_chat_store", f"Store build error: {e}", error_type="store_error")
         return jsonify({"status":"error","statusCode":500,
                         "message":f"Store error: {e}"}), 500
 
@@ -2464,6 +2469,7 @@ Return ONLY: {{"suggested_questions":["What ...?","What ...?","What ...?"]}}
                             agg_sql_error = str(ex)
                             print(f"[SQL_EXEC] Attempt {_attempt + 1} failed: {ex}")
                             if _attempt == 1:
+                                log_system_error(session_id, "rag_chat_sql", f"SQL execution failed after retry: {ex} | Query: {sql_query}", error_type="sql_error")
                                 break
                             # Self-heal: send the error back to the model once.
                             repair_user = (
@@ -2497,6 +2503,7 @@ Return ONLY: {{"suggested_questions":["What ...?","What ...?","What ...?"]}}
             except Exception as e:
                 agg_sql_error = str(e)
                 print(f"[SQL_EXEC] Execution failed: {e}")
+                log_system_error(session_id, "rag_chat_sql", f"SQL database connection/execution crashed: {e}", error_type="sql_error")
             finally:
                 if cur_sql: 
                     try: cur_sql.close() 
@@ -2660,6 +2667,7 @@ Return ONLY:
 
     res = _mistral(system_prompt, _answer_msg)
     if not res:
+        log_system_error(session_id, "rag_chat_answer", "LLM generation failed or returned empty response", error_type="llm_error")
         return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
 
     clean_answer = _to_str(res.get("answer",""))

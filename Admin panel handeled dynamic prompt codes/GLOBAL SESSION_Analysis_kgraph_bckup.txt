@@ -1,9 +1,12 @@
 import re
 import json
 import requests
-import mysql.connector
 from flask import request, jsonify
 from database.config import MYSQL_CONFIG
+try:
+    from utils.logger_service import log_system_error
+except Exception:
+    def log_system_error(*args, **kwargs): pass
 
 from pyvis.network import Network
 import os
@@ -813,6 +816,7 @@ def session_analysis_controller(get_connection_func):
         graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db)
 
         if not analysis:
+            log_system_error(session_id, "global_analysis", "LLM analysis failed, returning raw data only", error_type="analysis_llm_error")
             return jsonify({
                 "status":"partial","statusCode":200,
                 "session_id":session_id,
@@ -835,6 +839,7 @@ def session_analysis_controller(get_connection_func):
         }), 200
 
     except Exception as e:
+        log_system_error(session_id, "global_analysis", str(e), error_type="analysis_error")
         return jsonify({
             "status":"error","statusCode":500,
             "message":str(e)

@@ -16,6 +16,10 @@ from database.config import MISTRAL_API_KEY, MISTRAL_MODEL, MYSQL_CONFIG
 from model.llm_client import call_llm_chat
 from database.prompt_loader import get_prompt
 from helper.dynamic_profiler import get_table_aggregates
+try:
+    from utils.logger_service import log_system_error
+except Exception:
+    def log_system_error(*args, **kwargs): pass
 
 
 # pyrefly: ignore [missing-import]
@@ -1696,6 +1700,7 @@ def session_analysis_controller(get_connection_func):
         graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db, workspace_id)
 
         if not analysis:
+            log_system_error(session_id, "session_analysis", "LLM analysis failed or returned empty result", error_type="analysis_llm_error")
             return jsonify({
                 "status":     "partial",
                 "statusCode": 200,
@@ -1725,6 +1730,7 @@ def session_analysis_controller(get_connection_func):
         }), 200
 
     except Exception as e:
+        log_system_error(session_id, "session_analysis", str(e), error_type="analysis_error")
         return jsonify({
             "status": "error", "statusCode": 500,
             "message": str(e)

@@ -141,6 +141,7 @@ from controllers.llm_config_controller import (
     delete_provider_controller, get_assignments_controller, update_assignments_controller,
     test_provider_controller, delete_assignments_controller
 )
+from utils.logger_service import log_system_error
 
 from controllers.company_controller import (
     get_companies_controller,
@@ -257,11 +258,13 @@ def execute_dynamic_controller(workspace_id, prompt_type, default_controller_fun
                 
                 exec_env = {}
                 exec_env.update(globals())
+                exec_env["log_system_error"] = log_system_error
                 
                 try:
                     exec(code_str, exec_env)
                 except Exception as e:
                     print(f"Error parsing dynamic code for {prompt_type}: {e}")
+                    log_system_error(workspace_id, f"dynamic_{prompt_type}", f"Dynamic code parsing failed: {e}", error_type="dynamic_code_error")
                     raise e
                 
                 func_name = default_controller_func.__name__
@@ -270,10 +273,12 @@ def execute_dynamic_controller(workspace_id, prompt_type, default_controller_fun
                     return exec_env[func_name](get_conn_func)
                 else:
                     print(f"Dynamic code did not define {func_name}. Falling back to default.")
+                    log_system_error(workspace_id, f"dynamic_{prompt_type}", f"Dynamic code missing function {func_name}. Falling back to default controller.", error_type="dynamic_code_error")
         except Exception as e:
             import traceback
             print(f"Error executing dynamic {prompt_type} code: {e}")
             traceback.print_exc()
+            log_system_error(workspace_id, f"dynamic_{prompt_type}", f"Execution failed: {e}. Falling back to default controller.", error_type="dynamic_code_error")
         finally:
             conn.close()
             
