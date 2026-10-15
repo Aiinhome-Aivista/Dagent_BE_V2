@@ -46,8 +46,12 @@ def get_source_column_types(source_cursor, table_name, db_type, schema='public')
     elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
         source_cursor.execute("""
             SELECT DATA_TYPE_NAME 
-            FROM SYS.TABLE_COLUMNS 
-            WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
+            FROM (
+                SELECT DATA_TYPE_NAME, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
+                UNION ALL
+                SELECT DATA_TYPE_NAME, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
+            )
+            WHERE (OBJ_NAME = ? OR UPPER(OBJ_NAME) = UPPER(?))
               AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
             ORDER BY POSITION
         """, (table_name, table_name, schema if schema else 'PUBLIC', schema if schema else 'PUBLIC'))
@@ -114,7 +118,11 @@ def resolve_source_table(source_cursor, target_table_name, db_name, db_type, con
 
         source_cursor.execute("""
             SELECT TABLE_NAME, SCHEMA_NAME
-            FROM SYS.TABLES
+            FROM (
+                SELECT TABLE_NAME, SCHEMA_NAME, IS_TEMPORARY FROM SYS.TABLES
+                UNION ALL
+                SELECT VIEW_NAME AS TABLE_NAME, SCHEMA_NAME, 'FALSE' AS IS_TEMPORARY FROM SYS.VIEWS
+            )
             WHERE IS_TEMPORARY = 'FALSE'
               AND SCHEMA_NAME NOT LIKE '_SYS_%'
               AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', '_SYS_AFL', '_SYS_BIC', '_SYS_BI', '_SYS_RT', '_SYS_DI', '_SYS_SECURITY', 'SAP_PA_APL', 'PUBLIC')
@@ -124,9 +132,17 @@ def resolve_source_table(source_cursor, target_table_name, db_name, db_type, con
             if remainder.upper() == f"{t_schema}_{t_name}".upper():
                 return t_name, t_schema
             if remainder.upper() == t_name.upper():
-                return t_name, t_schema
+                if not connection_schema or t_schema.upper() == connection_schema.upper() or (connection_schema and '#' in connection_schema and t_schema.upper() == connection_schema.split('#')[0].upper()):
+                    return t_name, t_schema
         
-        return remainder, connection_schema or "PUBLIC"
+        for t_name, t_schema in all_tables:
+            if remainder.upper() == t_name.upper():
+                return t_name, t_schema
+
+        eff_schema = connection_schema
+        if eff_schema and '#' in eff_schema:
+            eff_schema = eff_schema.split('#')[0]
+        return remainder, eff_schema or "PUBLIC"
     elif db_type in ["mysql", "mariadb", "mysql2"]:
         return target_table_name, None
     else:
@@ -267,8 +283,12 @@ def get_source_columns_list(source_cursor, table_name, db_type, schema='public')
     elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
         source_cursor.execute("""
             SELECT COLUMN_NAME 
-            FROM SYS.TABLE_COLUMNS 
-            WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
+            FROM (
+                SELECT COLUMN_NAME, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
+                UNION ALL
+                SELECT COLUMN_NAME, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
+            )
+            WHERE (OBJ_NAME = ? OR UPPER(OBJ_NAME) = UPPER(?))
               AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
             ORDER BY POSITION
         """, (table_name, table_name, schema if schema else 'PUBLIC', schema if schema else 'PUBLIC'))
@@ -323,8 +343,12 @@ def get_source_columns(source_cursor, table_name, db_type, schema='public'):
     elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
         source_cursor.execute("""
             SELECT COLUMN_NAME 
-            FROM SYS.TABLE_COLUMNS 
-            WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
+            FROM (
+                SELECT COLUMN_NAME, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
+                UNION ALL
+                SELECT COLUMN_NAME, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
+            )
+            WHERE (OBJ_NAME = ? OR UPPER(OBJ_NAME) = UPPER(?))
               AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
             ORDER BY POSITION
         """, (table_name, table_name, schema if schema else 'PUBLIC', schema if schema else 'PUBLIC'))
@@ -911,21 +935,46 @@ def sync_external_database(user_id, connection_id, session_id):
                 source_cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'")
                 source_tables = [(t[0], None) for t in source_cursor.fetchall()]
             elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
-                if schema_name:
-                    source_cursor.execute("""
-                        SELECT TABLE_NAME, SCHEMA_NAME
-                        FROM SYS.TABLES 
-                        WHERE (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?)) AND IS_TEMPORARY = 'FALSE'
-                    """, (schema_name, schema_name))
-                else:
-                    source_cursor.execute("""
-                        SELECT TABLE_NAME, SCHEMA_NAME
-                        FROM SYS.TABLES 
-                        WHERE IS_TEMPORARY = 'FALSE'
-                          AND SCHEMA_NAME NOT LIKE '_SYS_%'
-                          AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', '_SYS_AFL', '_SYS_BIC', '_SYS_BI', '_SYS_RT', '_SYS_DI', '_SYS_SECURITY', 'SAP_PA_APL', 'PUBLIC')
-                    """)
-                source_tables = [(r[0], r[1]) for r in source_cursor.fetchall()]
+                def _fetch_hana_objects(cur, s_name):
+                    if s_name:
+                        cur.execute("""
+                            SELECT TABLE_NAME, SCHEMA_NAME
+                            FROM (
+                                SELECT TABLE_NAME, SCHEMA_NAME, IS_TEMPORARY FROM SYS.TABLES
+                                UNION ALL
+                                SELECT VIEW_NAME AS TABLE_NAME, SCHEMA_NAME, 'FALSE' AS IS_TEMPORARY FROM SYS.VIEWS
+                            )
+                            WHERE (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?)) AND IS_TEMPORARY = 'FALSE'
+                        """, (s_name, s_name))
+                    else:
+                        cur.execute("""
+                            SELECT TABLE_NAME, SCHEMA_NAME
+                            FROM (
+                                SELECT TABLE_NAME, SCHEMA_NAME, IS_TEMPORARY FROM SYS.TABLES
+                                UNION ALL
+                                SELECT VIEW_NAME AS TABLE_NAME, SCHEMA_NAME, 'FALSE' AS IS_TEMPORARY FROM SYS.VIEWS
+                            )
+                            WHERE IS_TEMPORARY = 'FALSE'
+                              AND SCHEMA_NAME NOT LIKE '_SYS_%'
+                              AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', '_SYS_AFL', '_SYS_BIC', '_SYS_BI', '_SYS_RT', '_SYS_DI', '_SYS_SECURITY', 'SAP_PA_APL', 'PUBLIC')
+                        """)
+                    return [(r[0], r[1]) for r in cur.fetchall()]
+
+                source_tables = _fetch_hana_objects(source_cursor, schema_name)
+                # If schema_name had '#' (e.g. SAP_S4#AI_BI_EXT) and returned no tables/views, try the base schema (e.g. SAP_S4)
+                if not source_tables and schema_name and "#" in schema_name:
+                    base_schema = schema_name.split("#")[0]
+                    fallback_tables = _fetch_hana_objects(source_cursor, base_schema)
+                    if fallback_tables:
+                        source_tables = fallback_tables
+                        schema_name = base_schema
+                # If still empty and no schema_name was explicitly given, try username's prefix before '#'
+                if not source_tables and not external_db.get("schema") and external_db.get("username") and "#" in external_db.get("username"):
+                    base_schema = external_db.get("username").split("#")[0]
+                    fallback_tables = _fetch_hana_objects(source_cursor, base_schema)
+                    if fallback_tables:
+                        source_tables = fallback_tables
+                        schema_name = base_schema
             else:
                 source_cursor.execute("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'")
                 source_tables = [(t[0], None) for t in source_cursor.fetchall()]
@@ -1025,8 +1074,12 @@ def sync_external_database(user_id, connection_id, session_id):
                     elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
                         source_cursor.execute("""
                             SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
-                            FROM SYS.TABLE_COLUMNS
-                            WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
+                            FROM (
+                                SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
+                                UNION ALL
+                                SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
+                            )
+                            WHERE (OBJ_NAME = ? OR UPPER(OBJ_NAME) = UPPER(?))
                               AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
                             ORDER BY POSITION
                         """, (table_name, table_name, active_schema if active_schema else 'PUBLIC', active_schema if active_schema else 'PUBLIC'))
@@ -1152,7 +1205,11 @@ def sync_external_database(user_id, connection_id, session_id):
                         elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
                             source_cursor.execute("""
                                 SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
-                                FROM SYS.TABLE_COLUMNS
+                                FROM (
+                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
+                                    UNION ALL
+                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
+                                )
                                 WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
                                   AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
                                 ORDER BY POSITION
@@ -1651,7 +1708,11 @@ def apply_external_sync(user_id, connection_id, session_id, table):
                 elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
                     source_cursor.execute("""
                         SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
-                        FROM SYS.TABLE_COLUMNS
+                        FROM (
+                            SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
+                            UNION ALL
+                            SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
+                        )
                         WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
                           AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
                         ORDER BY POSITION
@@ -2080,7 +2141,11 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                     elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
                         source_cursor.execute("""
                             SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
-                            FROM SYS.TABLE_COLUMNS
+                            FROM (
+                                SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
+                                UNION ALL
+                                SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
+                            )
                             WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
                               AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
                             ORDER BY POSITION
@@ -2142,7 +2207,11 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                         elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
                             source_cursor.execute("""
                                 SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
-                                FROM SYS.TABLE_COLUMNS
+                                FROM (
+                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
+                                    UNION ALL
+                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
+                                )
                                 WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
                                   AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
                                 ORDER BY POSITION
