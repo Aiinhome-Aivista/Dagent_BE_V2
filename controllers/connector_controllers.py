@@ -1027,7 +1027,7 @@ def get_connection_history_controller(get_db_connection):
 
         # Formatting 1: Add Connections
         for row in raw_history:
-            if row['db_type'] not in ['mysql', 'mssql', 'web_search', 'google_sheets', 'csv_upload', 'csv_chunk_upload','snowflake', 'postgresql', 'postgres', 'sql_upload', 'sql_chunk_upload', 'doc_upload','doc_chunk_upload', 'ftp','tally']:
+            if row['db_type'] not in ['mysql', 'mssql', 'web_search', 'google_sheets', 'csv_upload', 'csv_chunk_upload','snowflake', 'postgresql', 'postgres', 'sql_upload', 'sql_chunk_upload', 'doc_upload','doc_chunk_upload', 'ftp','tally', 'sap_hana', 'hana', 'saphana', 'sap']:
                 continue
 
             date_str = row['created_at'].strftime("%Y-%m-%dT%H:%M:%SZ") if row['created_at'] else ""
@@ -1067,6 +1067,9 @@ def get_connection_history_controller(get_db_connection):
                         action_str = raw_name
                     display_name = "CSV Data" 
                 
+            elif row['db_type'] in ['sap_hana', 'hana', 'saphana', 'sap']:
+                action_str = f"Connected to {row['connection_name'] or 'SAP HANA'}"
+                display_name = row['connection_name'] or "SAP HANA"
             else:
                 action_str = f"Connected to {row['connection_name']}"
                 display_name = row['connection_name']
@@ -1088,6 +1091,10 @@ def get_connection_history_controller(get_db_connection):
                             display_name = ", ".join(files) # Joins multiple files like: "data1.csv, data2.csv"
                         elif isinstance(files, str) and files.strip() != "":
                             display_name = files
+                    elif row['db_type'] in ['sap_hana', 'hana', 'saphana', 'sap']:
+                        schema_name = cred_dict.get('schema') or cred_dict.get('database')
+                        if schema_name:
+                            action_str = f"Connected to SAP HANA ({schema_name})"
                     else:
                         db_name = cred_dict.get('database') or cred_dict.get('database_name')
                         if db_name:
@@ -1286,14 +1293,17 @@ def get_workspace_history_controller(get_db_connection):
 
         connect_history = []
         for row in raw_history:
-            if row['db_type'] not in ['mysql', 'mssql', 'web_search', 'google_sheets','snowflake', 'postgresql', 'postgres', 'csv_upload', 'csv_chunk_upload', 'sql_upload']:
+            if row['db_type'] not in ['mysql', 'mssql', 'web_search', 'google_sheets','snowflake', 'postgresql', 'postgres', 'csv_upload', 'csv_chunk_upload', 'sql_upload', 'sql_chunk_upload', 'doc_upload', 'doc_chunk_upload', 'ftp', 'tally', 'sap_hana', 'hana', 'saphana', 'sap']:
                 continue
 
             db_names = {
                 "mysql": "MySQL", "mssql": "SQL Server",
                 "web_search": "Web Search API", "google_sheets": "Google Sheets", "snowflake": "Snowflake",
                 "postgresql": "PostgreSQL", "postgres": "PostgreSQL",
-                "csv_upload": "CSV Upload", "csv_chunk_upload": "CSV Upload", "sql_upload": "SQL Upload"
+                "csv_upload": "CSV Upload", "csv_chunk_upload": "CSV Upload", "sql_upload": "SQL Upload",
+                "sql_chunk_upload": "SQL Upload", "doc_upload": "Document Upload", "doc_chunk_upload": "Document Upload",
+                "ftp": "FTP Connector", "tally": "Tally ERP",
+                "sap_hana": "SAP HANA", "hana": "SAP HANA", "saphana": "SAP HANA", "sap": "SAP HANA"
             }
             db_name_display = db_names.get(row['db_type'], row['db_type'].capitalize())
             
@@ -1301,9 +1311,9 @@ def get_workspace_history_controller(get_db_connection):
             date_str = row['created_at'].strftime("%Y-%m-%dT%H:%M:%SZ") if row['created_at'] else ""
             exact_id = str(row['connection_id']) if row.get('connection_id') else f"h{row['id']}"
 
-            display_name = row['connection_name']
+            display_name = row['connection_name'] or db_name_display
             
-            if row['db_type'] in ['csv_upload', 'csv_chunk_upload', 'sql_upload']:
+            if row['db_type'] in ['csv_upload', 'csv_chunk_upload', 'sql_upload', 'doc_upload', 'doc_chunk_upload']:
                 if row.get('credential'):
                     import json
                     try:
@@ -1320,6 +1330,10 @@ def get_workspace_history_controller(get_db_connection):
                 action_str = f"Configured {display_name}" 
             elif row['db_type'] in ['csv_upload', 'csv_chunk_upload', 'sql_upload']:
                 action_str = f"Uploaded {display_name}"
+            elif row['db_type'] in ['doc_upload', 'doc_chunk_upload']:
+                action_str = f"Uploaded Document: {display_name}"
+            elif row['db_type'] in ['sap_hana', 'hana', 'saphana', 'sap']:
+                action_str = f"Connected to {display_name}"
             else:
                 action_str = f"Connected to {display_name}"
 
