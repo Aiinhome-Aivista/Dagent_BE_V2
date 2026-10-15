@@ -125,12 +125,12 @@ from controllers.action_approval_controller import (
     action_reject_controller,
     action_pending_controller,
 )
-from controllers.pricing_controller import (
-    get_pricing_controller,
-    create_pricing_controller,
-    update_pricing_controller,
-    delete_pricing_controller
-)
+# from controllers.pricing_controller import (
+#     get_pricing_controller,
+#     create_pricing_controller,
+#     update_pricing_controller,
+#     delete_pricing_controller
+# )
 from controllers.export_report_controller import export_domestic_sales_report_controller, export_domestic_sales_preview_controller
 from controllers.dashboard_visuals import graph_metrics_controller,extract_graph_data_controller, default_dashboard_metrics_controller,available_years_controller,dashboard_filters_controller,year_wise_sales_comparison_controller,sales_by_zone_data_controller,tyre_sales_data_controller
 from controllers.sales_dashboard import get_sales_revenue_data_controller, get_sales_by_account_category_controller, get_non_billed_accounts_controller, get_overdue_pct_controller, get_exposure_pct_controller
@@ -793,30 +793,30 @@ def delete_agent_actions():
     """Delete all agent actions for a given session_id."""
     return delete_agent_actions_controller()
 
-# ==========================================
-# Pricing API
-# ==========================================
-
-@app.route("/api/pricing", methods=["GET"])
-def get_pricing():
-    return get_pricing_controller()
-
-@app.route("/api/pricing", methods=["POST"])
-def create_pricing():
-    return create_pricing_controller()
-
-@app.route("/api/pricing/<int:plan_id>", methods=["PUT"])
-def update_pricing(plan_id):
-    return update_pricing_controller(plan_id)
-
-@app.route("/api/pricing/<int:plan_id>", methods=["DELETE"])
-def delete_pricing(plan_id):
-    return delete_pricing_controller(plan_id)
-
-@app.route("/api/user/usage-stats", methods=["GET"])
-def get_user_usage_stats():
-    from controllers.pricing_controller import get_user_usage_stats_controller
-    return get_user_usage_stats_controller()
+# # ==========================================
+# # Pricing API
+# # ==========================================
+# 
+# @app.route("/api/pricing", methods=["GET"])
+# def get_pricing():
+#     return get_pricing_controller()
+# 
+# @app.route("/api/pricing", methods=["POST"])
+# def create_pricing():
+#     return create_pricing_controller()
+# 
+# @app.route("/api/pricing/<int:plan_id>", methods=["PUT"])
+# def update_pricing(plan_id):
+#     return update_pricing_controller(plan_id)
+# 
+# @app.route("/api/pricing/<int:plan_id>", methods=["DELETE"])
+# def delete_pricing(plan_id):
+#     return delete_pricing_controller(plan_id)
+# 
+# @app.route("/api/user/usage-stats", methods=["GET"])
+# def get_user_usage_stats():
+#     from controllers.pricing_controller import get_user_usage_stats_controller
+#     return get_user_usage_stats_controller()
 
 # ==========================================
 # Company API
@@ -969,7 +969,7 @@ def api_delete_prompt_type(id):
 # ==========================================
 # Scheduled Reports API
 # ==========================================
-from controllers.pricing_controller import cleanup_audit_memory_chats
+# from controllers.pricing_controller import cleanup_audit_memory_chats
 
 @app.route("/api/scheduled-reports", methods=["GET"])
 def get_scheduled_reports():
@@ -1005,7 +1005,7 @@ if __name__ == '__main__':
     scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
     
     # Run the chat cleanup job every day at midnight
-    scheduler.add_job(func=cleanup_audit_memory_chats, trigger="cron", hour=0, minute=0)
+    # scheduler.add_job(func=cleanup_audit_memory_chats, trigger="cron", hour=0, minute=0)
     
     scheduler.start()
 
