@@ -789,6 +789,12 @@ def create_connector_controllers(get_db_connection):
                 h_port = int(port_val) if port_val else 30015
                 tunnel = None
 
+                # Detect SAP HANA Cloud (*.hanacloud.ondemand.com or port 443)
+                is_hana_cloud = ('hanacloud.ondemand.com' in str(target_host).lower()) or (h_port == 443)
+                if is_hana_cloud:
+                    encrypt = True
+                    data['encrypt'] = True
+
                 ssh_host = data.get('ssh_host')
                 if ssh_host:
                     ssh_port = int(data.get('ssh_port', 22))
@@ -810,19 +816,46 @@ def create_connector_controllers(get_db_connection):
                     target_host = "127.0.0.1"
                     h_port = tunnel.local_bind_port
 
-                query_params = []
-                if schema:
-                    query_params.append(f"currentSchema={schema}")
-                if encrypt:
-                    query_params.append("encrypt=true&sslValidateCertificate=false")
-                
-                query_str = f"?{'&'.join(query_params)}" if query_params else ""
-                db_path = f"/{database}" if database else "/"
-                uri = f"hana+hdbcli://{username}:{safe_password}@{target_host}:{h_port}{db_path}{query_str}"
+                # In SAP HANA Cloud, tenant database names do not exist.
+                # If user entered schema in database field (e.g. SAP_S4#AI_BI_EXT), use it as schema.
+                effective_schema = schema or (database if is_hana_cloud else None)
 
-                engine = create_engine(uri)
-                with engine.connect() as conn:
-                    conn.execute(text("SELECT 1 FROM DUMMY"))
+                def build_hana_engine(use_tenant_db=True):
+                    q_dict = {}
+                    curr_schema = effective_schema or schema
+                    if curr_schema:
+                        q_dict["currentSchema"] = curr_schema
+                    if encrypt:
+                        q_dict["encrypt"] = "true"
+                        q_dict["sslValidateCertificate"] = "false"
+                    
+                    db_val = database if (database and use_tenant_db and not is_hana_cloud) else None
+                    hana_url = URL.create(
+                        drivername="hana+hdbcli",
+                        username=username,
+                        password=password,
+                        host=target_host,
+                        port=h_port,
+                        database=db_val,
+                        query=q_dict
+                    )
+                    return create_engine(hana_url)
+
+                try:
+                    engine = build_hana_engine(use_tenant_db=True)
+                    with engine.connect() as conn:
+                        conn.execute(text("SELECT 1 FROM DUMMY"))
+                except Exception as first_e:
+                    err_str = str(first_e).lower()
+                    if "not connected" in err_str or "database" in err_str or is_hana_cloud:
+                        # Fallback: connect directly without tenant database and treat database as currentSchema
+                        effective_schema = effective_schema or database
+                        data['schema'] = effective_schema
+                        engine = build_hana_engine(use_tenant_db=False)
+                        with engine.connect() as conn:
+                            conn.execute(text("SELECT 1 FROM DUMMY"))
+                    else:
+                        raise first_e
             else:
                 return jsonify({"status": "error", "message": f"Unsupported connection type: {db_type}"}), 400
 

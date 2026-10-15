@@ -784,6 +784,7 @@ def sync_external_database(user_id, connection_id, session_id):
             db_host = "127.0.0.1"
             db_port = tunnel.local_bind_port
 
+        is_hana_cloud = ("hanacloud.ondemand.com" in str(db_host).lower()) or (db_port == 443)
         connect_kwargs = {
             "address": db_host,
             "port": db_port,
@@ -791,15 +792,27 @@ def sync_external_database(user_id, connection_id, session_id):
             "password": external_db["password"],
             "autocommit": True
         }
-        if external_db.get("database"):
+        if external_db.get("database") and not is_hana_cloud:
             connect_kwargs["databaseName"] = external_db["database"]
-        if external_db.get("schema"):
-            connect_kwargs["currentSchema"] = external_db["schema"]
-        if external_db.get("encrypt"):
+        
+        effective_schema = external_db.get("schema") or (external_db.get("database") if is_hana_cloud else None)
+        if effective_schema:
+            connect_kwargs["currentSchema"] = effective_schema
+
+        if external_db.get("encrypt") or is_hana_cloud:
             connect_kwargs["encrypt"] = True
             connect_kwargs["sslValidateCertificate"] = False
 
-        source_conn = dbapi.connect(**connect_kwargs)
+        try:
+            source_conn = dbapi.connect(**connect_kwargs)
+        except Exception as e:
+            if "not connected" in str(e).lower() and "databaseName" in connect_kwargs:
+                fallback_db = connect_kwargs.pop("databaseName", None)
+                if not connect_kwargs.get("currentSchema") and fallback_db:
+                    connect_kwargs["currentSchema"] = fallback_db
+                source_conn = dbapi.connect(**connect_kwargs)
+            else:
+                raise e
     else:
         tunnel = None
         db_host = external_db["host"]
@@ -1491,6 +1504,7 @@ def apply_external_sync(user_id, connection_id, session_id, table):
             db_host = "127.0.0.1"
             db_port = tunnel.local_bind_port
 
+        is_hana_cloud = ("hanacloud.ondemand.com" in str(db_host).lower()) or (db_port == 443)
         connect_kwargs = {
             "address": db_host,
             "port": db_port,
@@ -1498,15 +1512,27 @@ def apply_external_sync(user_id, connection_id, session_id, table):
             "password": external_db["password"],
             "autocommit": True
         }
-        if external_db.get("database"):
+        if external_db.get("database") and not is_hana_cloud:
             connect_kwargs["databaseName"] = external_db["database"]
-        if external_db.get("schema"):
-            connect_kwargs["currentSchema"] = external_db["schema"]
-        if external_db.get("encrypt"):
+        
+        effective_schema = external_db.get("schema") or (external_db.get("database") if is_hana_cloud else None)
+        if effective_schema:
+            connect_kwargs["currentSchema"] = effective_schema
+
+        if external_db.get("encrypt") or is_hana_cloud:
             connect_kwargs["encrypt"] = True
             connect_kwargs["sslValidateCertificate"] = False
 
-        source_conn = dbapi.connect(**connect_kwargs)
+        try:
+            source_conn = dbapi.connect(**connect_kwargs)
+        except Exception as e:
+            if "not connected" in str(e).lower() and "databaseName" in connect_kwargs:
+                fallback_db = connect_kwargs.pop("databaseName", None)
+                if not connect_kwargs.get("currentSchema") and fallback_db:
+                    connect_kwargs["currentSchema"] = fallback_db
+                source_conn = dbapi.connect(**connect_kwargs)
+            else:
+                raise e
 
     else:
         db_host = external_db["host"]
@@ -1893,6 +1919,7 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
             db_host = "127.0.0.1"
             db_port = tunnel.local_bind_port
 
+        is_hana_cloud = ("hanacloud.ondemand.com" in str(db_host).lower()) or (db_port == 443)
         connect_kwargs = {
             "address": db_host,
             "port": db_port,
@@ -1900,15 +1927,27 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
             "password": external_db["password"],
             "autocommit": True
         }
-        if external_db.get("database"):
+        if external_db.get("database") and not is_hana_cloud:
             connect_kwargs["databaseName"] = external_db["database"]
-        if external_db.get("schema"):
-            connect_kwargs["currentSchema"] = external_db["schema"]
-        if external_db.get("encrypt"):
+        
+        effective_schema = external_db.get("schema") or (external_db.get("database") if is_hana_cloud else None)
+        if effective_schema:
+            connect_kwargs["currentSchema"] = effective_schema
+
+        if external_db.get("encrypt") or is_hana_cloud:
             connect_kwargs["encrypt"] = True
             connect_kwargs["sslValidateCertificate"] = False
 
-        source_conn = dbapi.connect(**connect_kwargs)
+        try:
+            source_conn = dbapi.connect(**connect_kwargs)
+        except Exception as e:
+            if "not connected" in str(e).lower() and "databaseName" in connect_kwargs:
+                fallback_db = connect_kwargs.pop("databaseName", None)
+                if not connect_kwargs.get("currentSchema") and fallback_db:
+                    connect_kwargs["currentSchema"] = fallback_db
+                source_conn = dbapi.connect(**connect_kwargs)
+            else:
+                raise e
 
     else:
         db_host = external_db["host"]
