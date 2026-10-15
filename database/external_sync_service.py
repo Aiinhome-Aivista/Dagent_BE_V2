@@ -8,6 +8,11 @@ import math
 def clean_row(row, col_types=None):
     cleaned = []
     for i, v in enumerate(row):
+        if hasattr(v, 'read') and callable(v.read):
+            try:
+                v = v.read()
+            except Exception:
+                pass
         if isinstance(v, float) and math.isnan(v):
             cleaned.append(None)
         elif col_types and i < len(col_types) and col_types[i] in ['json', 'jsonb']:
@@ -42,9 +47,10 @@ def get_source_column_types(source_cursor, table_name, db_type, schema='public')
         source_cursor.execute("""
             SELECT DATA_TYPE_NAME 
             FROM SYS.TABLE_COLUMNS 
-            WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+            WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
+              AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
             ORDER BY POSITION
-        """, (table_name, schema if schema else 'PUBLIC'))
+        """, (table_name, table_name, schema if schema else 'PUBLIC', schema if schema else 'PUBLIC'))
         return [r[0].lower() for r in source_cursor.fetchall()]
     return None
 
@@ -110,6 +116,8 @@ def resolve_source_table(source_cursor, target_table_name, db_name, db_type, con
             SELECT TABLE_NAME, SCHEMA_NAME
             FROM SYS.TABLES
             WHERE IS_TEMPORARY = 'FALSE'
+              AND SCHEMA_NAME NOT LIKE '_SYS_%'
+              AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', '_SYS_AFL', '_SYS_BIC', '_SYS_BI', '_SYS_RT', '_SYS_DI', '_SYS_SECURITY', 'SAP_PA_APL', 'PUBLIC')
         """)
         all_tables = source_cursor.fetchall()
         for t_name, t_schema in all_tables:
@@ -260,9 +268,10 @@ def get_source_columns_list(source_cursor, table_name, db_type, schema='public')
         source_cursor.execute("""
             SELECT COLUMN_NAME 
             FROM SYS.TABLE_COLUMNS 
-            WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+            WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
+              AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
             ORDER BY POSITION
-        """, (table_name, schema if schema else 'PUBLIC'))
+        """, (table_name, table_name, schema if schema else 'PUBLIC', schema if schema else 'PUBLIC'))
         return [r[0] for r in source_cursor.fetchall()]
     else:
         source_cursor.execute(f"SHOW COLUMNS FROM `{table_name}`")
@@ -279,10 +288,18 @@ def get_quoted_columns(columns, db_type):
 def get_target_quoted_columns(columns):
     return ", ".join([f'`{c}`' for c in columns])
 
-def get_source_table_select_name(table_name, db_type):
-    if db_type in ["postgresql", "postgres", "hana", "sap_hana", "saphana", "sap"]:
+def get_source_table_select_name(table_name, db_type, schema=None):
+    if db_type in ["postgresql", "postgres"]:
+        if schema:
+            return f'"{schema}"."{table_name}"'
+        return f'"{table_name}"'
+    elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+        if schema:
+            return f'"{schema}"."{table_name}"'
         return f'"{table_name}"'
     elif db_type == "mssql":
+        if schema:
+            return f'[{schema}].[{table_name}]'
         return f'[{table_name}]'
     return f"`{table_name}`"
 
@@ -307,9 +324,10 @@ def get_source_columns(source_cursor, table_name, db_type, schema='public'):
         source_cursor.execute("""
             SELECT COLUMN_NAME 
             FROM SYS.TABLE_COLUMNS 
-            WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+            WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
+              AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
             ORDER BY POSITION
-        """, (table_name, schema if schema else 'PUBLIC'))
+        """, (table_name, table_name, schema if schema else 'PUBLIC', schema if schema else 'PUBLIC'))
         return [r[0] for r in source_cursor.fetchall()]
     else:
         source_cursor.execute(f"SHOW COLUMNS FROM `{table_name}`")
@@ -663,6 +681,8 @@ def sync_external_database(user_id, connection_id, session_id):
         required_fields = ["host", "port", "database"] if db_type == 'tally' else ["host", "port", "username", "password"]
     elif db_type == 'mssql':
         required_fields = ["host", "port", "database"]
+    elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+        required_fields = ["host", "port", "username", "password"]
     else:
         required_fields = ["host", "port", "username", "password", "database"]
     for field in required_fields:
@@ -865,6 +885,8 @@ def sync_external_database(user_id, connection_id, session_id):
             """
 
             schema_name = external_db.get("schema")
+            if db_type in ["hana", "sap_hana", "saphana", "sap"] and not schema_name:
+                schema_name = external_db.get("schema") or (external_db.get("database") if is_hana_cloud else None) or external_db.get("database") or external_db.get("username")
 
             if db_type == "tally":
                 source_tables = [("Ledger", None), ("Voucher", None), ("Company", None)]
@@ -893,13 +915,15 @@ def sync_external_database(user_id, connection_id, session_id):
                     source_cursor.execute("""
                         SELECT TABLE_NAME, SCHEMA_NAME
                         FROM SYS.TABLES 
-                        WHERE SCHEMA_NAME = ? AND IS_TEMPORARY = 'FALSE'
-                    """, (schema_name,))
+                        WHERE (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?)) AND IS_TEMPORARY = 'FALSE'
+                    """, (schema_name, schema_name))
                 else:
                     source_cursor.execute("""
                         SELECT TABLE_NAME, SCHEMA_NAME
                         FROM SYS.TABLES 
                         WHERE IS_TEMPORARY = 'FALSE'
+                          AND SCHEMA_NAME NOT LIKE '_SYS_%'
+                          AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', '_SYS_AFL', '_SYS_BIC', '_SYS_BI', '_SYS_RT', '_SYS_DI', '_SYS_SECURITY', 'SAP_PA_APL', 'PUBLIC')
                     """)
                 source_tables = [(r[0], r[1]) for r in source_cursor.fetchall()]
             else:
@@ -915,11 +939,18 @@ def sync_external_database(user_id, connection_id, session_id):
             for table_name, schema_name_from_db in source_tables:
                 if db_type in ["postgresql", "postgres"] and schema_name_from_db:
                     source_cursor.execute(f"SET search_path TO {schema_name_from_db}")
+                elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+                    active_target_schema = schema_name_from_db or schema_name
+                    if active_target_schema:
+                        try:
+                            source_cursor.execute(f'SET SCHEMA "{active_target_schema}"')
+                        except Exception:
+                            pass
                 
                 active_schema = schema_name_from_db if schema_name_from_db else schema_name
 
                 # count rows
-                source_cursor.execute(f"SELECT COUNT(*) FROM {get_source_table_select_name(table_name, db_type)}")
+                source_cursor.execute(f"SELECT COUNT(*) FROM {get_source_table_select_name(table_name, db_type, active_schema)}")
                 row_count = source_cursor.fetchone()[0]
 
                 # count columns
@@ -929,10 +960,11 @@ def sync_external_database(user_id, connection_id, session_id):
                 total_rows += row_count
                 total_columns += col_count
 
+                db_label = external_db.get("database") or active_schema or "hana"
                 if db_type in ["postgresql", "postgres"] and not schema_name:
-                    table_display_name = f"{external_db['database']}.{active_schema}.{table_name}"
+                    table_display_name = f"{db_label}.{active_schema}.{table_name}"
                 else:
-                    table_display_name = f"{external_db['database']}.{table_name}"
+                    table_display_name = f"{db_label}.{table_name}"
 
                 table_summary.append({
                     "table": table_display_name,
@@ -941,11 +973,11 @@ def sync_external_database(user_id, connection_id, session_id):
                 })
 
                 if db_type in ["postgresql", "postgres"] and not schema_name:
-                    new_table_name = f"{external_db['database']}_{active_schema}_{table_name}"
+                    new_table_name = f"{db_label}_{active_schema}_{table_name}"
                 elif db_type in ["mysql", "mariadb", "mysql2", "mssql"]:
                     new_table_name = table_name
                 else:
-                    new_table_name = f"{external_db['database']}_{table_name}"
+                    new_table_name = f"{db_label}_{table_name}"
 
                 # Auto-prefix physical workspace name on conflict so two different
                 # sources can both have a "users" table without overwriting each other.
@@ -994,9 +1026,10 @@ def sync_external_database(user_id, connection_id, session_id):
                         source_cursor.execute("""
                             SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
                             FROM SYS.TABLE_COLUMNS
-                            WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+                            WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
+                              AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
                             ORDER BY POSITION
-                        """, (table_name, active_schema if active_schema else 'PUBLIC'))
+                        """, (table_name, table_name, active_schema if active_schema else 'PUBLIC', active_schema if active_schema else 'PUBLIC'))
                         cols_info = source_cursor.fetchall()
                         col_defs = []
                         for col_name, data_type, is_nullable, char_len, scale in cols_info:
@@ -1019,7 +1052,7 @@ def sync_external_database(user_id, connection_id, session_id):
                     source_col_str = get_quoted_columns(col_list, db_type)
                     target_col_str = get_target_quoted_columns(col_list)
 
-                    source_cursor.execute(f"SELECT {source_col_str} FROM {get_source_table_select_name(table_name, db_type)}")
+                    source_cursor.execute(f"SELECT {source_col_str} FROM {get_source_table_select_name(table_name, db_type, active_schema)}")
                     rows = source_cursor.fetchall()
 
                     inserted_count = 0
@@ -1120,9 +1153,10 @@ def sync_external_database(user_id, connection_id, session_id):
                             source_cursor.execute("""
                                 SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
                                 FROM SYS.TABLE_COLUMNS
-                                WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+                                WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
+                                  AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
                                 ORDER BY POSITION
-                            """, (table_name, active_schema if active_schema else 'PUBLIC'))
+                            """, (table_name, table_name, active_schema if active_schema else 'PUBLIC', active_schema if active_schema else 'PUBLIC'))
                             cols_info = source_cursor.fetchall()
                             col_defs = []
                             for col_name, data_type, is_nullable, char_len, scale in cols_info:
@@ -1143,7 +1177,7 @@ def sync_external_database(user_id, connection_id, session_id):
                         col_list = get_source_columns_list(source_cursor, table_name, db_type, active_schema)
                         source_col_str = get_quoted_columns(col_list, db_type)
                         target_col_str = get_target_quoted_columns(col_list)
-                        source_cursor.execute(f"SELECT {source_col_str} FROM {get_source_table_select_name(table_name, db_type)}")
+                        source_cursor.execute(f"SELECT {source_col_str} FROM {get_source_table_select_name(table_name, db_type, active_schema)}")
                         rows = source_cursor.fetchall()
                         inserted_count = 0
                         if rows:
@@ -1186,7 +1220,7 @@ def sync_external_database(user_id, connection_id, session_id):
                                     "buttons": ["Yes", "No"]
                                 })
 
-                        source_cursor.execute(f"SELECT COUNT(*) FROM {get_source_table_select_name(table_name, db_type)}")
+                        source_cursor.execute(f"SELECT COUNT(*) FROM {get_source_table_select_name(table_name, db_type, active_schema)}")
                         source_count = source_cursor.fetchone()[0]
                         target_cursor.execute(f"SELECT COUNT(*) FROM `{new_table_name}`")
                         target_count = target_cursor.fetchone()[0]
@@ -1572,12 +1606,22 @@ def apply_external_sync(user_id, connection_id, session_id, table):
         with source_conn.cursor() as source_cursor, target_conn.cursor() as target_cursor:
 
             connection_schema = external_db.get("schema")
+            if db_type in ["hana", "sap_hana", "saphana", "sap"] and not connection_schema:
+                connection_schema = external_db.get("schema") or (external_db.get("database") if is_hana_cloud else None) or external_db.get("database") or external_db.get("username")
+
             original_table, schema_name_from_db = resolve_source_table(
-                source_cursor, table, external_db["database"], db_type, connection_schema
+                source_cursor, table, external_db.get("database", "hana"), db_type, connection_schema
             )
             
             if db_type in ["postgresql", "postgres"] and schema_name_from_db:
                 source_cursor.execute(f"SET search_path TO {schema_name_from_db}")
+            elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+                active_target_schema = schema_name_from_db or connection_schema
+                if active_target_schema:
+                    try:
+                        source_cursor.execute(f'SET SCHEMA "{active_target_schema}"')
+                    except Exception:
+                        pass
             
             active_schema = schema_name_from_db if schema_name_from_db else connection_schema
 
@@ -1608,9 +1652,10 @@ def apply_external_sync(user_id, connection_id, session_id, table):
                     source_cursor.execute("""
                         SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
                         FROM SYS.TABLE_COLUMNS
-                        WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+                        WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
+                          AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
                         ORDER BY POSITION
-                    """, (original_table, active_schema if active_schema else 'PUBLIC'))
+                    """, (original_table, original_table, active_schema if active_schema else 'PUBLIC', active_schema if active_schema else 'PUBLIC'))
                     cols_info = source_cursor.fetchall()
                     col_defs = []
                     for col_name, data_type, is_nullable, char_len, scale in cols_info:
@@ -1630,7 +1675,7 @@ def apply_external_sync(user_id, connection_id, session_id, table):
                 target_cursor.execute(create_query)
 
                 # copy all rows
-                source_cursor.execute(f"SELECT * FROM {get_source_table_select_name(original_table, db_type)}")
+                source_cursor.execute(f"SELECT * FROM {get_source_table_select_name(original_table, db_type, active_schema)}")
                 rows = source_cursor.fetchall()
 
                 if rows:
@@ -1646,7 +1691,7 @@ def apply_external_sync(user_id, connection_id, session_id, table):
 
                 return
 
-            source_cursor.execute(f"SELECT COUNT(*) FROM {get_source_table_select_name(original_table, db_type)}")
+            source_cursor.execute(f"SELECT COUNT(*) FROM {get_source_table_select_name(original_table, db_type, active_schema)}")
             source_count = source_cursor.fetchone()[0]
 
             target_cursor.execute(f"SELECT COUNT(*) FROM `{table}`")
@@ -1658,7 +1703,7 @@ def apply_external_sync(user_id, connection_id, session_id, table):
 
                 limit_str = f"LIMIT {source_count-offset} OFFSET {offset}"
                 source_cursor.execute(
-                    f"SELECT * FROM {get_source_table_select_name(original_table, db_type)} {limit_str}"
+                    f"SELECT * FROM {get_source_table_select_name(original_table, db_type, active_schema)} {limit_str}"
                 )
 
                 rows = source_cursor.fetchall()
@@ -1987,15 +2032,24 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
         with source_conn.cursor() as source_cursor, target_conn.cursor() as target_cursor:
             
             connection_schema = external_db.get("schema")
+            if db_type in ["hana", "sap_hana", "saphana", "sap"] and not connection_schema:
+                connection_schema = external_db.get("schema") or (external_db.get("database") if is_hana_cloud else None) or external_db.get("database") or external_db.get("username")
 
             # Loop through all tables sent from the UI
             for table in tables:
                 original_table, schema_name_from_db = resolve_source_table(
-                    source_cursor, table, external_db["database"], db_type, connection_schema
+                    source_cursor, table, external_db.get("database", "hana"), db_type, connection_schema
                 )
                 
                 if db_type in ["postgresql", "postgres"] and schema_name_from_db:
                     source_cursor.execute(f"SET search_path TO {schema_name_from_db}")
+                elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+                    active_target_schema = schema_name_from_db or connection_schema
+                    if active_target_schema:
+                        try:
+                            source_cursor.execute(f'SET SCHEMA "{active_target_schema}"')
+                        except Exception:
+                            pass
                 
                 active_schema = schema_name_from_db if schema_name_from_db else connection_schema
 
@@ -2027,9 +2081,10 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                         source_cursor.execute("""
                             SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
                             FROM SYS.TABLE_COLUMNS
-                            WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+                            WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
+                              AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
                             ORDER BY POSITION
-                        """, (original_table, active_schema if active_schema else 'PUBLIC'))
+                        """, (original_table, original_table, active_schema if active_schema else 'PUBLIC', active_schema if active_schema else 'PUBLIC'))
                         cols_info = source_cursor.fetchall()
                         col_defs = []
                         for col_name, data_type, is_nullable, char_len, scale in cols_info:
@@ -2051,7 +2106,7 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                     source_col_str = get_quoted_columns(col_list, db_type)
                     target_col_str = get_target_quoted_columns(col_list)
                     
-                    source_cursor.execute(f"SELECT {source_col_str} FROM {get_source_table_select_name(original_table, db_type)}")
+                    source_cursor.execute(f"SELECT {source_col_str} FROM {get_source_table_select_name(original_table, db_type, active_schema)}")
                     rows = source_cursor.fetchall()
 
                     if rows:
@@ -2088,9 +2143,10 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                             source_cursor.execute("""
                                 SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
                                 FROM SYS.TABLE_COLUMNS
-                                WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+                                WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
+                                  AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
                                 ORDER BY POSITION
-                            """, (original_table, active_schema if active_schema else 'PUBLIC'))
+                            """, (original_table, original_table, active_schema if active_schema else 'PUBLIC', active_schema if active_schema else 'PUBLIC'))
                             cols_info = source_cursor.fetchall()
                             col_defs = []
                             for col_name, data_type, is_nullable, char_len, scale in cols_info:
@@ -2111,7 +2167,7 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                         source_col_str = get_quoted_columns(col_list, db_type)
                         target_col_str = get_target_quoted_columns(col_list)
                         
-                        source_cursor.execute(f"SELECT {source_col_str} FROM {get_source_table_select_name(original_table, db_type)}")
+                        source_cursor.execute(f"SELECT {source_col_str} FROM {get_source_table_select_name(original_table, db_type, active_schema)}")
                         rows = source_cursor.fetchall()
 
                         if rows:
@@ -2121,7 +2177,7 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                             target_cursor.executemany(insert_query, cleaned_rows)
                     else:
                         # Table exists, append only new rows
-                        source_cursor.execute(f"SELECT COUNT(*) FROM {get_source_table_select_name(original_table, db_type)}")
+                        source_cursor.execute(f"SELECT COUNT(*) FROM {get_source_table_select_name(original_table, db_type, active_schema)}")
                         source_count = source_cursor.fetchone()[0]
 
                         target_cursor.execute(f"SELECT COUNT(*) FROM `{table}`")
@@ -2135,7 +2191,7 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                             target_col_str = get_target_quoted_columns(col_list)
                             
                             source_cursor.execute(
-                                f"SELECT {source_col_str} FROM {get_source_table_select_name(original_table, db_type)} {limit_str}"
+                                f"SELECT {source_col_str} FROM {get_source_table_select_name(original_table, db_type, active_schema)} {limit_str}"
                             )
                             rows = source_cursor.fetchall()
 
