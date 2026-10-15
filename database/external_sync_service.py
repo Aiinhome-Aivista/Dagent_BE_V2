@@ -38,6 +38,14 @@ def get_source_column_types(source_cursor, table_name, db_type, schema='public')
             ORDER BY ORDINAL_POSITION
         """, (table_name, schema if schema else 'dbo'))
         return [r[0].lower() for r in source_cursor.fetchall()]
+    elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+        source_cursor.execute("""
+            SELECT DATA_TYPE_NAME 
+            FROM SYS.TABLE_COLUMNS 
+            WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+            ORDER BY POSITION
+        """, (table_name, schema if schema else 'PUBLIC'))
+        return [r[0].lower() for r in source_cursor.fetchall()]
     return None
 
 def resolve_source_table(source_cursor, target_table_name, db_name, db_type, connection_schema=None):
@@ -88,6 +96,29 @@ def resolve_source_table(source_cursor, target_table_name, db_name, db_type, con
                 return t_name, t_schema
         
         return remainder, "dbo"
+    elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+        prefix = f"{db_name}_"
+        if target_table_name.startswith(prefix):
+            remainder = target_table_name[len(prefix):]
+        else:
+            remainder = target_table_name
+
+        if connection_schema:
+            return remainder, connection_schema
+
+        source_cursor.execute("""
+            SELECT TABLE_NAME, SCHEMA_NAME
+            FROM SYS.TABLES
+            WHERE IS_TEMPORARY = 'FALSE'
+        """)
+        all_tables = source_cursor.fetchall()
+        for t_name, t_schema in all_tables:
+            if remainder.upper() == f"{t_schema}_{t_name}".upper():
+                return t_name, t_schema
+            if remainder.upper() == t_name.upper():
+                return t_name, t_schema
+        
+        return remainder, connection_schema or "PUBLIC"
     elif db_type in ["mysql", "mariadb", "mysql2"]:
         return target_table_name, None
     else:
@@ -167,6 +198,46 @@ def mssql_to_mysql_type(data_type, char_len=None):
     else:
         return 'TEXT'
 
+def hana_to_mysql_type(data_type, char_len=None, precision=None, scale=None):
+    dt = str(data_type).lower()
+    if dt in ['tinyint', 'smallint', 'integer', 'int']:
+        return 'INT'
+    elif dt in ['bigint']:
+        return 'BIGINT'
+    elif dt in ['boolean']:
+        return 'TINYINT(1)'
+    elif dt in ['varchar', 'nvarchar', 'alphanum', 'shorttext']:
+        try:
+            cl = int(char_len) if char_len else 255
+            if cl <= 255:
+                return f'VARCHAR({cl})'
+            elif cl <= 65535:
+                return 'TEXT'
+            else:
+                return 'LONGTEXT'
+        except Exception:
+            return 'TEXT'
+    elif dt in ['clob', 'nclob']:
+        return 'LONGTEXT'
+    elif dt in ['real', 'float']:
+        return 'FLOAT'
+    elif dt in ['double']:
+        return 'DOUBLE'
+    elif dt in ['decimal', 'smalldecimal']:
+        p = precision if precision else 20
+        s = scale if scale is not None else 6
+        return f'DECIMAL({p}, {s})'
+    elif dt in ['date']:
+        return 'DATE'
+    elif dt in ['time']:
+        return 'TIME'
+    elif dt in ['timestamp', 'seconddate']:
+        return 'DATETIME'
+    elif dt in ['blob']:
+        return 'LONGBLOB'
+    else:
+        return 'TEXT'
+
 
 def get_source_columns_list(source_cursor, table_name, db_type, schema='public'):
     if db_type in ["postgresql", "postgres"]:
@@ -185,12 +256,20 @@ def get_source_columns_list(source_cursor, table_name, db_type, schema='public')
             ORDER BY ORDINAL_POSITION
         """, (table_name, schema if schema else 'dbo'))
         return [r[0] for r in source_cursor.fetchall()]
+    elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+        source_cursor.execute("""
+            SELECT COLUMN_NAME 
+            FROM SYS.TABLE_COLUMNS 
+            WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+            ORDER BY POSITION
+        """, (table_name, schema if schema else 'PUBLIC'))
+        return [r[0] for r in source_cursor.fetchall()]
     else:
         source_cursor.execute(f"SHOW COLUMNS FROM `{table_name}`")
         return [c[0] for c in source_cursor.fetchall() if 'GENERATED' not in str(c[5]).upper()]
 
 def get_quoted_columns(columns, db_type):
-    if db_type in ["postgresql", "postgres"]:
+    if db_type in ["postgresql", "postgres", "hana", "sap_hana", "saphana", "sap"]:
         return ", ".join([f'"{c}"' for c in columns])
     elif db_type == "mssql":
         return ", ".join([f'[{c}]' for c in columns])
@@ -201,7 +280,7 @@ def get_target_quoted_columns(columns):
     return ", ".join([f'`{c}`' for c in columns])
 
 def get_source_table_select_name(table_name, db_type):
-    if db_type in ["postgresql", "postgres"]:
+    if db_type in ["postgresql", "postgres", "hana", "sap_hana", "saphana", "sap"]:
         return f'"{table_name}"'
     elif db_type == "mssql":
         return f'[{table_name}]'
@@ -223,6 +302,14 @@ def get_source_columns(source_cursor, table_name, db_type, schema='public'):
             WHERE TABLE_NAME = ? AND TABLE_SCHEMA = ?
             ORDER BY ORDINAL_POSITION
         """, (table_name, schema if schema else 'dbo'))
+        return [r[0] for r in source_cursor.fetchall()]
+    elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+        source_cursor.execute("""
+            SELECT COLUMN_NAME 
+            FROM SYS.TABLE_COLUMNS 
+            WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+            ORDER BY POSITION
+        """, (table_name, schema if schema else 'PUBLIC'))
         return [r[0] for r in source_cursor.fetchall()]
     else:
         source_cursor.execute(f"SHOW COLUMNS FROM `{table_name}`")
@@ -678,6 +765,41 @@ def sync_external_database(user_id, connection_id, session_id):
             conn_str += ";TDS_Version=7.4"
             
         source_conn = pyodbc.connect(conn_str, autocommit=True)
+    elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+        from hdbcli import dbapi
+        tunnel = None
+        db_host = external_db["host"]
+        db_port = int(external_db.get("port", 30015))
+        
+        if external_db.get("ssh_host"):
+            from sshtunnel import SSHTunnelForwarder
+            tunnel = SSHTunnelForwarder(
+                (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
+                ssh_username=external_db.get("ssh_username"),
+                ssh_password=external_db.get("ssh_password"),
+                ssh_pkey=external_db.get("ssh_key_file"),
+                remote_bind_address=(external_db.get("remote_mysql_host", external_db["host"]), int(external_db.get("remote_mysql_port", db_port)))
+            )
+            tunnel.start()
+            db_host = "127.0.0.1"
+            db_port = tunnel.local_bind_port
+
+        connect_kwargs = {
+            "address": db_host,
+            "port": db_port,
+            "user": external_db["username"],
+            "password": external_db["password"],
+            "autocommit": True
+        }
+        if external_db.get("database"):
+            connect_kwargs["databaseName"] = external_db["database"]
+        if external_db.get("schema"):
+            connect_kwargs["currentSchema"] = external_db["schema"]
+        if external_db.get("encrypt"):
+            connect_kwargs["encrypt"] = True
+            connect_kwargs["sslValidateCertificate"] = False
+
+        source_conn = dbapi.connect(**connect_kwargs)
     else:
         tunnel = None
         db_host = external_db["host"]
@@ -753,6 +875,20 @@ def sync_external_database(user_id, connection_id, session_id):
             elif db_type == 'mssql':
                 source_cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'")
                 source_tables = [(t[0], None) for t in source_cursor.fetchall()]
+            elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+                if schema_name:
+                    source_cursor.execute("""
+                        SELECT TABLE_NAME, SCHEMA_NAME
+                        FROM SYS.TABLES 
+                        WHERE SCHEMA_NAME = ? AND IS_TEMPORARY = 'FALSE'
+                    """, (schema_name,))
+                else:
+                    source_cursor.execute("""
+                        SELECT TABLE_NAME, SCHEMA_NAME
+                        FROM SYS.TABLES 
+                        WHERE IS_TEMPORARY = 'FALSE'
+                    """)
+                source_tables = [(r[0], r[1]) for r in source_cursor.fetchall()]
             else:
                 source_cursor.execute("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'")
                 source_tables = [(t[0], None) for t in source_cursor.fetchall()]
@@ -839,6 +975,20 @@ def sync_external_database(user_id, connection_id, session_id):
                         for col_name, data_type, is_nullable, char_len in cols_info:
                             mysql_type = mssql_to_mysql_type(data_type, char_len)
                             null_def = "NULL" if is_nullable == "YES" else "NOT NULL"
+                            col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
+                        create_query = f"CREATE TABLE `{new_table_name}` (\n  " + ",\n  ".join(col_defs) + "\n)"
+                    elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+                        source_cursor.execute("""
+                            SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
+                            FROM SYS.TABLE_COLUMNS
+                            WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+                            ORDER BY POSITION
+                        """, (table_name, active_schema if active_schema else 'PUBLIC'))
+                        cols_info = source_cursor.fetchall()
+                        col_defs = []
+                        for col_name, data_type, is_nullable, char_len, scale in cols_info:
+                            mysql_type = hana_to_mysql_type(data_type, char_len, char_len, scale)
+                            null_def = "NULL" if str(is_nullable).upper() == "TRUE" else "NOT NULL"
                             col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                         create_query = f"CREATE TABLE `{new_table_name}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                     else:
@@ -951,6 +1101,20 @@ def sync_external_database(user_id, connection_id, session_id):
                             for col_name, data_type, is_nullable, char_len in cols_info:
                                 mysql_type = mssql_to_mysql_type(data_type, char_len)
                                 null_def = "NULL" if is_nullable == "YES" else "NOT NULL"
+                                col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
+                            create_query = f"CREATE TABLE `{new_table_name}` (\n  " + ",\n  ".join(col_defs) + "\n)"
+                        elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+                            source_cursor.execute("""
+                                SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
+                                FROM SYS.TABLE_COLUMNS
+                                WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+                                ORDER BY POSITION
+                            """, (table_name, active_schema if active_schema else 'PUBLIC'))
+                            cols_info = source_cursor.fetchall()
+                            col_defs = []
+                            for col_name, data_type, is_nullable, char_len, scale in cols_info:
+                                mysql_type = hana_to_mysql_type(data_type, char_len, char_len, scale)
+                                null_def = "NULL" if str(is_nullable).upper() == "TRUE" else "NOT NULL"
                                 col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                             create_query = f"CREATE TABLE `{new_table_name}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                         else:
@@ -1308,6 +1472,42 @@ def apply_external_sync(user_id, connection_id, session_id, table):
         source_conn = pymssql.connect(**conn_kwargs)
         source_conn.autocommit(True)
 
+    elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+        from hdbcli import dbapi
+        tunnel = None
+        db_host = external_db["host"]
+        db_port = int(external_db.get("port", 30015))
+        
+        if external_db.get("ssh_host"):
+            from sshtunnel import SSHTunnelForwarder
+            tunnel = SSHTunnelForwarder(
+                (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
+                ssh_username=external_db.get("ssh_username"),
+                ssh_password=external_db.get("ssh_password"),
+                ssh_pkey=external_db.get("ssh_key_file"),
+                remote_bind_address=(external_db.get("remote_mysql_host", external_db["host"]), int(external_db.get("remote_mysql_port", db_port)))
+            )
+            tunnel.start()
+            db_host = "127.0.0.1"
+            db_port = tunnel.local_bind_port
+
+        connect_kwargs = {
+            "address": db_host,
+            "port": db_port,
+            "user": external_db["username"],
+            "password": external_db["password"],
+            "autocommit": True
+        }
+        if external_db.get("database"):
+            connect_kwargs["databaseName"] = external_db["database"]
+        if external_db.get("schema"):
+            connect_kwargs["currentSchema"] = external_db["schema"]
+        if external_db.get("encrypt"):
+            connect_kwargs["encrypt"] = True
+            connect_kwargs["sslValidateCertificate"] = False
+
+        source_conn = dbapi.connect(**connect_kwargs)
+
     else:
         db_host = external_db["host"]
         db_port = external_db.get("port", 3306)
@@ -1376,6 +1576,20 @@ def apply_external_sync(user_id, connection_id, session_id, table):
                     for col_name, data_type, is_nullable, char_len in cols_info:
                         mysql_type = postgres_to_mysql_type(data_type, char_len)
                         null_def = "NULL" if is_nullable == "YES" else "NOT NULL"
+                        col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
+                    create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
+                elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+                    source_cursor.execute("""
+                        SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
+                        FROM SYS.TABLE_COLUMNS
+                        WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+                        ORDER BY POSITION
+                    """, (original_table, active_schema if active_schema else 'PUBLIC'))
+                    cols_info = source_cursor.fetchall()
+                    col_defs = []
+                    for col_name, data_type, is_nullable, char_len, scale in cols_info:
+                        mysql_type = hana_to_mysql_type(data_type, char_len, char_len, scale)
+                        null_def = "NULL" if str(is_nullable).upper() == "TRUE" else "NOT NULL"
                         col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                     create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                 else:
@@ -1660,6 +1874,42 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
         source_conn = pymssql.connect(**conn_kwargs)
         source_conn.autocommit(True)
 
+    elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+        from hdbcli import dbapi
+        tunnel = None
+        db_host = external_db["host"]
+        db_port = int(external_db.get("port", 30015))
+        
+        if external_db.get("ssh_host"):
+            from sshtunnel import SSHTunnelForwarder
+            tunnel = SSHTunnelForwarder(
+                (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
+                ssh_username=external_db.get("ssh_username"),
+                ssh_password=external_db.get("ssh_password"),
+                ssh_pkey=external_db.get("ssh_key_file"),
+                remote_bind_address=(external_db.get("remote_mysql_host", external_db["host"]), int(external_db.get("remote_mysql_port", db_port)))
+            )
+            tunnel.start()
+            db_host = "127.0.0.1"
+            db_port = tunnel.local_bind_port
+
+        connect_kwargs = {
+            "address": db_host,
+            "port": db_port,
+            "user": external_db["username"],
+            "password": external_db["password"],
+            "autocommit": True
+        }
+        if external_db.get("database"):
+            connect_kwargs["databaseName"] = external_db["database"]
+        if external_db.get("schema"):
+            connect_kwargs["currentSchema"] = external_db["schema"]
+        if external_db.get("encrypt"):
+            connect_kwargs["encrypt"] = True
+            connect_kwargs["sslValidateCertificate"] = False
+
+        source_conn = dbapi.connect(**connect_kwargs)
+
     else:
         db_host = external_db["host"]
         db_port = external_db.get("port", 3306)
@@ -1734,6 +1984,20 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                             null_def = "NULL" if is_nullable == "YES" else "NOT NULL"
                             col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                         create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
+                    elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+                        source_cursor.execute("""
+                            SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
+                            FROM SYS.TABLE_COLUMNS
+                            WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+                            ORDER BY POSITION
+                        """, (original_table, active_schema if active_schema else 'PUBLIC'))
+                        cols_info = source_cursor.fetchall()
+                        col_defs = []
+                        for col_name, data_type, is_nullable, char_len, scale in cols_info:
+                            mysql_type = hana_to_mysql_type(data_type, char_len, char_len, scale)
+                            null_def = "NULL" if str(is_nullable).upper() == "TRUE" else "NOT NULL"
+                            col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
+                        create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                     else:
                         source_cursor.execute(f"SHOW CREATE TABLE `{original_table}`")
                         create_query = source_cursor.fetchone()[1]
@@ -1779,6 +2043,20 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                             for col_name, data_type, is_nullable, char_len in cols_info:
                                 mysql_type = postgres_to_mysql_type(data_type, char_len)
                                 null_def = "NULL" if is_nullable == "YES" else "NOT NULL"
+                                col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
+                            create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
+                        elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
+                            source_cursor.execute("""
+                                SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
+                                FROM SYS.TABLE_COLUMNS
+                                WHERE TABLE_NAME = ? AND SCHEMA_NAME = ?
+                                ORDER BY POSITION
+                            """, (original_table, active_schema if active_schema else 'PUBLIC'))
+                            cols_info = source_cursor.fetchall()
+                            col_defs = []
+                            for col_name, data_type, is_nullable, char_len, scale in cols_info:
+                                mysql_type = hana_to_mysql_type(data_type, char_len, char_len, scale)
+                                null_def = "NULL" if str(is_nullable).upper() == "TRUE" else "NOT NULL"
                                 col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                             create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                         else:

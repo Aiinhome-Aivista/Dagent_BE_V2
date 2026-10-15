@@ -783,12 +783,52 @@ def create_connector_controllers(get_db_connection):
                 engine = create_engine(uri)
                 with engine.connect() as conn:
                     conn.execute(text("SELECT 1"))
+            elif db_type in ['hana', 'sap_hana', 'saphana', 'sap']:
+                schema = data.get('schema')
+                encrypt = data.get('encrypt', False)
+                h_port = int(port_val) if port_val else 30015
+                tunnel = None
+
+                ssh_host = data.get('ssh_host')
+                if ssh_host:
+                    ssh_port = int(data.get('ssh_port', 22))
+                    ssh_username = data.get('ssh_username')
+                    ssh_password = data.get('ssh_password')
+                    ssh_key_file = data.get('ssh_key_file')
+                    remote_hana_host = data.get('remote_mysql_host', target_host)
+                    remote_hana_port = int(data.get('remote_mysql_port', h_port))
+
+                    from sshtunnel import SSHTunnelForwarder
+                    tunnel = SSHTunnelForwarder(
+                        (ssh_host, ssh_port),
+                        ssh_username=ssh_username,
+                        ssh_password=ssh_password,
+                        ssh_pkey=ssh_key_file,
+                        remote_bind_address=(remote_hana_host, remote_hana_port)
+                    )
+                    tunnel.start()
+                    target_host = "127.0.0.1"
+                    h_port = tunnel.local_bind_port
+
+                query_params = []
+                if schema:
+                    query_params.append(f"currentSchema={schema}")
+                if encrypt:
+                    query_params.append("encrypt=true&sslValidateCertificate=false")
+                
+                query_str = f"?{'&'.join(query_params)}" if query_params else ""
+                db_path = f"/{database}" if database else "/"
+                uri = f"hana+hdbcli://{username}:{safe_password}@{target_host}:{h_port}{db_path}{query_str}"
+
+                engine = create_engine(uri)
+                with engine.connect() as conn:
+                    conn.execute(text("SELECT 1 FROM DUMMY"))
             else:
                 return jsonify({"status": "error", "message": f"Unsupported connection type: {db_type}"}), 400
 
             session_key = f"user_{user_id}_{conn_name}"
             active_connectors[session_key] = engine
-            if db_type == 'mysql' and 'tunnel' in locals() and tunnel is not None:
+            if (db_type == 'mysql' or db_type in ['hana', 'sap_hana', 'saphana', 'sap']) and 'tunnel' in locals() and tunnel is not None:
                 active_ssh_tunnels[session_key] = tunnel
 
             status = "success"
@@ -820,6 +860,7 @@ def create_connector_controllers(get_db_connection):
                     "database": database, "url": data.get('url'),   
                     "account": data.get('account'), "warehouse": data.get('warehouse'),
                     "schema": data.get('schema'), "topic": topic,
+                    "encrypt": data.get('encrypt', False),
                     "ssh_host": data.get('ssh_host'), "ssh_port": data.get('ssh_port'),
                     "ssh_username": data.get('ssh_username'), "ssh_password": data.get('ssh_password'),
                     "ssh_key_file": data.get('ssh_key_file'), "remote_mysql_host": data.get('remote_mysql_host'),
