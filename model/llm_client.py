@@ -517,7 +517,7 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
 
     try:
         # 3. Execute with whichever provider was selected, with retry logic
-        max_retries = 2
+        max_retries = 1
         last_err = None
         
         for attempt in range(max_retries + 1):
@@ -537,6 +537,13 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
 
     except Exception as e:
         print(f"[LLM Error] Provider '{provider}' failed after retries: {e}")
+        try:
+            from utils.logger_service import log_system_error
+            err_type = "timeout" if "timeout" in str(e).lower() else "llm_error"
+            log_system_error(None, f"llm_client_{provider}", f"Provider '{provider}' failed: {e}", error_type=err_type)
+        except Exception:
+            pass
+
         if provider != "mistral_local":
             print("[LLM Error] Attempting ultimate fallback to mistral_local from DB...")
             try:
@@ -547,6 +554,11 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
                     raise ValueError("No active mistral_local provider found in DB")
             except Exception as fallback_err:
                 print(f"[LLM Error] Both primary and local fallback failed. Error: {fallback_err}")
+                try:
+                    from utils.logger_service import log_system_error
+                    log_system_error(None, "llm_client_fallback", f"Both primary '{provider}' and fallback failed: {fallback_err}", error_type="fatal_llm_error")
+                except Exception:
+                    pass
                 if json_mode:
                     return json.dumps({"error": "LLM failed completely", "details": str(fallback_err)})
                 return f"[LLM Error] Both primary and local fallback failed. Error: {str(fallback_err)}"
@@ -558,5 +570,4 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
 
 def call_llm(prompt: str, scenario: str = None) -> str:
     return call_llm_chat([{"role": "user", "content": prompt}], json_mode=False, scenario=scenario)
-
 

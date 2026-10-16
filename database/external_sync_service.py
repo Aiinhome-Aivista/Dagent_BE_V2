@@ -40,6 +40,133 @@ def clean_row(row, col_types=None):
             cleaned.append(v)
     return tuple(cleaned)
 
+def get_hana_columns_info(source_cursor, table_name, schema=None):
+    """
+    Retrieves column metadata for SAP Datasphere / HANA views and tables.
+    Returns list of tuples: (column_name, data_type_name, is_nullable, length, scale)
+    Note: SYS.VIEW_COLUMNS does NOT have IS_NULLABLE (views are treated as nullable).
+          SYS.TABLE_COLUMNS does have IS_NULLABLE.
+    """
+    candidate_schemas = []
+    if schema:
+        candidate_schemas.append(schema)
+        if "#" in schema:
+            candidate_schemas.append(schema.split("#")[0])
+    candidate_schemas.append("SAP_S4")
+
+    seen_s = set()
+    unique_schemas = []
+    for s in candidate_schemas:
+        if s and s.upper() not in seen_s:
+            seen_s.add(s.upper())
+            unique_schemas.append(s)
+
+    # 1. Query SYS.VIEW_COLUMNS with candidate schemas and (LENGTH, SCALE)
+    for s in unique_schemas:
+        try:
+            source_cursor.execute("""
+                SELECT COLUMN_NAME, DATA_TYPE_NAME, LENGTH, SCALE
+                FROM SYS.VIEW_COLUMNS
+                WHERE (VIEW_NAME = ? OR UPPER(VIEW_NAME) = UPPER(?))
+                  AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
+                ORDER BY POSITION
+            """, (table_name, table_name, s, s))
+            rows = source_cursor.fetchall()
+            if rows:
+                return [(r[0], r[1], "TRUE", r[2], r[3]) for r in rows]
+        except Exception:
+            pass
+
+    # 2. Query SYS.VIEW_COLUMNS with candidate schemas (AWS console verified query: COLUMN_NAME, DATA_TYPE_NAME)
+    for s in unique_schemas:
+        try:
+            source_cursor.execute("""
+                SELECT COLUMN_NAME, DATA_TYPE_NAME
+                FROM SYS.VIEW_COLUMNS
+                WHERE (VIEW_NAME = ? OR UPPER(VIEW_NAME) = UPPER(?))
+                  AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
+                ORDER BY POSITION
+            """, (table_name, table_name, s, s))
+            rows = source_cursor.fetchall()
+            if rows:
+                return [(r[0], r[1], "TRUE", None, None) for r in rows]
+        except Exception:
+            pass
+
+    # 3. Query SYS.VIEW_COLUMNS without schema restriction
+    try:
+        source_cursor.execute("""
+            SELECT COLUMN_NAME, DATA_TYPE_NAME, LENGTH, SCALE
+            FROM SYS.VIEW_COLUMNS
+            WHERE (VIEW_NAME = ? OR UPPER(VIEW_NAME) = UPPER(?))
+              AND SCHEMA_NAME NOT LIKE '_SYS_%'
+              AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', 'PUBLIC')
+            ORDER BY POSITION
+        """, (table_name, table_name))
+        rows = source_cursor.fetchall()
+        if rows:
+            return [(r[0], r[1], "TRUE", r[2], r[3]) for r in rows]
+    except Exception:
+        pass
+
+    try:
+        source_cursor.execute("""
+            SELECT COLUMN_NAME, DATA_TYPE_NAME
+            FROM SYS.VIEW_COLUMNS
+            WHERE (VIEW_NAME = ? OR UPPER(VIEW_NAME) = UPPER(?))
+              AND SCHEMA_NAME NOT LIKE '_SYS_%'
+              AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', 'PUBLIC')
+            ORDER BY POSITION
+        """, (table_name, table_name))
+        rows = source_cursor.fetchall()
+        if rows:
+            return [(r[0], r[1], "TRUE", None, None) for r in rows]
+    except Exception:
+        pass
+
+    # 4. Query SYS.TABLE_COLUMNS with candidate schemas (for base tables)
+    for s in unique_schemas:
+        try:
+            source_cursor.execute("""
+                SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
+                FROM SYS.TABLE_COLUMNS
+                WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
+                  AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
+                ORDER BY POSITION
+            """, (table_name, table_name, s, s))
+            rows = source_cursor.fetchall()
+            if rows:
+                return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
+        except Exception:
+            pass
+
+    # 5. Query SYS.TABLE_COLUMNS without schema
+    try:
+        source_cursor.execute("""
+            SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
+            FROM SYS.TABLE_COLUMNS
+            WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
+              AND SCHEMA_NAME NOT LIKE '_SYS_%'
+            ORDER BY POSITION
+        """, (table_name, table_name))
+        rows = source_cursor.fetchall()
+        if rows:
+            return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
+    except Exception:
+        pass
+
+    # 6. Fallback: probe SELECT * FROM ... WHERE 1=0 to retrieve column names from cursor.description
+    for s in unique_schemas + [None]:
+        try:
+            sel_target = f'"{s}"."{table_name}"' if s else f'"{table_name}"'
+            source_cursor.execute(f"SELECT * FROM {sel_target} WHERE 1=0")
+            if source_cursor.description:
+                return [(d[0], "VARCHAR", "TRUE", 255, None) for d in source_cursor.description]
+        except Exception:
+            pass
+
+    return []
+
 def get_source_column_types(source_cursor, table_name, db_type, schema='public'):
     if db_type in ["postgresql", "postgres"]:
         source_cursor.execute("""
@@ -58,32 +185,8 @@ def get_source_column_types(source_cursor, table_name, db_type, schema='public')
         """, (table_name, schema if schema else 'dbo'))
         return [r[0].lower() for r in source_cursor.fetchall()]
     elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
-        if schema:
-            source_cursor.execute("""
-                SELECT DATA_TYPE_NAME 
-                FROM (
-                    SELECT DATA_TYPE_NAME, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
-                    UNION ALL
-                    SELECT DATA_TYPE_NAME, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
-                )
-                WHERE (OBJ_NAME = ? OR UPPER(OBJ_NAME) = UPPER(?))
-                  AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
-                ORDER BY POSITION
-            """, (table_name, table_name, schema, schema))
-            res = [r[0].lower() for r in source_cursor.fetchall()]
-            if res:
-                return res
-        source_cursor.execute("""
-            SELECT DATA_TYPE_NAME 
-            FROM (
-                SELECT DATA_TYPE_NAME, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
-                UNION ALL
-                SELECT DATA_TYPE_NAME, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
-            )
-            WHERE (OBJ_NAME = ? OR UPPER(OBJ_NAME) = UPPER(?))
-            ORDER BY POSITION
-        """, (table_name, table_name))
-        return [r[0].lower() for r in source_cursor.fetchall()]
+        info = get_hana_columns_info(source_cursor, table_name, schema)
+        return [r[1].lower() for r in info]
     return None
 
 def resolve_source_table(source_cursor, target_table_name, db_name, db_type, connection_schema=None):
@@ -146,8 +249,11 @@ def resolve_source_table(source_cursor, target_table_name, db_name, db_type, con
                 remainder = allowed
                 break
 
-        if connection_schema:
-            return remainder, connection_schema
+        eff_schema = connection_schema
+        if eff_schema and '#' in eff_schema:
+            eff_schema = eff_schema.split('#')[0]
+        if eff_schema and eff_schema.upper() not in ["PUBLIC", "SYS", ""]:
+            return remainder, eff_schema
 
         source_cursor.execute("""
             SELECT TABLE_NAME, SCHEMA_NAME
@@ -172,10 +278,7 @@ def resolve_source_table(source_cursor, target_table_name, db_name, db_type, con
             if remainder.upper() == t_name.upper():
                 return t_name, t_schema
 
-        eff_schema = connection_schema
-        if eff_schema and '#' in eff_schema:
-            eff_schema = eff_schema.split('#')[0]
-        return remainder, eff_schema or "PUBLIC"
+        return remainder, eff_schema or "SAP_S4"
     elif db_type in ["mysql", "mariadb", "mysql2"]:
         return target_table_name, None
     else:
@@ -256,14 +359,14 @@ def mssql_to_mysql_type(data_type, char_len=None):
         return 'TEXT'
 
 def hana_to_mysql_type(data_type, char_len=None, precision=None, scale=None):
-    dt = str(data_type).lower()
-    if dt in ['tinyint', 'smallint', 'integer', 'int']:
+    dt = str(data_type).strip().lower()
+    if any(k in dt for k in ['tinyint', 'smallint', 'integer', 'int']) and 'bigint' not in dt:
         return 'INT'
-    elif dt in ['bigint']:
+    elif 'bigint' in dt:
         return 'BIGINT'
-    elif dt in ['boolean']:
+    elif 'bool' in dt:
         return 'TINYINT(1)'
-    elif dt in ['varchar', 'nvarchar', 'alphanum', 'shorttext']:
+    elif any(k in dt for k in ['varchar', 'nvarchar', 'alphanum', 'shorttext', 'string', 'char']):
         try:
             cl = int(char_len) if char_len else 255
             if cl <= 255:
@@ -274,23 +377,23 @@ def hana_to_mysql_type(data_type, char_len=None, precision=None, scale=None):
                 return 'LONGTEXT'
         except Exception:
             return 'TEXT'
-    elif dt in ['clob', 'nclob']:
+    elif any(k in dt for k in ['clob', 'nclob']):
         return 'LONGTEXT'
-    elif dt in ['real', 'float']:
+    elif any(k in dt for k in ['real', 'float']):
         return 'FLOAT'
-    elif dt in ['double']:
+    elif 'double' in dt:
         return 'DOUBLE'
-    elif dt in ['decimal', 'smalldecimal']:
+    elif any(k in dt for k in ['decimal', 'smalldecimal', 'numeric']):
         p = precision if precision else 20
         s = scale if scale is not None else 6
         return f'DECIMAL({p}, {s})'
-    elif dt in ['date']:
+    elif dt == 'date':
         return 'DATE'
-    elif dt in ['time']:
+    elif dt == 'time':
         return 'TIME'
-    elif dt in ['timestamp', 'seconddate']:
+    elif any(k in dt for k in ['timestamp', 'seconddate']):
         return 'DATETIME'
-    elif dt in ['blob']:
+    elif 'blob' in dt:
         return 'LONGBLOB'
     else:
         return 'TEXT'
@@ -314,32 +417,8 @@ def get_source_columns_list(source_cursor, table_name, db_type, schema='public')
         """, (table_name, schema if schema else 'dbo'))
         return [r[0] for r in source_cursor.fetchall()]
     elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
-        if schema:
-            source_cursor.execute("""
-                SELECT COLUMN_NAME 
-                FROM (
-                    SELECT COLUMN_NAME, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
-                    UNION ALL
-                    SELECT COLUMN_NAME, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
-                )
-                WHERE (OBJ_NAME = ? OR UPPER(OBJ_NAME) = UPPER(?))
-                  AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
-                ORDER BY POSITION
-            """, (table_name, table_name, schema, schema))
-            res = [r[0] for r in source_cursor.fetchall()]
-            if res:
-                return res
-        source_cursor.execute("""
-            SELECT COLUMN_NAME 
-            FROM (
-                SELECT COLUMN_NAME, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
-                UNION ALL
-                SELECT COLUMN_NAME, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
-            )
-            WHERE (OBJ_NAME = ? OR UPPER(OBJ_NAME) = UPPER(?))
-            ORDER BY POSITION
-        """, (table_name, table_name))
-        return [r[0] for r in source_cursor.fetchall()]
+        info = get_hana_columns_info(source_cursor, table_name, schema)
+        return [r[0] for r in info]
     else:
         source_cursor.execute(f"SHOW COLUMNS FROM `{table_name}`")
         return [c[0] for c in source_cursor.fetchall() if 'GENERATED' not in str(c[5]).upper()]
@@ -388,32 +467,8 @@ def get_source_columns(source_cursor, table_name, db_type, schema='public'):
         """, (table_name, schema if schema else 'dbo'))
         return [r[0] for r in source_cursor.fetchall()]
     elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
-        if schema:
-            source_cursor.execute("""
-                SELECT COLUMN_NAME 
-                FROM (
-                    SELECT COLUMN_NAME, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
-                    UNION ALL
-                    SELECT COLUMN_NAME, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
-                )
-                WHERE (OBJ_NAME = ? OR UPPER(OBJ_NAME) = UPPER(?))
-                  AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
-                ORDER BY POSITION
-            """, (table_name, table_name, schema, schema))
-            res = [r[0] for r in source_cursor.fetchall()]
-            if res:
-                return res
-        source_cursor.execute("""
-            SELECT COLUMN_NAME 
-            FROM (
-                SELECT COLUMN_NAME, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
-                UNION ALL
-                SELECT COLUMN_NAME, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
-            )
-            WHERE (OBJ_NAME = ? OR UPPER(OBJ_NAME) = UPPER(?))
-            ORDER BY POSITION
-        """, (table_name, table_name))
-        return [r[0] for r in source_cursor.fetchall()]
+        info = get_hana_columns_info(source_cursor, table_name, schema)
+        return [r[0] for r in info]
     else:
         source_cursor.execute(f"SHOW COLUMNS FROM `{table_name}`")
         return [c[0] for c in source_cursor.fetchall()]
@@ -787,7 +842,7 @@ def sync_external_database(user_id, connection_id, session_id):
             SELECT COUNT(*)
             FROM external_db_sync_log
             WHERE username=%s AND external_database=%s AND session_id=%s
-        """, (username, external_db["database"], session_id))
+        """, (username, external_db.get("database") or external_db.get("schema") or "hana", session_id))
 
         sync_count = cursor.fetchone()[0]
 
@@ -999,32 +1054,63 @@ def sync_external_database(user_id, connection_id, session_id):
                 def _fetch_hana_objects(cur, s_name):
                     placeholders = ", ".join(["?"] * len(SAP_ALLOWED_DATASPEC_OBJECTS))
                     upper_allowed = [name.upper() for name in SAP_ALLOWED_DATASPEC_OBJECTS]
-                    if s_name:
-                        cur.execute(f"""
-                            SELECT TABLE_NAME, SCHEMA_NAME
-                            FROM (
-                                SELECT TABLE_NAME, SCHEMA_NAME, IS_TEMPORARY FROM SYS.TABLES
-                                UNION ALL
-                                SELECT VIEW_NAME AS TABLE_NAME, SCHEMA_NAME, 'FALSE' AS IS_TEMPORARY FROM SYS.VIEWS
-                            )
-                            WHERE (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
-                              AND IS_TEMPORARY = 'FALSE'
-                              AND UPPER(TABLE_NAME) IN ({placeholders})
-                        """, [s_name, s_name] + upper_allowed)
-                    else:
-                        cur.execute(f"""
-                            SELECT TABLE_NAME, SCHEMA_NAME
-                            FROM (
-                                SELECT TABLE_NAME, SCHEMA_NAME, IS_TEMPORARY FROM SYS.TABLES
-                                UNION ALL
-                                SELECT VIEW_NAME AS TABLE_NAME, SCHEMA_NAME, 'FALSE' AS IS_TEMPORARY FROM SYS.VIEWS
-                            )
-                            WHERE IS_TEMPORARY = 'FALSE'
-                              AND SCHEMA_NAME NOT LIKE '_SYS_%'
-                              AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', '_SYS_AFL', '_SYS_BIC', '_SYS_BI', '_SYS_RT', '_SYS_DI', '_SYS_SECURITY', 'SAP_PA_APL', 'PUBLIC')
-                              AND UPPER(TABLE_NAME) IN ({placeholders})
-                        """, upper_allowed)
-                    return [(r[0], r[1]) for r in cur.fetchall()]
+                    res = []
+                    # 1. Query SYS.VIEWS directly (as in AWS console, target objects are views)
+                    try:
+                        if s_name:
+                            cur.execute(f"""
+                                SELECT VIEW_NAME AS TABLE_NAME, SCHEMA_NAME
+                                FROM SYS.VIEWS
+                                WHERE (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
+                                  AND UPPER(VIEW_NAME) IN ({placeholders})
+                            """, [s_name, s_name] + upper_allowed)
+                        else:
+                            cur.execute(f"""
+                                SELECT VIEW_NAME AS TABLE_NAME, SCHEMA_NAME
+                                FROM SYS.VIEWS
+                                WHERE SCHEMA_NAME NOT LIKE '_SYS_%'
+                                  AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', 'PUBLIC')
+                                  AND UPPER(VIEW_NAME) IN ({placeholders})
+                            """, upper_allowed)
+                        res = [(r[0], r[1]) for r in cur.fetchall()]
+                    except Exception:
+                        pass
+
+                    if res:
+                        return res
+
+                    # 2. Try SYS.TABLES and SYS.VIEWS combined
+                    try:
+                        if s_name:
+                            cur.execute(f"""
+                                SELECT TABLE_NAME, SCHEMA_NAME
+                                FROM (
+                                    SELECT TABLE_NAME, SCHEMA_NAME, IS_TEMPORARY FROM SYS.TABLES
+                                    UNION ALL
+                                    SELECT VIEW_NAME AS TABLE_NAME, SCHEMA_NAME, 'FALSE' AS IS_TEMPORARY FROM SYS.VIEWS
+                                )
+                                WHERE (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
+                                  AND IS_TEMPORARY = 'FALSE'
+                                  AND UPPER(TABLE_NAME) IN ({placeholders})
+                            """, [s_name, s_name] + upper_allowed)
+                        else:
+                            cur.execute(f"""
+                                SELECT TABLE_NAME, SCHEMA_NAME
+                                FROM (
+                                    SELECT TABLE_NAME, SCHEMA_NAME, IS_TEMPORARY FROM SYS.TABLES
+                                    UNION ALL
+                                    SELECT VIEW_NAME AS TABLE_NAME, SCHEMA_NAME, 'FALSE' AS IS_TEMPORARY FROM SYS.VIEWS
+                                )
+                                WHERE IS_TEMPORARY = 'FALSE'
+                                  AND SCHEMA_NAME NOT LIKE '_SYS_%'
+                                  AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', '_SYS_AFL', '_SYS_BIC', '_SYS_BI', '_SYS_RT', '_SYS_DI', '_SYS_SECURITY', 'SAP_PA_APL', 'PUBLIC')
+                                  AND UPPER(TABLE_NAME) IN ({placeholders})
+                            """, upper_allowed)
+                        res = [(r[0], r[1]) for r in cur.fetchall()]
+                    except Exception:
+                        pass
+
+                    return res
 
                 source_tables = _fetch_hana_objects(source_cursor, schema_name)
                 # If schema_name had '#' (e.g. SAP_S4#AI_BI_EXT) and returned no tables/views, try the base schema (e.g. SAP_S4)
@@ -1041,6 +1127,12 @@ def sync_external_database(user_id, connection_id, session_id):
                     if fallback_tables:
                         source_tables = fallback_tables
                         schema_name = base_schema
+                # Always test 'SAP_S4' specifically if not already populated
+                if not source_tables:
+                    fallback_tables = _fetch_hana_objects(source_cursor, "SAP_S4")
+                    if fallback_tables:
+                        source_tables = fallback_tables
+                        schema_name = "SAP_S4"
                 # Fallback to search without schema constraint if specific schema returned nothing
                 if not source_tables:
                     fallback_tables = _fetch_hana_objects(source_cursor, None)
@@ -1059,15 +1151,25 @@ def sync_external_database(user_id, connection_id, session_id):
 
                 # If any allowed objects were not found in SYS.VIEWS/SYS.TABLES, attempt direct probe
                 found_uppers = {t[0].upper() for t in source_tables}
+                probe_schemas = [s for s in [schema_name, "SAP_S4"] if s]
+                if external_db.get("username") and "#" in external_db.get("username"):
+                    probe_schemas.append(external_db["username"].split("#")[0])
+                # deduplicate probe_schemas
+                p_schemas = []
+                for ps in probe_schemas:
+                    if ps and ps not in p_schemas:
+                        p_schemas.append(ps)
+
                 for obj_name in SAP_ALLOWED_DATASPEC_OBJECTS:
                     if obj_name.upper() not in found_uppers:
                         probed = False
-                        if schema_name:
+                        for p_sch in p_schemas:
                             try:
-                                source_cursor.execute(f'SELECT 1 FROM "{schema_name}"."{obj_name}" WHERE 1=0')
-                                source_tables.append((obj_name, schema_name))
+                                source_cursor.execute(f'SELECT 1 FROM "{p_sch}"."{obj_name}" WHERE 1=0')
+                                source_tables.append((obj_name, p_sch))
                                 found_uppers.add(obj_name.upper())
                                 probed = True
+                                break
                             except Exception:
                                 pass
                         if not probed:
@@ -1091,7 +1193,9 @@ def sync_external_database(user_id, connection_id, session_id):
                 if db_type in ["postgresql", "postgres"] and schema_name_from_db:
                     source_cursor.execute(f"SET search_path TO {schema_name_from_db}")
                 elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
-                    active_target_schema = schema_name_from_db or schema_name
+                    active_target_schema = schema_name_from_db or schema_name or "SAP_S4"
+                    if active_target_schema and "#" in active_target_schema:
+                        active_target_schema = active_target_schema.split("#")[0]
                     if active_target_schema:
                         try:
                             source_cursor.execute(f'SET SCHEMA "{active_target_schema}"')
@@ -1099,6 +1203,12 @@ def sync_external_database(user_id, connection_id, session_id):
                             pass
                 
                 active_schema = schema_name_from_db if schema_name_from_db else schema_name
+                if db_type in ["hana", "sap_hana", "saphana", "sap"]:
+                    if not active_schema or active_schema.upper() in ["PUBLIC", "SYS", ""] or "#" in active_schema:
+                        if active_schema and "#" in active_schema:
+                            active_schema = active_schema.split("#")[0]
+                        else:
+                            active_schema = "SAP_S4"
 
                 # count rows
                 source_cursor.execute(f"SELECT COUNT(*) FROM {get_source_table_select_name(table_name, db_type, active_schema)}")
@@ -1136,7 +1246,7 @@ def sync_external_database(user_id, connection_id, session_id):
                 # sources can both have a "users" table without overwriting each other.
                 # The LOG always stores the original source table_name for clean display.
                 target_tables_lower = [t.lower() for t in target_tables]
-                if new_table_name.lower() in target_tables_lower and first_sync:
+                if new_table_name.lower() in target_tables_lower and first_sync and db_type not in ["hana", "sap_hana", "saphana", "sap"]:
                     # Give this table a prefixed physical name in the workspace
                     new_table_name = f"{external_db.get('database') or 'hana'}_{table_name}"
 
@@ -1176,36 +1286,11 @@ def sync_external_database(user_id, connection_id, session_id):
                             col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                         create_query = f"CREATE TABLE `{new_table_name}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                     elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
-                        cols_info = []
-                        if active_schema:
-                            source_cursor.execute("""
-                                SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
-                                FROM (
-                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
-                                    UNION ALL
-                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
-                                )
-                                WHERE (OBJ_NAME = ? OR UPPER(OBJ_NAME) = UPPER(?))
-                                  AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
-                                ORDER BY POSITION
-                            """, (table_name, table_name, active_schema, active_schema))
-                            cols_info = source_cursor.fetchall()
-                        if not cols_info:
-                            source_cursor.execute("""
-                                SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
-                                FROM (
-                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
-                                    UNION ALL
-                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
-                                )
-                                WHERE (OBJ_NAME = ? OR UPPER(OBJ_NAME) = UPPER(?))
-                                ORDER BY POSITION
-                            """, (table_name, table_name))
-                            cols_info = source_cursor.fetchall()
+                        cols_info = get_hana_columns_info(source_cursor, table_name, active_schema)
                         col_defs = []
                         for col_name, data_type, is_nullable, char_len, scale in cols_info:
                             mysql_type = hana_to_mysql_type(data_type, char_len, char_len, scale)
-                            null_def = "NULL" if str(is_nullable).upper() == "TRUE" else "NOT NULL"
+                            null_def = "NULL" if str(is_nullable).upper() in ["TRUE", "YES", "1"] else "NOT NULL"
                             col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                         create_query = f"CREATE TABLE `{new_table_name}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                     else:
@@ -1237,8 +1322,11 @@ def sync_external_database(user_id, connection_id, session_id):
                         """
 
                         col_types = get_source_column_types(source_cursor, table_name, db_type, active_schema)
-                        cleaned_rows = [clean_row(row, col_types) for row in rows]
-                        target_cursor.executemany(insert_query, cleaned_rows)
+                        BATCH_SIZE = 5000
+                        for b_idx in range(0, len(rows), BATCH_SIZE):
+                            b_rows = rows[b_idx:b_idx + BATCH_SIZE]
+                            cleaned_b = [clean_row(row, col_types) for row in b_rows]
+                            target_cursor.executemany(insert_query, cleaned_b)
                         inserted_count = len(rows)
 
                     target_cursor.execute(f"""
@@ -1262,7 +1350,7 @@ def sync_external_database(user_id, connection_id, session_id):
                             _dc.execute("""
                                 DELETE FROM external_db_sync_log
                                 WHERE session_id=%s AND external_database=%s AND table_name=%s
-                            """, (session_id, external_db["database"], table_name))
+                            """, (session_id, external_db.get("database") or external_db.get("schema") or "hana", table_name))
                         _del_conn.commit()
                         _del_conn.close()
                     except Exception as _del_e:
@@ -1273,7 +1361,7 @@ def sync_external_database(user_id, connection_id, session_id):
                         (   user_id,
                             new_user_db,
                             username,
-                            external_db["database"],
+                            external_db.get("database") or external_db.get("schema") or "hana",
                             table_name,      # original source name (not physical new_table_name)
                             "NEW_TABLE",
                             inserted_count,
@@ -1321,36 +1409,11 @@ def sync_external_database(user_id, connection_id, session_id):
                                 col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                             create_query = f"CREATE TABLE `{new_table_name}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                         elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
-                            cols_info = []
-                            if active_schema:
-                                source_cursor.execute("""
-                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
-                                    FROM (
-                                        SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
-                                        UNION ALL
-                                        SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
-                                    )
-                                    WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
-                                      AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
-                                    ORDER BY POSITION
-                                """, (table_name, table_name, active_schema, active_schema))
-                                cols_info = source_cursor.fetchall()
-                            if not cols_info:
-                                source_cursor.execute("""
-                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
-                                    FROM (
-                                        SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
-                                        UNION ALL
-                                        SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
-                                    )
-                                    WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
-                                    ORDER BY POSITION
-                                """, (table_name, table_name))
-                                cols_info = source_cursor.fetchall()
+                            cols_info = get_hana_columns_info(source_cursor, table_name, active_schema)
                             col_defs = []
                             for col_name, data_type, is_nullable, char_len, scale in cols_info:
                                 mysql_type = hana_to_mysql_type(data_type, char_len, char_len, scale)
-                                null_def = "NULL" if str(is_nullable).upper() == "TRUE" else "NOT NULL"
+                                null_def = "NULL" if str(is_nullable).upper() in ["TRUE", "YES", "1"] else "NOT NULL"
                                 col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                             create_query = f"CREATE TABLE `{new_table_name}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                         else:
@@ -1373,8 +1436,11 @@ def sync_external_database(user_id, connection_id, session_id):
                             placeholders = ", ".join(["%s"] * len(rows[0]))
                             insert_query = f"INSERT INTO `{new_table_name}` ({target_col_str}) VALUES ({placeholders})"
                             col_types = get_source_column_types(source_cursor, table_name, db_type, active_schema)
-                            cleaned_rows = [clean_row(row, col_types) for row in rows]
-                            target_cursor.executemany(insert_query, cleaned_rows)
+                            BATCH_SIZE = 5000
+                            for b_idx in range(0, len(rows), BATCH_SIZE):
+                                b_rows = rows[b_idx:b_idx + BATCH_SIZE]
+                                cleaned_b = [clean_row(row, col_types) for row in b_rows]
+                                target_cursor.executemany(insert_query, cleaned_b)
                             inserted_count = len(rows)
 
                         target_cursor.execute(f"""
@@ -1843,22 +1909,11 @@ def apply_external_sync(user_id, connection_id, session_id, table):
                         col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                     create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                 elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
-                    source_cursor.execute("""
-                        SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
-                        FROM (
-                            SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
-                            UNION ALL
-                            SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
-                        )
-                        WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
-                          AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
-                        ORDER BY POSITION
-                    """, (original_table, original_table, active_schema if active_schema else 'PUBLIC', active_schema if active_schema else 'PUBLIC'))
-                    cols_info = source_cursor.fetchall()
+                    cols_info = get_hana_columns_info(source_cursor, original_table, active_schema)
                     col_defs = []
                     for col_name, data_type, is_nullable, char_len, scale in cols_info:
                         mysql_type = hana_to_mysql_type(data_type, char_len, char_len, scale)
-                        null_def = "NULL" if str(is_nullable).upper() == "TRUE" else "NOT NULL"
+                        null_def = "NULL" if str(is_nullable).upper() in ["TRUE", "YES", "1"] else "NOT NULL"
                         col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                     create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                 else:
@@ -2281,36 +2336,11 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                             col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                         create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                     elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
-                        cols_info = []
-                        if active_schema:
-                            source_cursor.execute("""
-                                SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
-                                FROM (
-                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
-                                    UNION ALL
-                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
-                                )
-                                WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
-                                  AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
-                                ORDER BY POSITION
-                            """, (original_table, original_table, active_schema, active_schema))
-                            cols_info = source_cursor.fetchall()
-                        if not cols_info:
-                            source_cursor.execute("""
-                                SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
-                                FROM (
-                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
-                                    UNION ALL
-                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
-                                )
-                                WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
-                                ORDER BY POSITION
-                            """, (original_table, original_table))
-                            cols_info = source_cursor.fetchall()
+                        cols_info = get_hana_columns_info(source_cursor, original_table, active_schema)
                         col_defs = []
                         for col_name, data_type, is_nullable, char_len, scale in cols_info:
                             mysql_type = hana_to_mysql_type(data_type, char_len, char_len, scale)
-                            null_def = "NULL" if str(is_nullable).upper() == "TRUE" else "NOT NULL"
+                            null_def = "NULL" if str(is_nullable).upper() in ["TRUE", "YES", "1"] else "NOT NULL"
                             col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                         create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                     else:
@@ -2361,36 +2391,11 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                                 col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                             create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                         elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
-                            cols_info = []
-                            if active_schema:
-                                source_cursor.execute("""
-                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
-                                    FROM (
-                                        SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
-                                        UNION ALL
-                                        SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
-                                    )
-                                    WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
-                                      AND (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
-                                    ORDER BY POSITION
-                                """, (original_table, original_table, active_schema, active_schema))
-                                cols_info = source_cursor.fetchall()
-                            if not cols_info:
-                                source_cursor.execute("""
-                                    SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE
-                                    FROM (
-                                        SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, TABLE_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.TABLE_COLUMNS
-                                        UNION ALL
-                                        SELECT COLUMN_NAME, DATA_TYPE_NAME, IS_NULLABLE, LENGTH, SCALE, POSITION, VIEW_NAME AS OBJ_NAME, SCHEMA_NAME FROM SYS.VIEW_COLUMNS
-                                    )
-                                    WHERE (TABLE_NAME = ? OR UPPER(TABLE_NAME) = UPPER(?))
-                                    ORDER BY POSITION
-                                """, (original_table, original_table))
-                                cols_info = source_cursor.fetchall()
+                            cols_info = get_hana_columns_info(source_cursor, original_table, active_schema)
                             col_defs = []
                             for col_name, data_type, is_nullable, char_len, scale in cols_info:
                                 mysql_type = hana_to_mysql_type(data_type, char_len, char_len, scale)
-                                null_def = "NULL" if str(is_nullable).upper() == "TRUE" else "NOT NULL"
+                                null_def = "NULL" if str(is_nullable).upper() in ["TRUE", "YES", "1"] else "NOT NULL"
                                 col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                             create_query = f"CREATE TABLE `{table}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                         else:
