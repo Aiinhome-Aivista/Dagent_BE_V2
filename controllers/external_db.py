@@ -417,11 +417,13 @@ def connect_external_db():
         response_data["msg"] += " (Data fetched and saved successfully!)"
 
     # Update (never recreate) the workspace's Knowledge Graph now that this
-    # source has written into it — a kgraph_backups snapshot of the graph as
-    # it stood before this sync is taken automatically inside build_kgraph().
-    _rebuild_kgraph_for_session(
-        session_id, trigger_source="tally_sync" if is_tally else "external_db_sync"
-    )
+    # source has written into it — run in background thread so the HTTP response is NOT blocked
+    import threading
+    threading.Thread(
+        target=_rebuild_kgraph_for_session,
+        args=(session_id, "tally_sync" if is_tally else "external_db_sync"),
+        daemon=True
+    ).start()
 
     return jsonify(response_data)
 

@@ -40,6 +40,8 @@ def clean_row(row, col_types=None):
             cleaned.append(v)
     return tuple(cleaned)
 
+_HANA_COLS_CACHE = {}
+
 def get_hana_columns_info(source_cursor, table_name, schema=None):
     """
     Retrieves column metadata for SAP Datasphere / HANA views and tables.
@@ -47,6 +49,12 @@ def get_hana_columns_info(source_cursor, table_name, schema=None):
     Note: SYS.VIEW_COLUMNS does NOT have IS_NULLABLE (views are treated as nullable).
           SYS.TABLE_COLUMNS does have IS_NULLABLE.
     """
+    cache_key = (table_name.upper(), (schema or "").upper())
+    if cache_key in _HANA_COLS_CACHE:
+        return _HANA_COLS_CACHE[cache_key]
+    if (table_name.upper(), "") in _HANA_COLS_CACHE:
+        return _HANA_COLS_CACHE[(table_name.upper(), "")]
+
     candidate_schemas = []
     if schema:
         candidate_schemas.append(schema)
@@ -73,7 +81,10 @@ def get_hana_columns_info(source_cursor, table_name, schema=None):
             """, (table_name, table_name, s, s))
             rows = source_cursor.fetchall()
             if rows:
-                return [(r[0], r[1], "TRUE", r[2], r[3]) for r in rows]
+                res = [(r[0], r[1], "TRUE", r[2], r[3]) for r in rows]
+                _HANA_COLS_CACHE[cache_key] = res
+                _HANA_COLS_CACHE[(table_name.upper(), "")] = res
+                return res
         except Exception:
             pass
 
@@ -89,7 +100,10 @@ def get_hana_columns_info(source_cursor, table_name, schema=None):
             """, (table_name, table_name, s, s))
             rows = source_cursor.fetchall()
             if rows:
-                return [(r[0], r[1], "TRUE", None, None) for r in rows]
+                res = [(r[0], r[1], "TRUE", None, None) for r in rows]
+                _HANA_COLS_CACHE[cache_key] = res
+                _HANA_COLS_CACHE[(table_name.upper(), "")] = res
+                return res
         except Exception:
             pass
 
@@ -105,7 +119,10 @@ def get_hana_columns_info(source_cursor, table_name, schema=None):
         """, (table_name, table_name))
         rows = source_cursor.fetchall()
         if rows:
-            return [(r[0], r[1], "TRUE", r[2], r[3]) for r in rows]
+            res = [(r[0], r[1], "TRUE", r[2], r[3]) for r in rows]
+            _HANA_COLS_CACHE[cache_key] = res
+            _HANA_COLS_CACHE[(table_name.upper(), "")] = res
+            return res
     except Exception:
         pass
 
@@ -120,7 +137,10 @@ def get_hana_columns_info(source_cursor, table_name, schema=None):
         """, (table_name, table_name))
         rows = source_cursor.fetchall()
         if rows:
-            return [(r[0], r[1], "TRUE", None, None) for r in rows]
+            res = [(r[0], r[1], "TRUE", None, None) for r in rows]
+            _HANA_COLS_CACHE[cache_key] = res
+            _HANA_COLS_CACHE[(table_name.upper(), "")] = res
+            return res
     except Exception:
         pass
 
@@ -136,7 +156,10 @@ def get_hana_columns_info(source_cursor, table_name, schema=None):
             """, (table_name, table_name, s, s))
             rows = source_cursor.fetchall()
             if rows:
-                return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
+                res = [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
+                _HANA_COLS_CACHE[cache_key] = res
+                _HANA_COLS_CACHE[(table_name.upper(), "")] = res
+                return res
         except Exception:
             pass
 
@@ -151,7 +174,10 @@ def get_hana_columns_info(source_cursor, table_name, schema=None):
         """, (table_name, table_name))
         rows = source_cursor.fetchall()
         if rows:
-            return [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
+            res = [(r[0], r[1], r[2], r[3], r[4]) for r in rows]
+            _HANA_COLS_CACHE[cache_key] = res
+            _HANA_COLS_CACHE[(table_name.upper(), "")] = res
+            return res
     except Exception:
         pass
 
@@ -161,7 +187,10 @@ def get_hana_columns_info(source_cursor, table_name, schema=None):
             sel_target = f'"{s}"."{table_name}"' if s else f'"{table_name}"'
             source_cursor.execute(f"SELECT * FROM {sel_target} WHERE 1=0")
             if source_cursor.description:
-                return [(d[0], "VARCHAR", "TRUE", 255, None) for d in source_cursor.description]
+                res = [(d[0], "VARCHAR", "TRUE", 255, None) for d in source_cursor.description]
+                _HANA_COLS_CACHE[cache_key] = res
+                _HANA_COLS_CACHE[(table_name.upper(), "")] = res
+                return res
         except Exception:
             pass
 
@@ -1051,93 +1080,59 @@ def sync_external_database(user_id, connection_id, session_id):
                 source_cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'")
                 source_tables = [(t[0], None) for t in source_cursor.fetchall()]
             elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
-                def _fetch_hana_objects(cur, s_name):
-                    placeholders = ", ".join(["?"] * len(SAP_ALLOWED_DATASPEC_OBJECTS))
-                    upper_allowed = [name.upper() for name in SAP_ALLOWED_DATASPEC_OBJECTS]
-                    res = []
-                    # 1. Query SYS.VIEWS directly (as in AWS console, target objects are views)
+                # Build prioritized candidate schemas with SAP_S4 prominently featured
+                cand_schemas = []
+                if schema_name:
+                    cand_schemas.append(schema_name)
+                    if "#" in schema_name:
+                        cand_schemas.append(schema_name.split("#")[0])
+                if external_db.get("username") and "#" in external_db.get("username"):
+                    cand_schemas.append(external_db["username"].split("#")[0])
+                cand_schemas.append("SAP_S4")
+
+                unique_cand_schemas = []
+                for cs in cand_schemas:
+                    if cs and cs.upper() not in [u.upper() for u in unique_cand_schemas]:
+                        unique_cand_schemas.append(cs)
+
+                placeholders = ", ".join(["?"] * len(SAP_ALLOWED_DATASPEC_OBJECTS))
+                upper_allowed = [name.upper() for name in SAP_ALLOWED_DATASPEC_OBJECTS]
+
+                source_tables = []
+                # 1. Query SYS.VIEWS with prioritized candidate schemas in a single fast query
+                schema_placeholders = ", ".join(["?"] * len(unique_cand_schemas))
+                schema_args = [s for s in unique_cand_schemas] + [s.upper() for s in unique_cand_schemas]
+                try:
+                    source_cursor.execute(f"""
+                        SELECT VIEW_NAME AS TABLE_NAME, SCHEMA_NAME
+                        FROM SYS.VIEWS
+                        WHERE (SCHEMA_NAME IN ({schema_placeholders}) OR UPPER(SCHEMA_NAME) IN ({schema_placeholders}))
+                          AND UPPER(VIEW_NAME) IN ({placeholders})
+                        ORDER BY VIEW_NAME
+                    """, schema_args + upper_allowed)
+                    source_tables = [(r[0], r[1]) for r in source_cursor.fetchall()]
+                except Exception as _hana_err:
+                    print(f"[HANA-DISCOVERY] Fast view query error: {_hana_err}")
+
+                # 2. If some allowed objects were not found in SYS.VIEWS, search without schema restriction
+                found_uppers = {t[0].upper() for t in source_tables}
+                if len(found_uppers) < len(SAP_ALLOWED_OBJECTS_SET):
+                    missing_allowed = [n for n in upper_allowed if n not in found_uppers]
+                    missing_placeholders = ", ".join(["?"] * len(missing_allowed))
                     try:
-                        if s_name:
-                            cur.execute(f"""
-                                SELECT VIEW_NAME AS TABLE_NAME, SCHEMA_NAME
-                                FROM SYS.VIEWS
-                                WHERE (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
-                                  AND UPPER(VIEW_NAME) IN ({placeholders})
-                            """, [s_name, s_name] + upper_allowed)
-                        else:
-                            cur.execute(f"""
-                                SELECT VIEW_NAME AS TABLE_NAME, SCHEMA_NAME
-                                FROM SYS.VIEWS
-                                WHERE SCHEMA_NAME NOT LIKE '_SYS_%'
-                                  AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', 'PUBLIC')
-                                  AND UPPER(VIEW_NAME) IN ({placeholders})
-                            """, upper_allowed)
-                        res = [(r[0], r[1]) for r in cur.fetchall()]
+                        source_cursor.execute(f"""
+                            SELECT VIEW_NAME AS TABLE_NAME, SCHEMA_NAME
+                            FROM SYS.VIEWS
+                            WHERE SCHEMA_NAME NOT LIKE '_SYS_%'
+                              AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', 'PUBLIC')
+                              AND UPPER(VIEW_NAME) IN ({missing_placeholders})
+                        """, missing_allowed)
+                        for r in source_cursor.fetchall():
+                            if r[0].upper() not in found_uppers:
+                                source_tables.append((r[0], r[1]))
+                                found_uppers.add(r[0].upper())
                     except Exception:
                         pass
-
-                    if res:
-                        return res
-
-                    # 2. Try SYS.TABLES and SYS.VIEWS combined
-                    try:
-                        if s_name:
-                            cur.execute(f"""
-                                SELECT TABLE_NAME, SCHEMA_NAME
-                                FROM (
-                                    SELECT TABLE_NAME, SCHEMA_NAME, IS_TEMPORARY FROM SYS.TABLES
-                                    UNION ALL
-                                    SELECT VIEW_NAME AS TABLE_NAME, SCHEMA_NAME, 'FALSE' AS IS_TEMPORARY FROM SYS.VIEWS
-                                )
-                                WHERE (SCHEMA_NAME = ? OR UPPER(SCHEMA_NAME) = UPPER(?))
-                                  AND IS_TEMPORARY = 'FALSE'
-                                  AND UPPER(TABLE_NAME) IN ({placeholders})
-                            """, [s_name, s_name] + upper_allowed)
-                        else:
-                            cur.execute(f"""
-                                SELECT TABLE_NAME, SCHEMA_NAME
-                                FROM (
-                                    SELECT TABLE_NAME, SCHEMA_NAME, IS_TEMPORARY FROM SYS.TABLES
-                                    UNION ALL
-                                    SELECT VIEW_NAME AS TABLE_NAME, SCHEMA_NAME, 'FALSE' AS IS_TEMPORARY FROM SYS.VIEWS
-                                )
-                                WHERE IS_TEMPORARY = 'FALSE'
-                                  AND SCHEMA_NAME NOT LIKE '_SYS_%'
-                                  AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', '_SYS_AFL', '_SYS_BIC', '_SYS_BI', '_SYS_RT', '_SYS_DI', '_SYS_SECURITY', 'SAP_PA_APL', 'PUBLIC')
-                                  AND UPPER(TABLE_NAME) IN ({placeholders})
-                            """, upper_allowed)
-                        res = [(r[0], r[1]) for r in cur.fetchall()]
-                    except Exception:
-                        pass
-
-                    return res
-
-                source_tables = _fetch_hana_objects(source_cursor, schema_name)
-                # If schema_name had '#' (e.g. SAP_S4#AI_BI_EXT) and returned no tables/views, try the base schema (e.g. SAP_S4)
-                if not source_tables and schema_name and "#" in schema_name:
-                    base_schema = schema_name.split("#")[0]
-                    fallback_tables = _fetch_hana_objects(source_cursor, base_schema)
-                    if fallback_tables:
-                        source_tables = fallback_tables
-                        schema_name = base_schema
-                # If still empty and no schema_name was explicitly given, try username's prefix before '#'
-                if not source_tables and not external_db.get("schema") and external_db.get("username") and "#" in external_db.get("username"):
-                    base_schema = external_db.get("username").split("#")[0]
-                    fallback_tables = _fetch_hana_objects(source_cursor, base_schema)
-                    if fallback_tables:
-                        source_tables = fallback_tables
-                        schema_name = base_schema
-                # Always test 'SAP_S4' specifically if not already populated
-                if not source_tables:
-                    fallback_tables = _fetch_hana_objects(source_cursor, "SAP_S4")
-                    if fallback_tables:
-                        source_tables = fallback_tables
-                        schema_name = "SAP_S4"
-                # Fallback to search without schema constraint if specific schema returned nothing
-                if not source_tables:
-                    fallback_tables = _fetch_hana_objects(source_cursor, None)
-                    if fallback_tables:
-                        source_tables = fallback_tables
 
                 # Deduplicate and ensure ONLY allowed SAP objects are retained
                 seen_objs = set()
@@ -1146,39 +1141,8 @@ def sync_external_database(user_id, connection_id, session_id):
                     t_upper = t_name.upper()
                     if t_upper in SAP_ALLOWED_OBJECTS_SET and t_upper not in seen_objs:
                         seen_objs.add(t_upper)
-                        deduped.append((t_name, s_name))
+                        deduped.append((t_name, s_name or "SAP_S4"))
                 source_tables = deduped
-
-                # If any allowed objects were not found in SYS.VIEWS/SYS.TABLES, attempt direct probe
-                found_uppers = {t[0].upper() for t in source_tables}
-                probe_schemas = [s for s in [schema_name, "SAP_S4"] if s]
-                if external_db.get("username") and "#" in external_db.get("username"):
-                    probe_schemas.append(external_db["username"].split("#")[0])
-                # deduplicate probe_schemas
-                p_schemas = []
-                for ps in probe_schemas:
-                    if ps and ps not in p_schemas:
-                        p_schemas.append(ps)
-
-                for obj_name in SAP_ALLOWED_DATASPEC_OBJECTS:
-                    if obj_name.upper() not in found_uppers:
-                        probed = False
-                        for p_sch in p_schemas:
-                            try:
-                                source_cursor.execute(f'SELECT 1 FROM "{p_sch}"."{obj_name}" WHERE 1=0')
-                                source_tables.append((obj_name, p_sch))
-                                found_uppers.add(obj_name.upper())
-                                probed = True
-                                break
-                            except Exception:
-                                pass
-                        if not probed:
-                            try:
-                                source_cursor.execute(f'SELECT 1 FROM "{obj_name}" WHERE 1=0')
-                                source_tables.append((obj_name, None))
-                                found_uppers.add(obj_name.upper())
-                            except Exception:
-                                pass
             else:
                 source_cursor.execute("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'")
                 source_tables = [(t[0], None) for t in source_cursor.fetchall()]
@@ -1210,13 +1174,23 @@ def sync_external_database(user_id, connection_id, session_id):
                         else:
                             active_schema = "SAP_S4"
 
+                # Pre-fetch columns and types upfront once per table!
+                if db_type in ["hana", "sap_hana", "saphana", "sap"]:
+                    hana_cols_info = get_hana_columns_info(source_cursor, table_name, active_schema)
+                    columns = [r[0] for r in hana_cols_info]
+                    col_count = len(columns)
+                    col_list = columns
+                    col_types = [r[1].lower() if r[1] else "varchar" for r in hana_cols_info]
+                else:
+                    hana_cols_info = None
+                    columns = get_source_columns(source_cursor, table_name, db_type, active_schema)
+                    col_count = len(columns)
+                    col_list = get_source_columns_list(source_cursor, table_name, db_type, active_schema)
+                    col_types = get_source_column_types(source_cursor, table_name, db_type, active_schema)
+
                 # count rows
                 source_cursor.execute(f"SELECT COUNT(*) FROM {get_source_table_select_name(table_name, db_type, active_schema)}")
                 row_count = source_cursor.fetchone()[0]
-
-                # count columns
-                columns = get_source_columns(source_cursor, table_name, db_type, active_schema)
-                col_count = len(columns)
 
                 total_rows += row_count
                 total_columns += col_count
@@ -1286,9 +1260,8 @@ def sync_external_database(user_id, connection_id, session_id):
                             col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                         create_query = f"CREATE TABLE `{new_table_name}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                     elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
-                        cols_info = get_hana_columns_info(source_cursor, table_name, active_schema)
                         col_defs = []
-                        for col_name, data_type, is_nullable, char_len, scale in cols_info:
+                        for col_name, data_type, is_nullable, char_len, scale in hana_cols_info:
                             mysql_type = hana_to_mysql_type(data_type, char_len, char_len, scale)
                             null_def = "NULL" if str(is_nullable).upper() in ["TRUE", "YES", "1"] else "NOT NULL"
                             col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
@@ -1304,30 +1277,28 @@ def sync_external_database(user_id, connection_id, session_id):
 
                     target_cursor.execute(create_query)
 
-                    col_list = get_source_columns_list(source_cursor, table_name, db_type, active_schema)
                     source_col_str = get_quoted_columns(col_list, db_type)
                     target_col_str = get_target_quoted_columns(col_list)
 
                     source_cursor.execute(f"SELECT {source_col_str} FROM {get_source_table_select_name(table_name, db_type, active_schema)}")
-                    rows = source_cursor.fetchall()
 
+                    BATCH_SIZE = 5000
                     inserted_count = 0
+                    insert_query = None
 
-                    if rows:
-                        placeholders = ", ".join(["%s"] * len(rows[0]))
-
-                        insert_query = f"""
-                        INSERT INTO `{new_table_name}` ({target_col_str})
-                        VALUES ({placeholders})
-                        """
-
-                        col_types = get_source_column_types(source_cursor, table_name, db_type, active_schema)
-                        BATCH_SIZE = 5000
-                        for b_idx in range(0, len(rows), BATCH_SIZE):
-                            b_rows = rows[b_idx:b_idx + BATCH_SIZE]
-                            cleaned_b = [clean_row(row, col_types) for row in b_rows]
-                            target_cursor.executemany(insert_query, cleaned_b)
-                        inserted_count = len(rows)
+                    while True:
+                        b_rows = source_cursor.fetchmany(BATCH_SIZE)
+                        if not b_rows:
+                            break
+                        if insert_query is None:
+                            placeholders = ", ".join(["%s"] * len(b_rows[0]))
+                            insert_query = f"""
+                            INSERT INTO `{new_table_name}` ({target_col_str})
+                            VALUES ({placeholders})
+                            """
+                        cleaned_b = [clean_row(row, col_types) for row in b_rows]
+                        target_cursor.executemany(insert_query, cleaned_b)
+                        inserted_count += len(b_rows)
 
                     target_cursor.execute(f"""
                         SELECT (data_length + index_length) 
@@ -1409,9 +1380,8 @@ def sync_external_database(user_id, connection_id, session_id):
                                 col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
                             create_query = f"CREATE TABLE `{new_table_name}` (\n  " + ",\n  ".join(col_defs) + "\n)"
                         elif db_type in ["hana", "sap_hana", "saphana", "sap"]:
-                            cols_info = get_hana_columns_info(source_cursor, table_name, active_schema)
                             col_defs = []
-                            for col_name, data_type, is_nullable, char_len, scale in cols_info:
+                            for col_name, data_type, is_nullable, char_len, scale in hana_cols_info:
                                 mysql_type = hana_to_mysql_type(data_type, char_len, char_len, scale)
                                 null_def = "NULL" if str(is_nullable).upper() in ["TRUE", "YES", "1"] else "NOT NULL"
                                 col_defs.append(f"`{col_name}` {mysql_type} {null_def}")
@@ -1426,22 +1396,24 @@ def sync_external_database(user_id, connection_id, session_id):
                         target_cursor.execute(create_query)
                         new_tables.append(new_table_name)
 
-                        col_list = get_source_columns_list(source_cursor, table_name, db_type, active_schema)
                         source_col_str = get_quoted_columns(col_list, db_type)
                         target_col_str = get_target_quoted_columns(col_list)
                         source_cursor.execute(f"SELECT {source_col_str} FROM {get_source_table_select_name(table_name, db_type, active_schema)}")
-                        rows = source_cursor.fetchall()
+
+                        BATCH_SIZE = 5000
                         inserted_count = 0
-                        if rows:
-                            placeholders = ", ".join(["%s"] * len(rows[0]))
-                            insert_query = f"INSERT INTO `{new_table_name}` ({target_col_str}) VALUES ({placeholders})"
-                            col_types = get_source_column_types(source_cursor, table_name, db_type, active_schema)
-                            BATCH_SIZE = 5000
-                            for b_idx in range(0, len(rows), BATCH_SIZE):
-                                b_rows = rows[b_idx:b_idx + BATCH_SIZE]
-                                cleaned_b = [clean_row(row, col_types) for row in b_rows]
-                                target_cursor.executemany(insert_query, cleaned_b)
-                            inserted_count = len(rows)
+                        insert_query = None
+
+                        while True:
+                            b_rows = source_cursor.fetchmany(BATCH_SIZE)
+                            if not b_rows:
+                                break
+                            if insert_query is None:
+                                placeholders = ", ".join(["%s"] * len(b_rows[0]))
+                                insert_query = f"INSERT INTO `{new_table_name}` ({target_col_str}) VALUES ({placeholders})"
+                            cleaned_b = [clean_row(row, col_types) for row in b_rows]
+                            target_cursor.executemany(insert_query, cleaned_b)
+                            inserted_count += len(b_rows)
 
                         target_cursor.execute(f"""
                             SELECT (data_length + index_length)
@@ -1461,7 +1433,7 @@ def sync_external_database(user_id, connection_id, session_id):
                         )
                     else:
                         # check new columns
-                        source_columns = get_source_columns(source_cursor, table_name, db_type, active_schema)
+                        source_columns = col_list
                         target_cursor.execute(f"SHOW COLUMNS FROM `{new_table_name}`")
                         target_columns = [c[0] for c in target_cursor.fetchall()]
                         new_columns = set(source_columns) - set(target_columns)
@@ -1929,17 +1901,17 @@ def apply_external_sync(user_id, connection_id, session_id, table):
 
                 # copy all rows
                 source_cursor.execute(f"SELECT * FROM {get_source_table_select_name(original_table, db_type, active_schema)}")
-                rows = source_cursor.fetchall()
+                BATCH_SIZE = 5000
+                insert_query = None
 
-                if rows:
-                    placeholders = ", ".join(["%s"] * len(rows[0]))
-
-                    insert_query = f"""
-                    INSERT INTO `{table}`
-                    VALUES ({placeholders})
-                    """
-
-                    cleaned_rows = [clean_row(row, col_types) for row in rows]
+                while True:
+                    b_rows = source_cursor.fetchmany(BATCH_SIZE)
+                    if not b_rows:
+                        break
+                    if insert_query is None:
+                        placeholders = ", ".join(["%s"] * len(b_rows[0]))
+                        insert_query = f"INSERT INTO `{table}` VALUES ({placeholders})"
+                    cleaned_rows = [clean_row(row, col_types) for row in b_rows]
                     target_cursor.executemany(insert_query, cleaned_rows)
 
                 return
@@ -1959,18 +1931,17 @@ def apply_external_sync(user_id, connection_id, session_id, table):
                     f"SELECT * FROM {get_source_table_select_name(original_table, db_type, active_schema)} {limit_str}"
                 )
 
-                rows = source_cursor.fetchall()
+                BATCH_SIZE = 5000
+                insert_query = None
 
-                if rows:
-
-                    placeholders = ", ".join(["%s"] * len(rows[0]))
-
-                    insert_query = f"""
-                    INSERT INTO `{table}`
-                    VALUES ({placeholders})
-                    """
-
-                    cleaned_rows = [clean_row(row, col_types) for row in rows]
+                while True:
+                    b_rows = source_cursor.fetchmany(BATCH_SIZE)
+                    if not b_rows:
+                        break
+                    if insert_query is None:
+                        placeholders = ", ".join(["%s"] * len(b_rows[0]))
+                        insert_query = f"INSERT INTO `{table}` VALUES ({placeholders})"
+                    cleaned_rows = [clean_row(row, col_types) for row in b_rows]
                     target_cursor.executemany(insert_query, cleaned_rows)
 
     finally:
@@ -2358,12 +2329,17 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                     target_col_str = get_target_quoted_columns(col_list)
                     
                     source_cursor.execute(f"SELECT {source_col_str} FROM {get_source_table_select_name(original_table, db_type, active_schema)}")
-                    rows = source_cursor.fetchall()
+                    BATCH_SIZE = 5000
+                    insert_query = None
 
-                    if rows:
-                        placeholders = ", ".join(["%s"] * len(rows[0]))
-                        insert_query = f"INSERT INTO `{table}` ({target_col_str}) VALUES ({placeholders})"
-                        cleaned_rows = [clean_row(row, col_types) for row in rows]
+                    while True:
+                        b_rows = source_cursor.fetchmany(BATCH_SIZE)
+                        if not b_rows:
+                            break
+                        if insert_query is None:
+                            placeholders = ", ".join(["%s"] * len(b_rows[0]))
+                            insert_query = f"INSERT INTO `{table}` ({target_col_str}) VALUES ({placeholders})"
+                        cleaned_rows = [clean_row(row, col_types) for row in b_rows]
                         target_cursor.executemany(insert_query, cleaned_rows)   
 
                 # ---------------------------------------------------------
@@ -2412,12 +2388,17 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                         target_col_str = get_target_quoted_columns(col_list)
                         
                         source_cursor.execute(f"SELECT {source_col_str} FROM {get_source_table_select_name(original_table, db_type, active_schema)}")
-                        rows = source_cursor.fetchall()
+                        BATCH_SIZE = 5000
+                        insert_query = None
 
-                        if rows:
-                            placeholders = ", ".join(["%s"] * len(rows[0]))
-                            insert_query = f"INSERT INTO `{table}` ({target_col_str}) VALUES ({placeholders})"
-                            cleaned_rows = [clean_row(row, col_types) for row in rows]
+                        while True:
+                            b_rows = source_cursor.fetchmany(BATCH_SIZE)
+                            if not b_rows:
+                                break
+                            if insert_query is None:
+                                placeholders = ", ".join(["%s"] * len(b_rows[0]))
+                                insert_query = f"INSERT INTO `{table}` ({target_col_str}) VALUES ({placeholders})"
+                            cleaned_rows = [clean_row(row, col_types) for row in b_rows]
                             target_cursor.executemany(insert_query, cleaned_rows)
                     else:
                         # Table exists, append only new rows
@@ -2437,12 +2418,17 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
                             source_cursor.execute(
                                 f"SELECT {source_col_str} FROM {get_source_table_select_name(original_table, db_type, active_schema)} {limit_str}"
                             )
-                            rows = source_cursor.fetchall()
+                            BATCH_SIZE = 5000
+                            insert_query = None
 
-                            if rows:
-                                placeholders = ", ".join(["%s"] * len(rows[0]))
-                                insert_query = f"INSERT INTO `{table}` ({target_col_str}) VALUES ({placeholders})"
-                                cleaned_rows = [clean_row(row, col_types) for row in rows]
+                            while True:
+                                b_rows = source_cursor.fetchmany(BATCH_SIZE)
+                                if not b_rows:
+                                    break
+                                if insert_query is None:
+                                    placeholders = ", ".join(["%s"] * len(b_rows[0]))
+                                    insert_query = f"INSERT INTO `{table}` ({target_col_str}) VALUES ({placeholders})"
+                                cleaned_rows = [clean_row(row, col_types) for row in b_rows]
                                 target_cursor.executemany(insert_query, cleaned_rows)
                             
 
