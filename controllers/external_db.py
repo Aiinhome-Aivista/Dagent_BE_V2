@@ -527,7 +527,7 @@ def _is_hana_connection(connection_id):
                                password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT db_type FROM database_credential WHERE connection_id=%s ORDER BY id DESC LIMIT 1",
+                cur.execute("SELECT db_type FROM database_credential WHERE connection_id=%s LIMIT 1",
                             (connection_id,))
                 row = cur.fetchone()
                 if not row:

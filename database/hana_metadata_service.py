@@ -192,20 +192,20 @@ def _load_credential(user_id, connection_id, session_id=None):
                 cursor.execute("""
                     SELECT credential, db_type, session_id FROM database_credential
                     WHERE user_id=%s AND connection_id=%s AND session_id=%s
-                    ORDER BY id DESC LIMIT 1
+                    LIMIT 1
                 """, (user_id, connection_id, session_id))
                 row = cursor.fetchone()
             if not row:
                 cursor.execute("""
                     SELECT credential, db_type, session_id FROM database_credential
                     WHERE user_id=%s AND connection_id=%s
-                    ORDER BY id DESC LIMIT 1
+                    LIMIT 1
                 """, (user_id, connection_id))
                 row = cursor.fetchone()
             if not row:
                 cursor.execute("""
                     SELECT credential, db_type, session_id FROM database_credential
-                    WHERE connection_id=%s ORDER BY id DESC LIMIT 1
+                    WHERE connection_id=%s LIMIT 1
                 """, (connection_id,))
                 row = cursor.fetchone()
             if not row:
