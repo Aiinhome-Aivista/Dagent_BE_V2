@@ -477,6 +477,22 @@ def apply_external_sync_controller():
     return apply_external_sync()    
 
 # ─────────────────────────────────────────────
+# SAP HANA METADATA DISCOVERY (Strictly Metadata, No Data Migration)
+# ─────────────────────────────────────────────
+from controllers.hana_metadata_controller import (
+    discover_hana_metadata_controller,
+    get_hana_metadata_controller
+)
+
+@app.route("/hana/discover-metadata", methods=["POST"])
+def hana_discover_metadata_route():
+    return discover_hana_metadata_controller()
+
+@app.route("/hana/metadata", methods=["GET"])
+def hana_get_metadata_route():
+    return get_hana_metadata_controller()
+
+# ─────────────────────────────────────────────
 # WEB SEARCH
 # ─────────────────────────────────────────────
 
