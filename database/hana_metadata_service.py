@@ -534,6 +534,7 @@ def _ensure_metadata_table(cur):
         discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uq_conn_schema_view (connection_id, schema_name, view_name),
         INDEX idx_user_conn (user_id, connection_id),
+        INDEX idx_session (session_id)
     );
     """)
     # Older deployments created the table without technical_summary.

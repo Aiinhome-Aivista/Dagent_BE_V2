@@ -78,6 +78,7 @@ def _ensure_status_table(cur):
         finished_at TIMESTAMP NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uq_hana_kg_conn_session (connection_id, session_id),
+        INDEX idx_hana_kg_session (session_id)
     );
     """)
 
