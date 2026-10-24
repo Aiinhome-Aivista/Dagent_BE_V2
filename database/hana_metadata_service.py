@@ -3,6 +3,22 @@ import pymysql
 import pandas as pd
 from database.config import MYSQL_CONFIG
 
+# ── Whitelisted SAP HANA views (SAP_S4 schema) — Metadata extraction only ──
+SAP_ALLOWED_DATASPEC_OBJECTS = [
+    "ZIVF_CustomerMaster_01_MD",
+    "ZIVR_SKUMaster_01_TR",
+    "ZIVF_CategoryMaster_01_TR",
+    "ZITR_DayAttribute_01_TR",
+    "ZIVF_TerritoryMaster_01_TR",
+    "ZPVF_SD_SalesHistory_01_TR",
+    "ZPVF_SD_CurrentSales_01_TR",
+    "ZIVF_ZoneMaster_01_TR",
+    "ZIVF_RegionMaster_MD_01",
+    "ZPVF_SD_CancelledSalesInvoice_01_TR"
+]
+SAP_ALLOWED_OBJECTS_SET = {name.upper() for name in SAP_ALLOWED_DATASPEC_OBJECTS}
+TARGET_SCHEMA = "SAP_S4"
+
 def get_hana_connection_from_credential(external_db):
     """
     Creates an hdbcli dbapi connection using the existing connection parameters pattern.
@@ -15,6 +31,7 @@ def get_hana_connection_from_credential(external_db):
     db_port = int(external_db.get("port", 30015))
 
     if external_db.get("ssh_host"):
+        # pyrefly: ignore[missing-import]
         from sshtunnel import SSHTunnelForwarder
         tunnel = SSHTunnelForwarder(
             (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
@@ -148,52 +165,45 @@ def discover_hana_metadata(user_id, connection_id, session_id=None):
             if s and s.upper() not in [u.upper() for u in unique_cand_schemas]:
                 unique_cand_schemas.append(s)
 
-        # 2. Discover available Views and Tables
-        views_found = []
-        schema_placeholders = ", ".join(["?"] * len(unique_cand_schemas))
-        schema_args = [s for s in unique_cand_schemas] + [s.upper() for s in unique_cand_schemas]
+        # 2. Discover ONLY whitelisted views from SAP_S4 schema
+        # Build placeholders for allowed object names
+        allowed_names = list(SAP_ALLOWED_DATASPEC_OBJECTS)
+        allowed_placeholders = ", ".join(["?"] * len(allowed_names))
+        # Also add upper-cased variants
+        allowed_args = allowed_names + [n.upper() for n in allowed_names]
+        double_placeholders = ", ".join(["?"] * len(allowed_names))
 
+        views_found = []
         try:
             source_cursor.execute(f"""
                 SELECT VIEW_NAME, SCHEMA_NAME, 'VIEW' AS OBJ_TYPE
                 FROM SYS.VIEWS
-                WHERE (SCHEMA_NAME IN ({schema_placeholders}) OR UPPER(SCHEMA_NAME) IN ({schema_placeholders}))
-                  AND SCHEMA_NAME NOT LIKE '_SYS_%'
-                  AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', '_SYS_AFL', '_SYS_BIC', '_SYS_BI', '_SYS_RT', '_SYS_DI', '_SYS_SECURITY', 'SAP_PA_APL', 'PUBLIC')
+                WHERE UPPER(SCHEMA_NAME) = '{TARGET_SCHEMA.upper()}'
+                  AND (VIEW_NAME IN ({allowed_placeholders})
+                       OR UPPER(VIEW_NAME) IN ({double_placeholders}))
                 ORDER BY VIEW_NAME
-            """, schema_args)
+            """, allowed_args)
             views_found = source_cursor.fetchall()
+            print(f"[HANA-METADATA] Found {len(views_found)} whitelisted views in {TARGET_SCHEMA} schema.")
         except Exception as e:
-            print(f"[HANA-METADATA] Error querying views by schema: {e}")
+            print(f"[HANA-METADATA] Error querying whitelisted views: {e}")
 
-        # If empty, query views without schema constraint
+        # Fallback: if SYS.VIEWS is inaccessible, try SYS.TABLES with same whitelist
         if not views_found:
             try:
-                source_cursor.execute("""
-                    SELECT VIEW_NAME, SCHEMA_NAME, 'VIEW' AS OBJ_TYPE
-                    FROM SYS.VIEWS
-                    WHERE SCHEMA_NAME NOT LIKE '_SYS_%'
-                      AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', '_SYS_AFL', '_SYS_BIC', '_SYS_BI', '_SYS_RT', '_SYS_DI', '_SYS_SECURITY', 'SAP_PA_APL', 'PUBLIC')
-                    ORDER BY VIEW_NAME
-                """)
-                views_found = source_cursor.fetchall()
-            except Exception as e:
-                print(f"[HANA-METADATA] Error querying SYS.VIEWS without schema: {e}")
-
-        # If views still empty, look at tables
-        if not views_found:
-            try:
-                source_cursor.execute("""
+                source_cursor.execute(f"""
                     SELECT TABLE_NAME, SCHEMA_NAME, 'TABLE' AS OBJ_TYPE
                     FROM SYS.TABLES
-                    WHERE IS_TEMPORARY = 'FALSE'
-                      AND SCHEMA_NAME NOT LIKE '_SYS_%'
-                      AND SCHEMA_NAME NOT IN ('SYS', '_SYS_REPO', '_SYS_STATISTICS', '_SYS_AFL', '_SYS_BIC', '_SYS_BI', '_SYS_RT', '_SYS_DI', '_SYS_SECURITY', 'SAP_PA_APL', 'PUBLIC')
+                    WHERE UPPER(SCHEMA_NAME) = '{TARGET_SCHEMA.upper()}'
+                      AND IS_TEMPORARY = 'FALSE'
+                      AND (TABLE_NAME IN ({allowed_placeholders})
+                           OR UPPER(TABLE_NAME) IN ({double_placeholders}))
                     ORDER BY TABLE_NAME
-                """)
+                """, allowed_args)
                 views_found = source_cursor.fetchall()
+                print(f"[HANA-METADATA] Fallback: found {len(views_found)} whitelisted tables in {TARGET_SCHEMA} schema.")
             except Exception as e:
-                print(f"[HANA-METADATA] Error querying SYS.TABLES: {e}")
+                print(f"[HANA-METADATA] Error querying SYS.TABLES fallback: {e}")
 
         # Convert discovered objects to pandas DataFrame
         views_df = pd.DataFrame(views_found, columns=["OBJ_NAME", "SCHEMA_NAME", "OBJ_TYPE"]) if views_found else pd.DataFrame(columns=["OBJ_NAME", "SCHEMA_NAME", "OBJ_TYPE"])
@@ -243,8 +253,9 @@ def discover_hana_metadata(user_id, connection_id, session_id=None):
                 except Exception as tbl_col_err:
                     print(f"[HANA-METADATA] SYS.TABLE_COLUMNS error for {v_name}: {tbl_col_err}")
 
-            # Primary Keys using pandas
+            # Primary Keys using pandas → SYS.CONSTRAINTS
             primary_keys = []
+            pk_detected_from_sys = False
             try:
                 source_cursor.execute("""
                     SELECT COLUMN_NAME
@@ -258,12 +269,15 @@ def discover_hana_metadata(user_id, connection_id, session_id=None):
                 if pk_rows:
                     pk_df = pd.DataFrame(pk_rows, columns=["COLUMN_NAME"])
                     primary_keys = pk_df["COLUMN_NAME"].tolist()
-            except Exception:
-                pass
+                    pk_detected_from_sys = True
+                    print(f"[HANA-METADATA] SYS.CONSTRAINTS: {len(primary_keys)} PKs for {v_name}")
+            except Exception as pk_err:
+                print(f"[HANA-METADATA] SYS.CONSTRAINTS error for {v_name}: {pk_err}")
 
-            # Foreign Keys & Relationships using pandas
+            # Foreign Keys & Relationships → SYS.REFERENTIAL_CONSTRAINTS
             foreign_keys = []
             relationships = []
+            fk_detected_from_sys = False
             try:
                 source_cursor.execute("""
                     SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_SCHEMA_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
@@ -277,8 +291,6 @@ def discover_hana_metadata(user_id, connection_id, session_id=None):
                         "constraint_name", "column_name", "referenced_schema", "referenced_table", "referenced_column"
                     ])
                     foreign_keys = fk_df.to_dict(orient="records")
-
-                    # Map relationships from dataframe
                     rel_df = pd.DataFrame({
                         "from_table": v_name,
                         "from_column": fk_df["column_name"],
@@ -286,8 +298,126 @@ def discover_hana_metadata(user_id, connection_id, session_id=None):
                         "to_column": fk_df["referenced_column"]
                     })
                     relationships = rel_df.to_dict(orient="records")
-            except Exception:
-                pass
+                    fk_detected_from_sys = True
+                    print(f"[HANA-METADATA] SYS.REFERENTIAL_CONSTRAINTS: {len(foreign_keys)} FKs for {v_name}")
+            except Exception as fk_err:
+                print(f"[HANA-METADATA] SYS.REFERENTIAL_CONSTRAINTS error for {v_name}: {fk_err}")
+
+            # ── Fallback: LLM inference from 100 sample rows ───────────────────
+            # If both PK and FK are empty, read up to 100 rows and let the LLM
+            # infer primary keys, candidate FKs and relationships from column
+            # names + value patterns.  NO data is stored — only the inferred
+            # structural metadata (key names / relationships) is kept.
+            if (not pk_detected_from_sys or not fk_detected_from_sys) and cols_info:
+                try:
+                    print(f"[HANA-METADATA] SYS tables returned no PK/FK for {v_name}. "
+                          "Reading 100 sample rows for LLM inference...")
+
+                    target_obj = f'"{v_schema}"."{v_name}"' if v_schema else f'"{v_name}"'
+                    col_names = [c["name"] for c in cols_info]
+                    col_select = ", ".join(f'"{c}"' for c in col_names[:40])  # cap at 40 cols
+
+                    sample_rows_data = []
+                    try:
+                        source_cursor.execute(
+                            f'SELECT TOP 100 {col_select} FROM {target_obj}'
+                        )
+                        raw_rows = source_cursor.fetchall()
+                        if raw_rows:
+                            sample_df = pd.DataFrame(raw_rows, columns=col_names[:40])
+                            # Sanitise: drop all-null cols, convert to str
+                            sample_df = sample_df.dropna(axis=1, how='all')
+                            sample_df = sample_df.fillna("")
+                            sample_rows_data = sample_df.head(100).to_dict(orient="records")
+                    except Exception as sample_err:
+                        print(f"[HANA-METADATA] Sample read error for {v_name}: {sample_err}")
+
+                    if sample_rows_data:
+                        from model.llm_client import call_llm_chat  # type: ignore
+                        import json as _json
+
+                        all_view_names = [r.get("view_name", "") or r.get("OBJ_NAME", "")
+                                          for r in discovered_views]
+
+                        llm_prompt = f"""You are a database analyst.
+Below are up to 100 sample rows (NO actual business data should be stored — these rows are used ONLY to infer schema structure) from the SAP HANA view "{v_schema}"."{v_name}".
+
+Column definitions:
+{_json.dumps([{"name": c["name"], "type": c.get("data_type","?")} for c in cols_info[:40]], indent=2)}
+
+Sample rows (first 100):
+{_json.dumps(sample_rows_data[:100], indent=2, default=str)}
+
+Other known views in the same schema: {', '.join(all_view_names) or 'unknown'}
+
+Task: Based ONLY on column names, data types, and value patterns:
+1. Identify which column(s) are likely PRIMARY KEY(s) — look for ID columns, uniqueness, non-null integer/string patterns.
+2. Identify any FOREIGN KEY relationships to other views/tables in the schema — look for columns ending in _ID, _CODE, _KEY that reference another view.
+3. Do NOT include any actual data values in your response.
+
+Return STRICT JSON with this exact structure:
+{{
+  "primary_keys": ["col1", "col2"],
+  "foreign_keys": [
+    {{"column_name": "col", "referenced_table": "OTHER_VIEW", "referenced_column": "ID"}}
+  ],
+  "relationships": [
+    {{"from_table": "{v_name}", "from_column": "col", "to_table": "OTHER_VIEW", "to_column": "ID"}}
+  ],
+  "confidence": "high|medium|low",
+  "reasoning": "brief explanation"
+}}"""
+
+                        raw_llm = call_llm_chat(
+                            [{"role": "user", "content": llm_prompt}],
+                            json_mode=True,
+                            temperature=0.0
+                        )
+
+                        # Parse LLM response
+                        llm_inferred = None
+                        try:
+                            import re as _re
+                            s = raw_llm.strip()
+                            if s.startswith("```"):
+                                s = _re.sub(r"^```[a-zA-Z]*", "", s).strip()
+                                if s.endswith("```"):
+                                    s = s[:-3].strip()
+                            llm_inferred = _json.loads(s)
+                        except Exception:
+                            try:
+                                from json_repair import repair_json  # type: ignore
+                                llm_inferred = _json.loads(repair_json(raw_llm))
+                            except Exception:
+                                llm_inferred = None
+
+                        if llm_inferred:
+                            confidence = llm_inferred.get("confidence", "low")
+                            print(f"[HANA-METADATA] LLM inferred PKs/FKs for {v_name} "
+                                  f"(confidence={confidence}): "
+                                  f"PKs={llm_inferred.get('primary_keys', [])}, "
+                                  f"FKs={len(llm_inferred.get('foreign_keys', []))}")
+
+                            # Only fill in what SYS tables missed
+                            if not pk_detected_from_sys:
+                                primary_keys = llm_inferred.get("primary_keys", primary_keys)
+
+                            if not fk_detected_from_sys:
+                                foreign_keys = llm_inferred.get("foreign_keys", foreign_keys)
+                                relationships = llm_inferred.get("relationships", relationships)
+
+                            # Tag inferred entries so caller can distinguish
+                            for fk in foreign_keys:
+                                if isinstance(fk, dict) and "source" not in fk:
+                                    fk["source"] = "llm_inferred"
+                            for rel in relationships:
+                                if isinstance(rel, dict) and "source" not in rel:
+                                    rel["source"] = "llm_inferred"
+                        else:
+                            print(f"[HANA-METADATA] LLM returned unparseable response for {v_name}.")
+
+                except Exception as llm_err:
+                    print(f"[HANA-METADATA] LLM inference failed for {v_name}: {llm_err}")
 
             # Row Count (strictly metadata counting, no rows retrieved)
             row_count = 0
@@ -300,6 +430,7 @@ def discover_hana_metadata(user_id, connection_id, session_id=None):
             except Exception as cnt_err:
                 print(f"[HANA-METADATA] Count error for {v_name}: {cnt_err}")
                 row_count = 0
+
 
             discovered_views.append({
                 "schema_name": v_schema or "",

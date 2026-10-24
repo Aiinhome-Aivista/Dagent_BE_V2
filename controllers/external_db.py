@@ -102,7 +102,26 @@ def connect_external_db():
                 pass
         
         sync_res = {}
-        if is_tally:
+        # ── Detect db_type from credential if not in connection_history ───
+        actual_db_type = (ctype or "").strip().lower()
+        if not actual_db_type or actual_db_type == "unknown":
+            try:
+                import pymysql
+                from database.config import MYSQL_CONFIG
+                _conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"],
+                                        password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
+                with _conn.cursor() as _cur:
+                    _cur.execute("SELECT db_type FROM database_credential WHERE connection_id=%s AND user_id=%s",
+                                 (cid, user_id))
+                    _r = _cur.fetchone()
+                    if _r:
+                        actual_db_type = str(_r[0]).strip().lower()
+                _conn.close()
+            except Exception:
+                pass
+
+        if actual_db_type == 'tally':
+            is_tally = True
             try:
                 import pymysql, json
                 from database.config import MYSQL_CONFIG
@@ -125,7 +144,8 @@ def connect_external_db():
             except Exception as sync_e:
                 print(f"[!] Auto-Sync failed for Tally ({cid}): {sync_e}")
                 return jsonify({"status": False, "statuscode": 500, "message": str(sync_e), "error": str(sync_e)}), 500
-        elif ctype in ('doc_upload', 'doc_chunk_upload', 'csv_upload', 'csv_chunk_upload'):
+
+        elif actual_db_type in ('doc_upload', 'doc_chunk_upload', 'csv_upload', 'csv_chunk_upload'):
             try:
                 import pymysql, json, os
                 from database.config import MYSQL_CONFIG
@@ -143,38 +163,89 @@ def connect_external_db():
                         filename = cred_data.get("files", [""])[0] if cred_data.get("files") else "document"
                         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                         merged_path = os.path.join(base_dir, "uploads", filename)
-                    
+
                     cur.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s", (session_id,))
                     ws_row = cur.fetchone()
                     allocated_db_name = ws_row[0] if ws_row else ""
-                    
+
                     cur.execute("SELECT name, email FROM users WHERE id=%s", (user_id,))
                     u_row = cur.fetchone()
                     username = u_row[0] if u_row else "unknown"
                     email = u_row[1] if u_row else "unknown"
                     csv_username = email.split("@")[0]
-                    
-                    # Update status to processing
+
                     cur.execute("UPDATE connection_history SET status='processing' WHERE id=%s", (cid,))
                     conn.commit()
                 conn.close()
 
-                # Start a temporary scheduler or use thread to run it
                 from threading import Thread
-                if ctype in ('doc_upload', 'doc_chunk_upload'):
+                if actual_db_type in ('doc_upload', 'doc_chunk_upload'):
                     print(f"[*] Triggering background processing for document: {merged_path}")
                     t = Thread(target=process_doc_job, args=(merged_path, allocated_db_name, MYSQL_CONFIG.get("host"), MYSQL_CONFIG.get("user"), MYSQL_CONFIG.get("password"), MYSQL_CONFIG.get("port", 3306), session_id, user_id, username, cid))
                     t.start()
                 else:
                     print(f"[*] Triggering background processing for CSV: {merged_path}")
-                    t = Thread(target=process_csv_job, args=([merged_path], allocated_db_name, MYSQL_CONFIG.get("host"), MYSQL_CONFIG.get("user"), MYSQL_CONFIG.get("password"), MYSQL_CONFIG.get("port", 3306), ctype, session_id, user_id, csv_username, cid))
+                    t = Thread(target=process_csv_job, args=([merged_path], allocated_db_name, MYSQL_CONFIG.get("host"), MYSQL_CONFIG.get("user"), MYSQL_CONFIG.get("password"), MYSQL_CONFIG.get("port", 3306), actual_db_type, session_id, user_id, csv_username, cid))
                     t.start()
-                    
-                sync_res = {} # It will finish in the background
+
+                sync_res = {}  # Finishes in background
             except Exception as sync_e:
                 print(f"[!] Auto-Sync failed for Doc/CSV ({cid}): {sync_e}")
                 import traceback; traceback.print_exc()
-        elif ctype not in ('saved_web_result', 'web_search'):
+
+        elif actual_db_type in ("hana", "sap_hana", "saphana", "sap"):
+            # ── SAP HANA: Metadata-only extraction + KGraph build (no data copy) ──
+            try:
+                from database.hana_metadata_service import discover_hana_metadata
+                from database.hana_kgraph_service import build_hana_kgraph_from_metadata
+                import threading
+
+                print(f"[SAP-HANA] Starting metadata discovery for connection {cid}...")
+                meta_result = discover_hana_metadata(
+                    user_id=user_id,
+                    connection_id=cid,
+                    session_id=session_id
+                )
+                total_views = meta_result.get("total_views", 0)
+                print(f"[SAP-HANA] Metadata discovered: {total_views} views. Building KGraph in background...")
+
+                # Build KGraph from metadata in background (non-blocking)
+                def _build_hana_kg():
+                    try:
+                        build_hana_kgraph_from_metadata(
+                            connection_id=cid,
+                            session_id=session_id,
+                            user_id=user_id
+                        )
+                    except Exception as kg_err:
+                        print(f"[SAP-HANA] KGraph build failed: {kg_err}")
+
+                threading.Thread(target=_build_hana_kg, daemon=True).start()
+
+                sync_res = {
+                    "situations": [],
+                    "new_tables": [v["view_name"] for v in meta_result.get("views", [])],
+                    "summary": {
+                        "total_rows": sum(v.get("row_count", 0) for v in meta_result.get("views", [])),
+                        "total_columns": sum(v.get("column_count", 0) for v in meta_result.get("views", [])),
+                        "data_size_mb": "0.0",
+                        "last_sync": "Just now"
+                    },
+                    "tables": [
+                        {
+                            "table": f"SAP_S4.{v['view_name']}",
+                            "rows": v.get("row_count", 0),
+                            "columns": v.get("column_count", 0)
+                        }
+                        for v in meta_result.get("views", [])
+                    ]
+                }
+            except Exception as hana_err:
+                print(f"[SAP-HANA] Metadata discovery failed for connection {cid}: {hana_err}")
+                return jsonify({"status": False, "statuscode": 500,
+                                "message": str(hana_err), "error": str(hana_err)}), 500
+
+        elif actual_db_type not in ('saved_web_result', 'web_search'):
             try:
                 sync_res = sync_external_database(user_id, cid, session_id)
             except Exception as sync_e:

@@ -16,6 +16,7 @@ SAP_ALLOWED_DATASPEC_OBJECTS = [
     "ZPVF_SD_CurrentSales_01_TR",
     "ZIVF_ZoneMaster_01_TR",
     "ZIVF_RegionMaster_MD_01",
+    "ZPVF_SD_CancelledSalesInvoice_01_TR"
 ]
 SAP_ALLOWED_OBJECTS_SET = {name.upper() for name in SAP_ALLOWED_DATASPEC_OBJECTS}
 
@@ -892,6 +893,7 @@ def sync_external_database(user_id, connection_id, session_id):
         db_port = external_db.get("port", 5432)
         
         if external_db.get("ssh_host"):
+            # pyrefly: ignore[missing-import]
             from sshtunnel import SSHTunnelForwarder
             tunnel = SSHTunnelForwarder(
                 (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
@@ -919,6 +921,7 @@ def sync_external_database(user_id, connection_id, session_id):
         db_port = external_db.get("port", 1433)
         
         if external_db.get("ssh_host"):
+            # pyrefly: ignore[missing-import]
             from sshtunnel import SSHTunnelForwarder
             tunnel = SSHTunnelForwarder(
                 (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
@@ -961,6 +964,7 @@ def sync_external_database(user_id, connection_id, session_id):
         db_port = int(external_db.get("port", 30015))
         
         if external_db.get("ssh_host"):
+            # pyrefly: ignore[missing-import]
             from sshtunnel import SSHTunnelForwarder
             tunnel = SSHTunnelForwarder(
                 (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
@@ -1008,6 +1012,7 @@ def sync_external_database(user_id, connection_id, session_id):
         db_port = external_db.get("port", 3306)
         
         if external_db.get("ssh_host"):
+            # pyrefly: ignore[missing-import]
             from sshtunnel import SSHTunnelForwarder
             tunnel = SSHTunnelForwarder(
                 (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
@@ -1694,6 +1699,7 @@ def apply_external_sync(user_id, connection_id, session_id, table):
         db_port = external_db.get("port", 5432)
         
         if external_db.get("ssh_host"):
+            # pyrefly: ignore[missing-import]
             from sshtunnel import SSHTunnelForwarder
             tunnel = SSHTunnelForwarder(
                 (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
@@ -1722,6 +1728,7 @@ def apply_external_sync(user_id, connection_id, session_id, table):
         db_port = external_db.get("port", 1433)
         
         if external_db.get("ssh_host"):
+            # pyrefly: ignore[missing-import]
             from sshtunnel import SSHTunnelForwarder
             tunnel = SSHTunnelForwarder(
                 (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
@@ -1753,6 +1760,7 @@ def apply_external_sync(user_id, connection_id, session_id, table):
         db_port = int(external_db.get("port", 30015))
         
         if external_db.get("ssh_host"):
+            # pyrefly: ignore[missing-import]
             from sshtunnel import SSHTunnelForwarder
             tunnel = SSHTunnelForwarder(
                 (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
@@ -1800,6 +1808,7 @@ def apply_external_sync(user_id, connection_id, session_id, table):
         db_port = external_db.get("port", 3306)
         
         if external_db.get("ssh_host"):
+            # pyrefly: ignore[missing-import]
             from sshtunnel import SSHTunnelForwarder
             tunnel = SSHTunnelForwarder(
                 (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
@@ -2117,6 +2126,7 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
         db_port = external_db.get("port", 5432)
         
         if external_db.get("ssh_host"):
+            # pyrefly: ignore[missing-import]
             from sshtunnel import SSHTunnelForwarder
             tunnel = SSHTunnelForwarder(
                 (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
@@ -2145,6 +2155,7 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
         db_port = external_db.get("port", 1433)
         
         if external_db.get("ssh_host"):
+            # pyrefly: ignore[missing-import]
             from sshtunnel import SSHTunnelForwarder
             tunnel = SSHTunnelForwarder(
                 (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
@@ -2176,6 +2187,7 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
         db_port = int(external_db.get("port", 30015))
         
         if external_db.get("ssh_host"):
+            # pyrefly: ignore[missing-import]
             from sshtunnel import SSHTunnelForwarder
             tunnel = SSHTunnelForwarder(
                 (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
@@ -2223,6 +2235,7 @@ def apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
         db_port = external_db.get("port", 3306)
         
         if external_db.get("ssh_host"):
+            # pyrefly: ignore[missing-import]
             from sshtunnel import SSHTunnelForwarder
             tunnel = SSHTunnelForwarder(
                 (external_db["ssh_host"], int(external_db.get("ssh_port", 22))),
