@@ -483,7 +483,7 @@ Return STRICT JSON with this exact structure:
                 UNIQUE KEY uq_conn_schema_view (connection_id, schema_name, view_name),
                 INDEX idx_user_conn (user_id, connection_id),
                 INDEX idx_session (session_id)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            );
             """)
 
             upsert_query = """
