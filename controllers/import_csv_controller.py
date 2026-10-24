@@ -381,20 +381,9 @@ def import_csv_data(get_db_connection):
             # Step 1: Priority check for exact table name match (case-insensitive)
             target_table_candidate = next((t for t in schema_map if t.lower() == expected_table_name), None)
             
-            # Step 2: Strict high-confidence schema fallback (only if exact table name doesn't exist)
-            if not target_table_candidate and len(df.columns) > 0:
-                best_match = None
-                best_ratio = 0.0
-                for t_name, t_cols in schema_map.items():
-                    if t_cols:
-                        intersection_count = len(set(df.columns).intersection(t_cols))
-                        overlap_ratio = intersection_count / max(len(df.columns), len(t_cols))
-                        # Must have at least 70% schema overlap to be considered the same table
-                        if overlap_ratio >= 0.70 and overlap_ratio > best_ratio:
-                            best_ratio = overlap_ratio
-                            best_match = t_name
-                if best_match:
-                    target_table_candidate = best_match
+            # Note: Do NOT fallback to schema similarity if the table name is different.
+            # Distinct business entities (e.g., CancelledSalesInvoice vs CurrentSales vs SalesHistory)
+            # must create their own tables even if they share identical column schemas.
                         
             if target_table_candidate:
                 matched_table = target_table_candidate

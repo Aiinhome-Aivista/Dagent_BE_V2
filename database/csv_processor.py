@@ -336,19 +336,9 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
         matched_table = None
         target_candidate = next((t for t in schema_map if t.lower() == default_table_name.lower()), None)
         
-        # Step 2: Strict high-confidence schema fallback (only if exact table name doesn't exist)
-        if not target_candidate and len(sample.columns) > 0:
-            best_match = None
-            best_ratio = 0.0
-            for t_name, t_cols in schema_map.items():
-                if t_cols:
-                    intersection_count = len(set(sample.columns).intersection(t_cols))
-                    overlap_ratio = intersection_count / max(len(sample.columns), len(t_cols))
-                    if overlap_ratio >= 0.70 and overlap_ratio > best_ratio:
-                        best_ratio = overlap_ratio
-                        best_match = t_name
-            if best_match:
-                target_candidate = best_match
+        # Note: Do NOT fallback to schema similarity if the table name is different.
+        # Distinct business entities (e.g., CancelledSalesInvoice vs CurrentSales vs SalesHistory)
+        # must create their own tables even if they share identical column schemas.
 
         column_rename_map = {}
         if target_candidate:
