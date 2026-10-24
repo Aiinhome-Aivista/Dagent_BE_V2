@@ -1,5 +1,6 @@
 from flask import request, jsonify
 from database.external_sync_service import apply_external_sync as apply_external_sync_service, sync_external_database , apply_bulk_external_sync
+from database.hana_metadata_service import HANA_DB_TYPES
 
 
 def _rebuild_kgraph_for_session(session_id, trigger_source):
@@ -62,6 +63,8 @@ def connect_external_db():
         }), 400
 
     tally_sync_result = None
+    hana_info = {"connection_ids": [], "schema": None, "total_views": 0, "missing_views": []}
+    has_non_hana_source = False
     result = {"situations": [], "new_tables": [], "summary": {"data_size_mb": 0.0, "total_rows": 0, "total_columns": 0}, "tables": []}
     
     session_connections = []
@@ -119,6 +122,9 @@ def connect_external_db():
                 _conn.close()
             except Exception:
                 pass
+
+        if actual_db_type not in HANA_DB_TYPES:
+            has_non_hana_source = True
 
         if actual_db_type == 'tally':
             is_tally = True
@@ -193,51 +199,46 @@ def connect_external_db():
                 print(f"[!] Auto-Sync failed for Doc/CSV ({cid}): {sync_e}")
                 import traceback; traceback.print_exc()
 
-        elif actual_db_type in ("hana", "sap_hana", "saphana", "sap"):
-            # ── SAP HANA: Metadata-only extraction + KGraph build (no data copy) ──
+        elif actual_db_type in HANA_DB_TYPES:
+            # ── SAP HANA: metadata-only extraction + KGraph build (no data copy) ──
+            #   Step 1 (sync):       discover_hana_metadata()  -> MySQL sap_hana_view_metadata
+            #   Step 2 (background): build_hana_kgraph_from_metadata() -> ArangoDB
             try:
                 from database.hana_metadata_service import discover_hana_metadata
-                from database.hana_kgraph_service import build_hana_kgraph_from_metadata
-                import threading
+                from database.hana_kgraph_service import start_hana_kgraph_build_async
 
                 print(f"[SAP-HANA] Starting metadata discovery for connection {cid}...")
-                meta_result = discover_hana_metadata(
-                    user_id=user_id,
-                    connection_id=cid,
-                    session_id=session_id
-                )
-                total_views = meta_result.get("total_views", 0)
-                print(f"[SAP-HANA] Metadata discovered: {total_views} views. Building KGraph in background...")
+                meta_result = discover_hana_metadata(user_id=user_id, connection_id=cid, session_id=session_id)
+                views = meta_result.get("views", [])
+                print(f"[SAP-HANA] Metadata discovered: {len(views)} views. Queuing KGraph build...")
 
-                # Build KGraph from metadata in background (non-blocking)
-                def _build_hana_kg():
-                    try:
-                        build_hana_kgraph_from_metadata(
-                            connection_id=cid,
-                            session_id=session_id,
-                            user_id=user_id
-                        )
-                    except Exception as kg_err:
-                        print(f"[SAP-HANA] KGraph build failed: {kg_err}")
+                start_hana_kgraph_build_async(cid, session_id, user_id)
 
-                threading.Thread(target=_build_hana_kg, daemon=True).start()
+                hana_info["connection_ids"].append(cid)
+                hana_info["schema"] = meta_result.get("schema")
+                hana_info["total_views"] += len(views)
+                hana_info["missing_views"].extend(meta_result.get("missing_views", []))
 
                 sync_res = {
                     "situations": [],
-                    "new_tables": [v["view_name"] for v in meta_result.get("views", [])],
+                    "new_tables": [v["view_name"] for v in views],
                     "summary": {
-                        "total_rows": sum(v.get("row_count", 0) for v in meta_result.get("views", [])),
-                        "total_columns": sum(v.get("column_count", 0) for v in meta_result.get("views", [])),
+                        "total_rows": sum(int(v.get("row_count") or 0) for v in views),
+                        "total_columns": sum(int(v.get("column_count") or 0) for v in views),
                         "data_size_mb": "0.0",
                         "last_sync": "Just now"
                     },
                     "tables": [
                         {
-                            "table": f"SAP_S4.{v['view_name']}",
-                            "rows": v.get("row_count", 0),
-                            "columns": v.get("column_count", 0)
+                            "table": f"{v.get('schema_name') or meta_result.get('schema')}.{v['view_name']}",
+                            "rows": int(v.get("row_count") or 0),
+                            "columns": int(v.get("column_count") or 0),
+                            "role": (v.get("technical_summary") or {}).get("role"),
+                            "primary_keys": v.get("primary_keys", []),
+                            "foreign_keys": len(v.get("foreign_keys", [])),
+                            "source": "sap_hana_metadata"
                         }
-                        for v in meta_result.get("views", [])
+                        for v in views
                     ]
                 }
             except Exception as hana_err:
@@ -483,12 +484,31 @@ def connect_external_db():
             "msg": "External database analyzed successfully"
         }
 
+    if hana_info["connection_ids"]:
+        response_data["data"]["hana"] = {
+            "metadata_only": True,
+            "session_id": session_id,
+            "connection_ids": hana_info["connection_ids"],
+            "schema": hana_info["schema"],
+            "total_views": hana_info["total_views"],
+            "missing_views": hana_info["missing_views"],
+            "kgraph": {"status": "queued", "status_endpoint": f"/hana/kgraph-status?session_id={session_id}"}
+        }
+        response_data["msg"] = (f"SAP HANA metadata extracted for {hana_info['total_views']} views "
+                                f"(no data copied). Knowledge Graph is being built.")
+
     if 'tally_sync_result' in locals() and tally_sync_result:
         response_data["tally_sync_result"] = tally_sync_result
         response_data["msg"] += " (Data fetched and saved successfully!)"
 
     # Update (never recreate) the workspace's Knowledge Graph now that this
     # source has written into it — run in background thread so the HTTP response is NOT blocked
+    # SAP HANA builds its own metadata-only KGraph (hana_kgraph_service); the
+    # generic builder reads rows/sample values from the workspace MySQL DB, so it
+    # must not run for HANA-only requests.
+    if not has_non_hana_source:
+        return jsonify(response_data)
+
     import threading
     threading.Thread(
         target=_rebuild_kgraph_for_session,
@@ -497,6 +517,38 @@ def connect_external_db():
     ).start()
 
     return jsonify(response_data)
+
+def _is_hana_connection(connection_id):
+    """True when the connection is SAP HANA (metadata-only: data copy is never allowed)."""
+    try:
+        import pymysql
+        from database.config import MYSQL_CONFIG
+        conn = pymysql.connect(host=MYSQL_CONFIG["host"], user=MYSQL_CONFIG["user"],
+                               password=MYSQL_CONFIG["password"], database=MYSQL_CONFIG["database"])
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT db_type FROM database_credential WHERE connection_id=%s ORDER BY id DESC LIMIT 1",
+                            (connection_id,))
+                row = cur.fetchone()
+                if not row:
+                    cur.execute("SELECT db_type FROM connection_history WHERE id=%s", (connection_id,))
+                    row = cur.fetchone()
+        finally:
+            conn.close()
+        return bool(row and str(row[0] or "").strip().lower() in HANA_DB_TYPES)
+    except Exception:
+        return False
+
+
+def _hana_copy_blocked_response():
+    return jsonify({
+        "status": False,
+        "statuscode": 400,
+        "data": None,
+        "msg": "SAP HANA connections are metadata-only: data rows are never copied. "
+               "Use /hana/build-kgraph to rebuild the Knowledge Graph from metadata."
+    }), 400
+
 
 def apply_external_sync():
 
@@ -514,6 +566,9 @@ def apply_external_sync():
             "data": None,
             "msg": "Missing required fields"
         }), 400
+
+    if _is_hana_connection(connection_id):
+        return _hana_copy_blocked_response()
 
     apply_external_sync_service(user_id, connection_id, session_id, table)
 
@@ -546,6 +601,9 @@ def apply_bulk_sync():
             "data": None,
             "msg": "Missing required fields or 'tables' is not a list"
         }), 400
+
+    if _is_hana_connection(connection_id):
+        return _hana_copy_blocked_response()
 
     try:
         apply_bulk_external_sync(user_id, connection_id, session_id, tables, action)
