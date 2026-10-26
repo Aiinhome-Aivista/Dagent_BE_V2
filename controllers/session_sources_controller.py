@@ -154,6 +154,38 @@ def session_sources_controller(get_connection_func):
                 }
             })
 
+        # ── SAP HANA Metadata Sources ────────────────────────────
+        try:
+            cursor.execute("""
+                SELECT connection_id, schema_name, view_name, row_count, column_count, discovered_at
+                FROM sap_hana_view_metadata
+                WHERE session_id = %s
+            """, (session_id,))
+            hana_rows = cursor.fetchall()
+            if hana_rows:
+                hana_tables = [
+                    {
+                        "table": f"{r.get('schema_name', '')}.{r['view_name']}",
+                        "rows": int(r.get("row_count") or 0),
+                        "columns": int(r.get("column_count") or 0),
+                        "size": 0.0
+                    }
+                    for r in hana_rows
+                ]
+                external_dbs.append({
+                    "external_database": "SAP HANA",
+                    "table_count": len(hana_tables),
+                    "tables": hana_tables,
+                    "last_sync": str(hana_rows[0].get("discovered_at") or "Just now"),
+                    "summary": {
+                        "total_rows": sum(t["rows"] for t in hana_tables),
+                        "total_columns": sum(t["columns"] for t in hana_tables),
+                        "data_size_mb": 0.0
+                    }
+                })
+        except Exception as h_err:
+            print(f"[session_sources] SAP HANA check: {h_err}")
+
         simple_topics = [r["topic"] for r in topic_rows]
         simple_databases = [d["external_database"] for d in external_dbs]
 

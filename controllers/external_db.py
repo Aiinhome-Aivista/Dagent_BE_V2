@@ -205,14 +205,11 @@ def connect_external_db():
             #   Step 2 (background): build_hana_kgraph_from_metadata() -> ArangoDB
             try:
                 from database.hana_metadata_service import discover_hana_metadata
-                from database.hana_kgraph_service import start_hana_kgraph_build_async
 
                 print(f"[SAP-HANA] Starting metadata discovery for connection {cid}...")
                 meta_result = discover_hana_metadata(user_id=user_id, connection_id=cid, session_id=session_id)
                 views = meta_result.get("views", [])
-                print(f"[SAP-HANA] Metadata discovered: {len(views)} views. Queuing KGraph build...")
-
-                start_hana_kgraph_build_async(cid, session_id, user_id)
+                print(f"[SAP-HANA] Metadata discovered: {len(views)} views (KG build will run on Continue to Process).")
 
                 hana_info["connection_ids"].append(cid)
                 hana_info["schema"] = meta_result.get("schema")

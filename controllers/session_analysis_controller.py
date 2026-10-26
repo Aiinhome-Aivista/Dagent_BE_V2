@@ -1429,8 +1429,59 @@ def _fetch_db_data(session_id: str, databases: list, conn) -> list:
                 if pg_conn:
                     try: pg_conn.close()
                     except: pass
-        except Exception as outer_e:
-            print(f"[Analysis] Outer PostgreSQL block error: {outer_e}")
+    # ── 3. SAP HANA (Stored Metadata & Trigger K-Graph Build) ──
+    hana_cursor = None
+    try:
+        hana_cursor = conn.cursor(dictionary=True)
+        hana_cursor.execute("""
+            SELECT DISTINCT connection_id, schema_name, view_name, row_count, column_count, columns_detail
+            FROM sap_hana_view_metadata
+            WHERE session_id = %s
+        """, (session_id,))
+        hana_rows = hana_cursor.fetchall()
+        if hana_rows:
+            # Trigger HANA K-Graph build synchronously or wait for it
+            from database.hana_kgraph_service import build_hana_kgraph_from_metadata, get_hana_kgraph_status
+            unique_cids = list({r["connection_id"] for r in hana_rows if r.get("connection_id")})
+            for cid in unique_cids:
+                status_info = get_hana_kgraph_status(session_id=session_id, connection_id=cid)
+                cur_status = status_info.get("status") if status_info else None
+                if cur_status != "ready":
+                    print(f"[Analysis] Building HANA K-Graph on Continue to Process for connection {cid}...")
+                    build_hana_kgraph_from_metadata(cid, session_id)
+
+            hana_tables = []
+            for hr in hana_rows:
+                cols = []
+                cols_raw = hr.get("columns_detail")
+                if isinstance(cols_raw, str):
+                    try:
+                        cols_json = json.loads(cols_raw)
+                        cols = [c["name"] for c in cols_json if "name" in c]
+                    except:
+                        pass
+                elif isinstance(cols_raw, list):
+                    cols = [c["name"] for c in cols_raw if "name" in c]
+
+                hana_tables.append({
+                    "table_name": f"{hr.get('schema_name', '')}.{hr['view_name']}",
+                    "columns": cols,
+                    "business_aggregates": {"row_count": int(hr.get("row_count") or 0)}
+                })
+
+            results.append({
+                "source_type": "database",
+                "external_database": "SAP HANA",
+                "new_user_db": "sap_hana_metadata",
+                "tables": hana_tables
+            })
+            print(f"[Analysis] SAP HANA metadata added to analysis context: {len(hana_tables)} views.")
+    except Exception as hana_err:
+        print(f"[Analysis] SAP HANA data fetch/build error: {hana_err}")
+    finally:
+        if hana_cursor:
+            try: hana_cursor.close()
+            except: pass
 
     return results
 
@@ -1596,10 +1647,24 @@ def session_analysis_controller(get_connection_func):
         }), 400
 
     if not topics and not databases:
-        return jsonify({
-            "status": "failed", "statusCode": 400,
-            "message": "At least one of 'topics' or 'databases' must be provided."
-        }), 400
+        # Check if this session has SAP HANA metadata before rejecting
+        has_hana = False
+        try:
+            chk_conn = get_connection_func()
+            with chk_conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM sap_hana_view_metadata WHERE session_id = %s LIMIT 1", (session_id,))
+                if cur.fetchone():
+                    has_hana = True
+                    databases = ["SAP HANA"]
+            chk_conn.close()
+        except Exception:
+            pass
+
+        if not has_hana:
+            return jsonify({
+                "status": "failed", "statusCode": 400,
+                "message": "At least one of 'topics' or 'databases' must be provided."
+            }), 400
 
     conn = None
     try:
