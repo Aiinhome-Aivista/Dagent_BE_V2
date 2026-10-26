@@ -481,7 +481,9 @@ def apply_external_sync_controller():
 # ─────────────────────────────────────────────
 from controllers.hana_metadata_controller import (
     discover_hana_metadata_controller,
-    get_hana_metadata_controller
+    get_hana_metadata_controller,
+    build_hana_kgraph_controller,
+    get_hana_kgraph_status_controller
 )
 
 @app.route("/hana/discover-metadata", methods=["POST"])
@@ -491,6 +493,14 @@ def hana_discover_metadata_route():
 @app.route("/hana/metadata", methods=["GET"])
 def hana_get_metadata_route():
     return get_hana_metadata_controller()
+
+@app.route("/hana/build-kgraph", methods=["POST"])
+def hana_build_kgraph_route():
+    return build_hana_kgraph_controller()
+
+@app.route("/hana/kgraph-status", methods=["GET"])
+def hana_kgraph_status_route():
+    return get_hana_kgraph_status_controller()
 
 # ─────────────────────────────────────────────
 # WEB SEARCH
