@@ -1860,7 +1860,7 @@ def delete_connection_history_controller(get_db_connection):
         except Exception as hana_del_err:
             print(f"[DELETE] Error cleaning up SAP HANA tables for connection {item_id}: {hana_del_err}")
 
-        # Delete SAP HANA nodes & edges from ArangoDB for this connection
+        # Delete nodes & edges from ArangoDB for this connection and its tables
         try:
             from database.config import ARANGO_HOST, ARANGO_USER, ARANGO_PASS, ARANGO_DB
             from arango import ArangoClient
@@ -1870,6 +1870,8 @@ def delete_connection_history_controller(get_db_connection):
             sys_db = arango_client.db('_system', username=ARANGO_USER, password=ARANGO_PASS)
             if sys_db.has_database(arango_db_name):
                 adb = arango_client.db(arango_db_name, username=ARANGO_USER, password=ARANGO_PASS)
+                
+                # 1. Remove by connection_id (HANA or tagged items)
                 for col in ["session_edges", "session_nodes"]:
                     if adb.has_collection(col):
                         try:
@@ -1879,6 +1881,35 @@ def delete_connection_history_controller(get_db_connection):
                             )
                         except Exception as aql_e:
                             print(f"[DELETE] ArangoDB {col} cleanup warning for connection {item_id}: {aql_e}")
+
+                # 2. If tables were dropped (CSV, SQL, etc.), remove their corresponding nodes and connected edges
+                if tables_to_drop and adb.has_collection("session_nodes") and adb.has_collection("session_edges"):
+                    table_keys = [str(t) for t in tables_to_drop]
+                    try:
+                        # Remove edges where _from or _to belongs to dropped tables
+                        adb.aql.execute("""
+                            FOR e IN session_edges
+                            FILTER e.session_id == @sid AND (
+                                PARSE_IDENTIFIER(e._from).key IN @t_keys OR
+                                PARSE_IDENTIFIER(e._to).key IN @t_keys
+                            )
+                            REMOVE e IN session_edges
+                        """, bind_vars={"sid": session_id, "t_keys": table_keys})
+
+                        # Remove nodes corresponding to dropped tables
+                        adb.aql.execute("""
+                            FOR n IN session_nodes
+                            FILTER n.session_id == @sid AND (
+                                n._key IN @t_keys OR
+                                n.original_id IN @t_keys OR
+                                n.label IN @t_keys
+                            )
+                            REMOVE n IN session_nodes
+                        """, bind_vars={"sid": session_id, "t_keys": table_keys})
+                        print(f"[DELETE] ArangoDB removed nodes/edges for dropped tables: {table_keys}")
+                    except Exception as drop_aql_err:
+                        print(f"[DELETE] ArangoDB table node cleanup warning: {drop_aql_err}")
+
         except Exception as arango_conn_err:
             print(f"[DELETE] ArangoDB cleanup skipped for connection {item_id}: {arango_conn_err}")
         
