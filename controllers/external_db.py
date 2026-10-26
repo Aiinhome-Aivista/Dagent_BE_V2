@@ -489,10 +489,10 @@ def connect_external_db():
             "schema": hana_info["schema"],
             "total_views": hana_info["total_views"],
             "missing_views": hana_info["missing_views"],
-            "kgraph": {"status": "queued", "status_endpoint": f"/hana/kgraph-status?session_id={session_id}"}
+            "kgraph": {"status": "not_started"}
         }
         response_data["msg"] = (f"SAP HANA metadata extracted for {hana_info['total_views']} views "
-                                f"(no data copied). Knowledge Graph is being built.")
+                                f"(no data copied). Click 'Continue to Process' to generate Knowledge Graph.")
 
     if 'tally_sync_result' in locals() and tally_sync_result:
         response_data["tally_sync_result"] = tally_sync_result
