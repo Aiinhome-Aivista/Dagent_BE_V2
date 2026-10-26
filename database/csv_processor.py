@@ -252,6 +252,68 @@ def _detect_encoding(path: str) -> str:
             continue
     return 'latin1'
 
+# Known standalone SAP views / business tables that must ALWAYS have their own separate tables
+DISTINCT_INTENT_TABLES = {
+    "zpvf_sd_saleshistory_01_tr",
+    "zpvf_sd_currentsales_01_tr",
+    "zpvf_sd_cancelledsalesinvoice_01_tr",
+    "zivf_customermaster_01_md",
+    "zivr_skumaster_01_tr",
+    "zivf_categorymaster_01_tr",
+    "zitr_dayattribute_01_tr",
+    "zivf_territorymaster_01_tr",
+    "zivf_zonemaster_01_tr",
+    "zivf_regionmaster_md_01",
+}
+
+# Semantic keywords indicating completely different data objectives even with identical schemas
+DIFFERENT_INTENT_KEYWORDS = [
+    ("history", "current"),
+    ("history", "active"),
+    ("current", "cancelled"),
+    ("current", "cancel"),
+    ("history", "cancelled"),
+    ("history", "cancel"),
+    ("target", "actual"),
+    ("budget", "actual"),
+    ("forecast", "actual"),
+    ("archive", "active"),
+]
+
+def _is_partition_or_copy_of(name1: str, name2: str) -> bool:
+    """
+    Smart check: Returns True ONLY if name1 and name2 represent the SAME dataset
+    (e.g. chunks, numbered parts, or duplicate copies).
+    Returns False if they represent distinct data objectives.
+    """
+    n1 = str(name1).strip().lower()
+    n2 = str(name2).strip().lower()
+    
+    if n1 == n2:
+        return True
+        
+    # If either table is in the distinct SAP views list and names don't match, never merge
+    if n1 in DISTINCT_INTENT_TABLES or n2 in DISTINCT_INTENT_TABLES:
+        return False
+        
+    # Check for contrasting semantic intent keywords (e.g. history vs current, cancel vs active)
+    for kw1, kw2 in DIFFERENT_INTENT_KEYWORDS:
+        if (kw1 in n1 and kw2 in n2) or (kw2 in n1 and kw1 in n2):
+            return False
+
+    import re
+    def get_base(n):
+        s = n
+        # Remove copy suffixes e.g. ' (1)', ' - copy'
+        s = re.sub(r'(\s*\(\d+\))+$', '', s)
+        s = re.sub(r'(\s*[-_]?\s*copy)+$', '', s)
+        # Remove partition / chunk / part / split numeric suffixes: '_part1', '_chunk2', '_p1', '_1', etc.
+        s = re.sub(r'([-_]part[-_]?\d+|[-_]chunk[-_]?\d+|[-_]p\d+|[-_]\d+)$', '', s)
+        return s.replace("-", "_").replace(" ", "_").strip("_")
+
+    b1 = get_base(n1)
+    b2 = get_base(n2)
+    return bool(b1 and b2 and b1 == b2)
 
 def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db_port,
                      trigger_source="csv_upload", session_id=None, user_id=None, username=None, ch_id=None):
@@ -336,12 +398,13 @@ def process_csv_job(file_paths, allocated_db_name, db_host, db_user, db_pass, db
         matched_table = None
         target_candidate = next((t for t in schema_map if t.lower() == default_table_name.lower()), None)
         
-        # Step 2: Strict high-confidence schema fallback (only if exact table name doesn't exist)
+        # Step 2: Strict high-confidence schema fallback ONLY if filename is a variant/partition/copy of an existing table
+        # (Files with different base names like SalesHistory vs CurrentSales must remain distinct tables!)
         if not target_candidate and len(sample.columns) > 0:
             best_match = None
             best_ratio = 0.0
             for t_name, t_cols in schema_map.items():
-                if t_cols:
+                if t_cols and _is_partition_or_copy_of(default_table_name, t_name):
                     intersection_count = len(set(sample.columns).intersection(t_cols))
                     overlap_ratio = intersection_count / max(len(sample.columns), len(t_cols))
                     if overlap_ratio >= 0.70 and overlap_ratio > best_ratio:

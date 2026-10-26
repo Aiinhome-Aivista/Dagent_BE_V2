@@ -504,19 +504,24 @@ def get_actual_column_name(cursor, table_name, expected_name):
         cursor.execute(f"SHOW COLUMNS FROM {table_name}")
         columns = [row['Field'] for row in cursor.fetchall()]
         
-        target = expected_name.lower().replace('_', '').replace(' ', '')
+        candidates = expected_name if isinstance(expected_name, (list, tuple)) else [expected_name]
         
-        # 1. Exact match
-        for col in columns:
-            if col == expected_name: return f"`{col}`"
-                
-        # 2. Case insensitive match
-        for col in columns:
-            if col.lower() == expected_name.lower(): return f"`{col}`"
-                
-        # 3. Fuzzy match
-        for col in columns:
-            if col.lower().replace('_', '').replace(' ', '') == target: return f"`{col}`"
+        for cand in candidates:
+            # 1. Exact match
+            for col in columns:
+                if col == cand:
+                    return f"`{col}`"
+                    
+            # 2. Case insensitive match
+            for col in columns:
+                if col.lower() == cand.lower():
+                    return f"`{col}`"
+                    
+            # 3. Fuzzy match
+            target = cand.lower().replace('_', '').replace(' ', '')
+            for col in columns:
+                if col.lower().replace('_', '').replace(' ', '') == target:
+                    return f"`{col}`"
                 
     except Exception as e:
         print(f"Error fetching columns for {table_name}: {e}")
@@ -587,7 +592,7 @@ def get_best_table_for_session(cursor, session_id, required_columns):
 # tyre_sales_data_controller
 
 def get_query_context_for_session(cursor, session_id, required_metrics, optional_dims):
-    # required_metrics and optional_dims are now dictionaries: { "key_name": ["opt1", "opt2", ...] }
+    # required_metrics and optional_dims are dictionaries: { "key_name": ["opt1", "opt2", ...] }
     cursor.execute("""
         SELECT DISTINCT new_user_db, table_name 
         FROM external_db_sync_log 
@@ -596,14 +601,33 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
           AND table_name IS NOT NULL
     """, (session_id,))
     rows = cursor.fetchall()
+    
+    # Fallback to most recent synced db if session not found
+    if not rows:
+        cursor.execute("""
+            SELECT DISTINCT new_user_db, table_name 
+            FROM external_db_sync_log 
+            WHERE new_user_db IS NOT NULL AND new_user_db != '' AND table_name IS NOT NULL
+            ORDER BY id DESC LIMIT 10
+        """)
+        rows = cursor.fetchall()
+
     if not rows:
         return None, None, {}
 
     user_db = rows[0]["new_user_db"]
     synced_tables = [r["table_name"] for r in rows]
     
+    # Also fetch all tables in user_db so we don't miss any synced SAP views/tables
+    try:
+        cursor.execute(f"SHOW TABLES FROM `{user_db}`")
+        db_tables = [list(r.values())[0] for r in cursor.fetchall()]
+        all_tables = list(dict.fromkeys(synced_tables + db_tables))
+    except Exception:
+        all_tables = synced_tables
+
     table_columns = {}
-    for tbl in synced_tables:
+    for tbl in all_tables:
         try:
             cursor.execute(f"DESCRIBE `{user_db}`.`{tbl}`")
             cols = cursor.fetchall()
@@ -612,203 +636,176 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
             pass
 
     def check_match(cols_dict, opts_list):
+        if not cols_dict:
+            return None
         for opt in opts_list:
             clean_opt = opt.lower().replace(' ', '').replace('_', '')
             if clean_opt in cols_dict:
                 return cols_dict[clean_opt]
         return None
 
-    # Find the fact table
-    fact_table = None
-    
-    # ALWAYS prioritize sales_data if it exists
-    for tbl in table_columns.keys():
-        if "sales_data" in tbl.lower():
-            fact_table = tbl
-            break
-            
-    # Fallback to original logic if sales_data is not found
-    if not fact_table:
-        for tbl, cols in table_columns.items():
-            req_keys = list(required_metrics.keys())
-            # Check if first required metric is in this table
-            if req_keys and check_match(cols, required_metrics[req_keys[0]]):
-                fact_table = tbl
-                if any("invoice" in k for k in cols.keys()):
-                    break
-    
-    if not fact_table:
-        fact_table = synced_tables[0] if synced_tables else None
-        
-    if not fact_table:
+    def find_tbl(candidates):
+        for cand in candidates:
+            clean_cand = cand.lower().replace('_', '').replace('-', '')
+            for tbl in table_columns.keys():
+                clean_tbl = tbl.lower().replace('_', '').replace('-', '')
+                if clean_cand in clean_tbl:
+                    return tbl
+        return None
+
+    # Identify tables (SAP Views & Legacy Tables)
+    curr_sales_tbl = find_tbl(["zpvfsdcurrentsales", "currentsales", "current_sales"])
+    hist_sales_tbl = find_tbl(["zpvfsdsaleshistory", "saleshistory", "sales_history"])
+    sales_data_tbl = find_tbl(["salesdata", "sales_data"])
+    cust_tbl = find_tbl(["zivfcustomermaster", "customermaster", "customer"])
+    terr_tbl = find_tbl(["zivfterritorymaster", "territorymaster", "territory"])
+    reg_tbl = find_tbl(["zivfregionmaster", "regionmaster", "region"])
+    zone_tbl = find_tbl(["zivfzonemaster", "zonemaster", "zone"])
+    sku_tbl = find_tbl(["zivrskumaster", "skumaster", "materialmaster", "material", "sku"])
+    cat_tbl = find_tbl(["zivfcategorymaster", "categorymaster", "category"])
+    tyre_tbl = find_tbl(["tyretypemaster", "tyretype"])
+
+    # Determine fact table / subquery
+    fact_from = None
+    fact_cols = {}
+
+    if curr_sales_tbl and hist_sales_tbl:
+        fact_from = f"(SELECT * FROM `{user_db}`.`{curr_sales_tbl}` UNION ALL SELECT * FROM `{user_db}`.`{hist_sales_tbl}`) s"
+        fact_cols = table_columns.get(curr_sales_tbl) or table_columns.get(hist_sales_tbl) or {}
+    elif curr_sales_tbl:
+        fact_from = f"`{user_db}`.`{curr_sales_tbl}` s"
+        fact_cols = table_columns.get(curr_sales_tbl, {})
+    elif hist_sales_tbl:
+        fact_from = f"`{user_db}`.`{hist_sales_tbl}` s"
+        fact_cols = table_columns.get(hist_sales_tbl, {})
+    elif sales_data_tbl:
+        fact_from = f"`{user_db}`.`{sales_data_tbl}` s"
+        fact_cols = table_columns.get(sales_data_tbl, {})
+    else:
+        # Fallback to any table matching first required metric
+        req_keys = list(required_metrics.keys())
+        first_req = req_keys[0] if req_keys else None
+        found_fact = None
+        if first_req:
+            for tbl, cols in table_columns.items():
+                if check_match(cols, required_metrics[first_req]):
+                    found_fact = tbl
+                    if any("invoice" in k for k in cols.keys()):
+                        break
+        if not found_fact and all_tables:
+            found_fact = all_tables[0]
+        if found_fact:
+            fact_from = f"`{user_db}`.`{found_fact}` s"
+            fact_cols = table_columns.get(found_fact, {})
+
+    if not fact_from or not fact_cols:
         return None, None, {}
 
-    resolved_cols = {}
-    
-    all_metrics = {**required_metrics, **optional_dims}
-    
-    # --- MULTI-HOP LOGIC FOR SALES_DATA ---
-    # Since zone is in region_master, it requires a 3-hop join from sales_data.
-    # We must handle this explicitly because the generic logic below only does single-hop.
-    fact_table_actual = None
-    for tbl in table_columns.keys():
-        if "sales_data" in tbl.lower():
-            fact_table_actual = tbl
-            break
-
-    if fact_table_actual and "sales_data" in fact_table.lower():
-        synced_lower = {t.lower(): t for t in synced_tables}
-        from_clause = f"`{user_db}`.`{fact_table_actual}` s"
-        joins = []
-        
-        def add_join(table_key, alias, on_clause):
-            if table_key in synced_lower:
-                actual_tbl = synced_lower[table_key]
-                joins.append(f"LEFT JOIN `{user_db}`.`{actual_tbl}` {alias} ON {on_clause}")
-                return True
-            return False
-
-        add_join("customer_master", "cm", "s.`customer` = cm.`KUNNR`")
-        add_join("territory_master", "tm", "cm.`territory` = tm.`territory_code`")
-        add_join("region_master", "rm", "tm.`region_code` = rm.`region`")
-        sm_table = None
-        if "material_master" in synced_lower:
-            sm_table = synced_lower["material_master"]
-            add_join("material_master", "sm", "s.`material` = sm.`MATNR`")
-        elif "sku_master" in synced_lower:
-            sm_table = synced_lower["sku_master"]
-            add_join("sku_master", "sm", "s.`material` = sm.`MATNR`")
-            
-        if sm_table:
-            sm_cols = table_columns.get(sm_table, {})
-            tyre_col = check_match(sm_cols, ["tyre_type", "tyretype"])
-            if tyre_col:
-                add_join("tyre_type_master", "ttm", f"sm.`{tyre_col}` = ttm.`tyre_type_code`")
-            cat_col = check_match(sm_cols, ["category"])
-            if cat_col:
-                add_join("category_master", "catm", f"sm.`{cat_col}` = catm.`category_code`")
-            cons_col = check_match(sm_cols, ["construction"])
-            if cons_col:
-                add_join("construction_master", "consm", f"sm.`{cons_col}` = consm.`construction_code`")
-            
-        from_clause += " " + " ".join(joins)
-
-        resolved_cols = {}
-        alias_map = {
-            "customer_master": "cm",
-            "territory_master": "tm",
-            "region_master": "rm",
-            "tyre_type_master": "ttm",
-            "category_master": "catm",
-            "construction_master": "consm",
-            "sku_master": "sm",
-            "material_master": "sm"
-        }
-        
-        for req_key, opts in all_metrics.items():
-            found = check_match(table_columns[fact_table_actual], opts)
-            if found:
-                resolved_cols[req_key] = f"s.`{found}`"
-                continue
-            resolved = False
-            for tbl_key, alias in alias_map.items():
-                if tbl_key in synced_lower:
-                    actual_tbl = synced_lower[tbl_key]
-                    found = check_match(table_columns[actual_tbl], opts)
-                    if found:
-                        resolved_cols[req_key] = f"{alias}.`{found}`"
-                        resolved = True
-                        break
-            if not resolved:
-                resolved_cols[req_key] = None
-                
-        # If required metrics are met, return immediately
-        missing_required = False
-        for req_key in required_metrics.keys():
-            if not resolved_cols.get(req_key):
-                missing_required = True
-                
-        if not missing_required:
-            return from_clause, user_db, resolved_cols
-
-    # --- GENERIC SINGLE-HOP LOGIC FALLBACK ---
-    resolved_cols = {}
-    
-    # Try to find all columns in fact_table first
-    for req_key, opts in all_metrics.items():
-        found = check_match(table_columns[fact_table], opts)
-        if found:
-            resolved_cols[req_key] = f"s.`{found}`"
-        else:
-            resolved_cols[req_key] = None
-
+    # Build Joins
     joins = []
-    dim_count = 1
-    
+
+    # 1. Customer Master `cm`
+    if cust_tbl:
+        s_cust = check_match(fact_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
+        c_cust = check_match(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
+        if s_cust and c_cust:
+            joins.append(f"LEFT JOIN `{user_db}`.`{cust_tbl}` cm ON s.`{s_cust}` = cm.`{c_cust}`")
+
+    # 2. Territory Master `tm`
+    if terr_tbl and cust_tbl:
+        c_terr = check_match(table_columns[cust_tbl], ["bzirk", "territory", "territory_code"])
+        t_terr = check_match(table_columns[terr_tbl], ["bzirk", "territory_code", "territory"])
+        if c_terr and t_terr:
+            joins.append(f"LEFT JOIN `{user_db}`.`{terr_tbl}` tm ON cm.`{c_terr}` = tm.`{t_terr}`")
+
+    # 3. Region Master `rm`
+    if reg_tbl:
+        if terr_tbl and any("tm" in j for j in joins):
+            t_reg = check_match(table_columns[terr_tbl], ["regio", "region_code", "region"])
+            r_reg = check_match(table_columns[reg_tbl], ["region_code", "region", "regio"])
+            if t_reg and r_reg:
+                joins.append(f"LEFT JOIN `{user_db}`.`{reg_tbl}` rm ON tm.`{t_reg}` = rm.`{r_reg}`")
+        elif cust_tbl and any("cm" in j for j in joins):
+            c_reg = check_match(table_columns[cust_tbl], ["regio", "region_code", "region"])
+            r_reg = check_match(table_columns[reg_tbl], ["region_code", "region", "regio"])
+            if c_reg and r_reg:
+                joins.append(f"LEFT JOIN `{user_db}`.`{reg_tbl}` rm ON cm.`{c_reg}` = rm.`{r_reg}`")
+
+    # 4. Zone Master `zm`
+    if zone_tbl:
+        if reg_tbl and any("rm" in j for j in joins):
+            r_zone = check_match(table_columns[reg_tbl], ["zone_code", "zone", "p_zone"])
+            z_zone = check_match(table_columns[zone_tbl], ["p_zone", "zone_code", "zone"])
+            if r_zone and z_zone:
+                joins.append(f"LEFT JOIN `{user_db}`.`{zone_tbl}` zm ON rm.`{r_zone}` = zm.`{z_zone}`")
+        elif cust_tbl and any("cm" in j for j in joins):
+            c_zone = check_match(table_columns[cust_tbl], ["p_zone", "zone_code", "zone"])
+            z_zone = check_match(table_columns[zone_tbl], ["p_zone", "zone_code", "zone"])
+            if c_zone and z_zone:
+                joins.append(f"LEFT JOIN `{user_db}`.`{zone_tbl}` zm ON cm.`{c_zone}` = zm.`{z_zone}`")
+        elif terr_tbl and any("tm" in j for j in joins):
+            t_zone = check_match(table_columns[terr_tbl], ["p_zone", "zone_code", "zone"])
+            z_zone = check_match(table_columns[zone_tbl], ["p_zone", "zone_code", "zone"])
+            if t_zone and z_zone:
+                joins.append(f"LEFT JOIN `{user_db}`.`{zone_tbl}` zm ON tm.`{t_zone}` = zm.`{z_zone}`")
+
+    # 5. SKU Master `sm`
+    if sku_tbl:
+        s_mat = check_match(fact_cols, ["sku", "material", "matnr"])
+        sm_mat = check_match(table_columns[sku_tbl], ["matnr", "sku", "material"])
+        if s_mat and sm_mat:
+            joins.append(f"LEFT JOIN `{user_db}`.`{sku_tbl}` sm ON s.`{s_mat}` = sm.`{sm_mat}`")
+
+    # 6. Category Master `catm`
+    if cat_tbl and sku_tbl and any("sm" in j for j in joins):
+        sm_cat = check_match(table_columns[sku_tbl], ["cat_code", "category", "catg", "prd_cat"])
+        catm_cat = check_match(table_columns[cat_tbl], ["cat_code", "category_code", "category"])
+        if sm_cat and catm_cat:
+            joins.append(f"LEFT JOIN `{user_db}`.`{cat_tbl}` catm ON sm.`{sm_cat}` = catm.`{catm_cat}`")
+
+    # 7. Tyre Type Master `ttm` (if legacy tyre_type_master exists)
+    if tyre_tbl and sku_tbl and any("sm" in j for j in joins):
+        sm_tyre = check_match(table_columns[sku_tbl], ["tyre_type", "tyretype"])
+        ttm_tyre = check_match(table_columns[tyre_tbl], ["tyre_type_code", "tyre_type"])
+        if sm_tyre and ttm_tyre:
+            joins.append(f"LEFT JOIN `{user_db}`.`{tyre_tbl}` ttm ON sm.`{sm_tyre}` = ttm.`{ttm_tyre}`")
+
+    # Column resolution order:
+    alias_map = [
+        ("s", fact_cols),
+        ("ttm", table_columns.get(tyre_tbl, {}) if tyre_tbl and any("ttm" in j for j in joins) else {}),
+        ("catm", table_columns.get(cat_tbl, {}) if cat_tbl and any("catm" in j for j in joins) else {}),
+        ("zm", table_columns.get(zone_tbl, {}) if zone_tbl and any("zm" in j for j in joins) else {}),
+        ("rm", table_columns.get(reg_tbl, {}) if reg_tbl and any("rm" in j for j in joins) else {}),
+        ("tm", table_columns.get(terr_tbl, {}) if terr_tbl and any("tm" in j for j in joins) else {}),
+        ("sm", table_columns.get(sku_tbl, {}) if sku_tbl and any("sm" in j for j in joins) else {}),
+        ("cm", table_columns.get(cust_tbl, {}) if cust_tbl and any("cm" in j for j in joins) else {}),
+    ]
+
+    resolved_cols = {}
+    all_metrics = {**required_metrics, **optional_dims}
+
     for req_key, opts in all_metrics.items():
-        if resolved_cols.get(req_key) is not None:
-            continue
-            
-        for tbl in synced_tables:
-            if tbl == fact_table: continue
-            
-            found_col = check_match(table_columns[tbl], opts)
-            if found_col:
-                alias = f"t{dim_count}"
-                # Join key
-                # Compare original keys but ignoring spaces and underscores
-                common_cols = set(table_columns[fact_table].keys()) & set(table_columns[tbl].keys())
-                join_key = None
-                # Check for special mappings first (like material -> MATNR, customer -> KUNNR)
-                fact_keys = table_columns[fact_table].keys()
-                dim_keys = table_columns[tbl].keys()
-                
-                join_col_fact = None
-                join_col_dim = None
-                
-                if "material" in fact_keys and "matnr" in dim_keys:
-                    join_col_fact = table_columns[fact_table]["material"]
-                    join_col_dim = table_columns[tbl]["matnr"]
-                    join_key = "special_mapping"
-                elif "customer" in fact_keys and "kunnr" in dim_keys:
-                    join_col_fact = table_columns[fact_table]["customer"]
-                    join_col_dim = table_columns[tbl]["kunnr"]
-                    join_key = "special_mapping"
-                elif "territory" in fact_keys and "territorycode" in dim_keys:
-                    join_col_fact = table_columns[fact_table]["territory"]
-                    join_col_dim = table_columns[tbl]["territorycode"]
-                    join_key = "special_mapping"
-                elif "regioncode" in fact_keys and "region" in dim_keys:
-                    join_col_fact = table_columns[fact_table]["regioncode"]
-                    join_col_dim = table_columns[tbl]["region"]
-                    join_key = "special_mapping"
-                else:
-                    for pref in ["material", "customer", "plant", "id", "oldcode"]:
-                        if pref in common_cols:
-                            join_key = pref
-                            break
-                    if not join_key and common_cols:
-                        join_key = list(common_cols)[0]
-                        
-                    if join_key:
-                        join_col_fact = table_columns[fact_table][join_key]
-                        join_col_dim = table_columns[tbl][join_key]
-                        
-                if join_key:
-                    joins.append(f"LEFT JOIN `{user_db}`.`{tbl}` {alias} ON s.`{join_col_fact}` = {alias}.`{join_col_dim}`")
-                    resolved_cols[req_key] = f"{alias}.`{found_col}`"
-                    dim_count += 1
-                    break
-                    
+        found_expr = None
+        for alias, cols in alias_map:
+            if not cols:
+                continue
+            matched = check_match(cols, opts)
+            if matched:
+                found_expr = f"{alias}.`{matched}`"
+                break
+        resolved_cols[req_key] = found_expr
+
+    # If any required metric is missing, return None
     for req_key in required_metrics.keys():
         if not resolved_cols.get(req_key):
             return None, None, {}
-            
-    from_clause = f"`{user_db}`.`{fact_table}` s"
+
+    from_clause = fact_from
     if joins:
         unique_joins = list(dict.fromkeys(joins))
         from_clause += " " + " ".join(unique_joins)
-        
+
     return from_clause, user_db, resolved_cols
 
 def tyre_sales_data_controller(get_db_connection):
@@ -848,20 +845,20 @@ def tyre_sales_data_controller(get_db_connection):
             return any(f and str(f).strip().lower() != "all" for f in filters)
 
         required_metrics = {
-            "vehicle_type": ["tyre_type_name", "tyre_type_description", "tyre_type_desc", "vehicle_type", "tyre_type", "category_name", "category"],
-            "invoice_value": ["invoice_value", "taxable_value", "revenue", "Invoice_Value_INR"]
+            "vehicle_type": ["tyre_type_name", "tyre_type", "vehicle_type", "maktx", "tyre_type_description", "tyre_type_desc", "category_name", "category"],
+            "invoice_value": ["invoice_value", "ndp_value", "taxable_value", "revenue", "Invoice_Value_INR"]
         }
         optional_dims = {}
         if has_valid_filters(selected_years):
             optional_dims["invoice_date"] = ["invoice_date", "date", "billing__doc_date"]
         if has_valid_filters(selected_customer_categories):
-            optional_dims["customer_category"] = ["customer_type", "customer_category", "cust_type", "type"]
+            optional_dims["customer_category"] = ["ch_type", "ktokd", "customer_type", "customer_category", "cust_type", "type"]
         if has_valid_filters(selected_zones):
-            optional_dims["zone"] = ["Zone", "zone"]
+            optional_dims["zone"] = ["name", "p_zone", "Zone", "zone"]
         if has_valid_filters(selected_regions):
-            optional_dims["region"] = ["Region", "region"]
+            optional_dims["region"] = ["region_name", "region_code", "Region", "region", "regio"]
         if has_valid_filters(selected_constructions):
-            optional_dims["construction_type"] = ["construction_type", "construction"]
+            optional_dims["construction_type"] = ["constuction", "construction_type", "construction"]
         from_clause, user_db, cols = get_query_context_for_session(cursor, session_id, required_metrics, optional_dims)
 
         if not from_clause:
@@ -1151,12 +1148,6 @@ def dashboard_filters_controller(get_db_connection):
                 ORDER BY id DESC LIMIT 1
             """)
             row = cursor.fetchone()
-        
-        table_name = None
-        actual_cat = None
-        actual_const = None
-        actual_tyre = None
-        actual_date = None
 
         if row:
             user_db = row["new_user_db"]
@@ -1164,15 +1155,13 @@ def dashboard_filters_controller(get_db_connection):
             cursor.execute("SHOW TABLES")
             tables = [list(r.values())[0] for r in cursor.fetchall()]
             
-            # Find categories across all tables
+            # Find categories across all tables (SAP CategoryMaster has CAT_DESC, SKUMaster has CATG/PRD_CAT)
             for tbl in tables:
                 t_name = f"`{user_db}`.`{tbl}`"
-                cat = get_actual_column_name(cursor, t_name, "product_category") or \
-                      get_actual_column_name(cursor, t_name, "category") or \
-                      get_actual_column_name(cursor, t_name, "product_type")
+                cat = get_actual_column_name(cursor, t_name, ["cat_desc", "catg", "prd_cat", "product_category", "category", "product_type"])
                 if cat:
                     try:
-                        cursor.execute(f"SELECT DISTINCT {cat} as val FROM {t_name} WHERE {cat} IS NOT NULL AND {cat} != ''")
+                        cursor.execute(f"SELECT DISTINCT {cat} as val FROM {t_name} WHERE {cat} IS NOT NULL AND {cat} != '' ORDER BY val ASC")
                         res = [r["val"] for r in cursor.fetchall() if r["val"]]
                         if res:
                             filters_data["categories"] = res
@@ -1180,14 +1169,13 @@ def dashboard_filters_controller(get_db_connection):
                     except Exception as e:
                         print(f"Error fetching categories from {t_name}: {e}")
 
-            # Find constructions across all tables
+            # Find constructions across all tables (SAP SKUMaster has CONSTUCTION)
             for tbl in tables:
                 t_name = f"`{user_db}`.`{tbl}`"
-                const = get_actual_column_name(cursor, t_name, "construction_type") or \
-                        get_actual_column_name(cursor, t_name, "construction")
+                const = get_actual_column_name(cursor, t_name, ["constuction", "construction_type", "construction"])
                 if const:
                     try:
-                        cursor.execute(f"SELECT DISTINCT {const} as val FROM {t_name} WHERE {const} IS NOT NULL AND {const} != ''")
+                        cursor.execute(f"SELECT DISTINCT {const} as val FROM {t_name} WHERE {const} IS NOT NULL AND {const} != '' ORDER BY val ASC")
                         res = [r["val"] for r in cursor.fetchall() if r["val"]]
                         if res:
                             filters_data["constructions"] = res
@@ -1195,13 +1183,13 @@ def dashboard_filters_controller(get_db_connection):
                     except Exception as e:
                         print(f"Error fetching constructions from {t_name}: {e}")
 
-            # Find tyreTypes across all tables
+            # Find tyreTypes across all tables (SAP SKUMaster has TYRE_TYPE)
             for tbl in tables:
                 t_name = f"`{user_db}`.`{tbl}`"
-                tyre = get_actual_column_name(cursor, t_name, "vehicle_type")
+                tyre = get_actual_column_name(cursor, t_name, ["tyre_type", "vehicle_type", "tyre_type_name"])
                 if tyre:
                     try:
-                        cursor.execute(f"SELECT DISTINCT {tyre} as val FROM {t_name} WHERE {tyre} IS NOT NULL AND {tyre} != ''")
+                        cursor.execute(f"SELECT DISTINCT {tyre} as val FROM {t_name} WHERE {tyre} IS NOT NULL AND {tyre} != '' ORDER BY val ASC")
                         res = [r["val"] for r in cursor.fetchall() if r["val"]]
                         if res:
                             filters_data["tyreTypes"] = res
@@ -1209,30 +1197,30 @@ def dashboard_filters_controller(get_db_connection):
                     except Exception as e:
                         print(f"Error fetching tyreTypes from {t_name}: {e}")
 
-            # Find years and months across all tables
+            # Find years and months across all tables (both CurrentSales and SalesHistory)
+            all_years = set()
+            month_map = {}
             for tbl in tables:
                 t_name = f"`{user_db}`.`{tbl}`"
-                date_col = get_actual_column_name(cursor, t_name, "invoice_date") or \
-                           get_actual_column_name(cursor, t_name, "date")
+                date_col = get_actual_column_name(cursor, t_name, ["invoice_date", "date", "billing__doc_date"])
                 if date_col:
                     try:
                         cursor.execute(f"SELECT DISTINCT YEAR({date_col}) as yr FROM {t_name} WHERE {date_col} IS NOT NULL ORDER BY yr ASC")
-                        res_yrs = [int(r["yr"]) for r in cursor.fetchall() if r["yr"]]
+                        for r in cursor.fetchall():
+                            if r["yr"]:
+                                all_years.add(int(r["yr"]))
                         
                         cursor.execute(f"SELECT DISTINCT MONTHNAME({date_col}) as m_name, MONTH({date_col}) as m_num FROM {t_name} WHERE {date_col} IS NOT NULL ORDER BY m_num ASC")
-                        res_mths = [r["m_name"] for r in cursor.fetchall() if r["m_name"]]
-                        
-                        if res_yrs or res_mths:
-                            filters_data["years"] = res_yrs
-                            filters_data["months"] = res_mths
-                            break
+                        for r in cursor.fetchall():
+                            if r["m_name"] and r["m_name"] not in month_map:
+                                month_map[r["m_name"]] = r["m_num"]
                     except Exception as e:
                         print(f"Error fetching dates from {t_name}: {e}")
-                
-        # Debug info
-        debug_info = {
-            "tables_scanned": len(tables) if row else 0,
-        }
+            
+            if all_years:
+                filters_data["years"] = sorted(list(all_years))
+            if month_map:
+                filters_data["months"] = [m[0] for m in sorted(month_map.items(), key=lambda x: x[1])]
 
         return jsonify({
             "status": "success",
@@ -1291,18 +1279,18 @@ def sales_by_zone_data_controller(get_db_connection):
             return any(f and str(f).strip().lower() != "all" for f in filters)
 
         required_metrics = {
-            "zone": ["Zone", "zone"],
-            "invoice_value": ["Invoice_Value", "invoice_value", "Taxable_Value", "taxable_value", "Invoice_Value_INR"]
+            "zone": ["name", "p_zone", "Zone", "zone"],
+            "invoice_value": ["invoice_value", "ndp_value", "Invoice_Value", "taxable_value", "Invoice_Value_INR"]
         }
         optional_dims = {}
         if has_valid_filters(selected_years) or has_valid_filters(selected_months):
             optional_dims["invoice_date"] = ["invoice_date", "date", "billing__doc_date"]
         if product_type and product_type.lower() != 'all':
-            optional_dims["customer_category"] = ["CATEGORY", "product_category", "category"]
+            optional_dims["customer_category"] = ["cat_desc", "category", "product_category", "catg", "prd_cat"]
         if vehicle_type and vehicle_type.lower() != 'all':
-            optional_dims["vehicle_type"] = ["vehicle_type"]
+            optional_dims["vehicle_type"] = ["tyre_type", "vehicle_type", "tyre_type_name", "maktx"]
         if construction_type and construction_type.lower() != 'all':
-            optional_dims["construction_type"] = ["CONSTRUCTION", "construction_type", "construction"]
+            optional_dims["construction_type"] = ["constuction", "CONSTRUCTION", "construction_type", "construction"]
         from_clause, user_db, cols = get_query_context_for_session(cursor, session_id, required_metrics, optional_dims)
 
         if not from_clause:
@@ -1312,6 +1300,13 @@ def sales_by_zone_data_controller(get_db_connection):
         
         actual_zone = cols["zone"]
         actual_invoice_value = cols["invoice_value"]
+
+        revenue_expr = f"""
+            CAST(
+                REPLACE(TRIM({actual_invoice_value}), ',', '')
+                AS DECIMAL(18,2)
+            )
+        """
 
         actual_invoice_date = cols.get("invoice_date")
         actual_cat = cols.get("customer_category")
@@ -1370,7 +1365,7 @@ def sales_by_zone_data_controller(get_db_connection):
             query = f"""
                 SELECT
                     {actual_zone} as zone,
-                    ROUND(SUM({actual_invoice_value}), 2) AS sales_value
+                    ROUND(SUM({revenue_expr}), 2) AS sales_value
                 FROM {from_clause}
                 WHERE {where_sql}
                 GROUP BY {actual_zone}
@@ -1495,16 +1490,16 @@ def year_wise_sales_comparison_controller(get_db_connection):
             return any(f and str(f).strip().lower() != "all" for f in filters)
 
         required_metrics = {
-            "invoice_value": ["Invoice_Value", "invoice_value", "Taxable_Value", "taxable_value", "Invoice_Value_INR"],
+            "invoice_value": ["invoice_value", "ndp_value", "Invoice_Value", "taxable_value", "Invoice_Value_INR"],
             "invoice_date": ["invoice_date", "date", "billing__doc_date"]
         }
         optional_dims = {}
         if has_valid_filters(selected_zones):
-            optional_dims["zone"] = ["Zone", "zone"]
+            optional_dims["zone"] = ["name", "p_zone", "Zone", "zone"]
         if has_valid_filters(selected_regions):
-            optional_dims["region"] = ["Region", "region"]
+            optional_dims["region"] = ["region_name", "region_code", "Region", "region", "regio"]
         if has_valid_filters(selected_customer_types):
-            optional_dims["customer_type"] = ["customer_type", "customer_category", "cust_type", "type"]
+            optional_dims["customer_type"] = ["ch_type", "ktokd", "customer_type", "customer_category", "cust_type", "type"]
 
         from_clause, user_db, cols = get_query_context_for_session(cursor, session_id, required_metrics, optional_dims)
 
@@ -1730,12 +1725,12 @@ def available_years_controller(get_db_connection):
         cursor.execute("SHOW TABLES")
         tables = [list(r.values())[0] for r in cursor.fetchall()]
 
-        # 1. Fetch Years and Months
+        # 1. Fetch Years and Months across all sales tables (CurrentSales & SalesHistory)
+        all_years = set()
+        month_map = {}
         for tbl in tables:
             t_name = f"`{user_db}`.`{tbl}`"
-            actual_invoice_date = (get_actual_column_name(cursor, t_name, "invoice_date") or 
-                                   get_actual_column_name(cursor, t_name, "date") or
-                                   get_actual_column_name(cursor, t_name, "billing__doc_date"))
+            actual_invoice_date = get_actual_column_name(cursor, t_name, ["invoice_date", "date", "billing__doc_date"])
             if actual_invoice_date:
                 try:
                     cursor.execute(f"SELECT 1 FROM {t_name} LIMIT 1")
@@ -1746,7 +1741,9 @@ def available_years_controller(get_db_connection):
                             WHERE {actual_invoice_date} IS NOT NULL 
                             ORDER BY yr ASC
                         """)
-                        years = [int(r["yr"]) for r in cursor.fetchall() if r["yr"]]
+                        for r in cursor.fetchall():
+                            if r["yr"]:
+                                all_years.add(int(r["yr"]))
 
                         cursor.execute(f"""
                             SELECT DISTINCT MONTHNAME({actual_invoice_date}) as m_name, MONTH({actual_invoice_date}) as m_num
@@ -1754,17 +1751,21 @@ def available_years_controller(get_db_connection):
                             WHERE {actual_invoice_date} IS NOT NULL
                             ORDER BY m_num ASC
                         """)
-                        months = [r["m_name"] for r in cursor.fetchall() if r["m_name"]]
-                        if years or months:
-                            break
+                        for r in cursor.fetchall():
+                            if r["m_name"] and r["m_name"] not in month_map:
+                                month_map[r["m_name"]] = r["m_num"]
                 except Exception as e:
                     print(f"Error fetching dates from {t_name}: {e}")
+        if all_years:
+            years = sorted(list(all_years))
+        if month_map:
+            months = [m[0] for m in sorted(month_map.items(), key=lambda x: x[1])]
 
-        # 2. Fetch Zones
+        # 2. Fetch Zones (SAP ZoneMaster has NAME and P_ZONE, CustomerMaster has P_ZONE)
         for tbl in tables:
             t_name = f"`{user_db}`.`{tbl}`"
-            actual_zone = get_actual_column_name(cursor, t_name, "zone")
-            if actual_zone:
+            actual_zone = get_actual_column_name(cursor, t_name, ["name", "p_zone", "zone"])
+            if actual_zone and any(z in tbl.lower() for z in ["zone", "customer"]):
                 try:
                     cursor.execute(f"SELECT 1 FROM {t_name} LIMIT 1")
                     if cursor.fetchone():
@@ -1780,11 +1781,11 @@ def available_years_controller(get_db_connection):
                 except Exception as e:
                     print(f"Error fetching zones from {t_name}: {e}")
 
-        # 3. Fetch Regions
+        # 3. Fetch Regions (SAP RegionMaster has region_name, TerritoryMaster has NAME/REGIO)
         for tbl in tables:
             t_name = f"`{user_db}`.`{tbl}`"
-            actual_region = get_actual_column_name(cursor, t_name, "region")
-            if actual_region:
+            actual_region = get_actual_column_name(cursor, t_name, ["region_name", "region_code", "region", "regio"])
+            if actual_region and any(r in tbl.lower() for r in ["region", "territory"]):
                 try:
                     cursor.execute(f"SELECT 1 FROM {t_name} LIMIT 1")
                     if cursor.fetchone():
@@ -1800,14 +1801,11 @@ def available_years_controller(get_db_connection):
                 except Exception as e:
                     print(f"Error fetching regions from {t_name}: {e}")
 
-        # 4. Fetch Customer Types
+        # 4. Fetch Customer Types (SAP CustomerMaster has CH_TYPE e.g. DL, and KTOKD e.g. Z001)
         for tbl in tables:
             t_name = f"`{user_db}`.`{tbl}`"
-            actual_customer_type = (get_actual_column_name(cursor, t_name, "customer_type") or 
-                                    get_actual_column_name(cursor, t_name, "customer_category") or 
-                                    get_actual_column_name(cursor, t_name, "cust_type") or 
-                                    get_actual_column_name(cursor, t_name, "type"))
-            if actual_customer_type:
+            actual_customer_type = get_actual_column_name(cursor, t_name, ["ch_type", "ktokd", "customer_type", "customer_category", "cust_type", "type"])
+            if actual_customer_type and "customer" in tbl.lower():
                 try:
                     cursor.execute(f"SELECT 1 FROM {t_name} LIMIT 1")
                     if cursor.fetchone():
@@ -1823,12 +1821,11 @@ def available_years_controller(get_db_connection):
                 except Exception as e:
                     print(f"Error fetching customer types from {t_name}: {e}")
 
-        # 5. Fetch Construction Types
+        # 5. Fetch Construction Types (SAP SKUMaster has CONSTUCTION)
         for tbl in tables:
             t_name = f"`{user_db}`.`{tbl}`"
-            actual_construction_type = (get_actual_column_name(cursor, t_name, "construction_type") or 
-                                        get_actual_column_name(cursor, t_name, "construction"))
-            if actual_construction_type:
+            actual_construction_type = get_actual_column_name(cursor, t_name, ["constuction", "construction_type", "construction"])
+            if actual_construction_type and any(s in tbl.lower() for s in ["sku", "material", "construction"]):
                 try:
                     cursor.execute(f"SELECT 1 FROM {t_name} LIMIT 1")
                     if cursor.fetchone():
@@ -1948,83 +1945,110 @@ def default_dashboard_metrics_controller(get_db_connection):
         # Switch to the user's database just to be safe, though fully qualified name works
         cursor.execute(f"USE `{user_db}`")
 
+        # Fetch all tables in user_db so we never miss any synced SAP views or tables
+        cursor.execute("SHOW TABLES")
+        db_tables = [list(r.values())[0] for r in cursor.fetchall()]
+        all_tables = list(dict.fromkeys(session_tables + db_tables))
+
         table_columns = {}
-        for tbl in session_tables:
+        for tbl in all_tables:
             try:
                 cursor.execute(f"DESCRIBE `{tbl}`")
                 cols = cursor.fetchall()
-                table_columns[tbl] = {col["Field"].lower(): col["Field"] for col in cols}
+                table_columns[tbl] = {col["Field"].lower().replace(' ', '').replace('_', ''): col["Field"] for col in cols}
             except Exception as e:
                 print(f"[Default Metrics] Describe table {tbl} failed: {e}")
 
-        # Find the table that contains invoice_value
-        sales_table = None
-        for tbl, cols in table_columns.items():
-            if (
-                "invoice_value" in cols
-                or "invoice_value_inr" in cols
-                or "taxable_value" in cols
-                or "taxable_value_inr" in cols
-                or "ndp_inr" in cols
-            ):
-                sales_table = tbl
-                break
+        def check_col(cols_dict, opts_list):
+            if not cols_dict:
+                return None
+            for opt in opts_list:
+                clean_opt = opt.lower().replace(' ', '').replace('_', '')
+                if clean_opt in cols_dict:
+                    return cols_dict[clean_opt]
+            return None
 
-        # Fallback to tbl_name if no table with invoice_value is found
-        if not sales_table:
-            sales_table = tbl_name
+        def find_table(candidates):
+            for cand in candidates:
+                clean_cand = cand.lower().replace('_', '').replace('-', '')
+                for tbl in table_columns.keys():
+                    clean_tbl = tbl.lower().replace('_', '').replace('-', '')
+                    if clean_cand in clean_tbl:
+                        return tbl
+            return None
 
-        sales_cols = table_columns.get(sales_table, {})
+        # Identify SAP & Legacy Tables
+        curr_sales_tbl = find_table(["zpvfsdcurrentsales", "currentsales", "current_sales"])
+        hist_sales_tbl = find_table(["zpvfsdsaleshistory", "saleshistory", "sales_history"])
+        sales_data_tbl = find_table(["salesdata", "sales_data"])
+        cust_tbl = find_table(["zivfcustomermaster", "customermaster", "customer"])
+        terr_tbl = find_table(["zivfterritorymaster", "territorymaster", "territory"])
+        reg_tbl = find_table(["zivfregionmaster", "regionmaster", "region"])
+        zone_tbl = find_table(["zivfzonemaster", "zonemaster", "zone"])
+        sku_tbl = find_table(["zivrskumaster", "skumaster", "materialmaster", "material", "sku"])
+        tyre_tbl = find_table(["tyretypemaster", "tyretype"])
+        target_tbl = find_table(["salestarget", "sales_target", "target"])
 
-        if "invoice_value" in sales_cols:
-            real_revenue_col = sales_cols["invoice_value"]
-            has_revenue = True
-        elif "invoice_value_inr" in sales_cols:
-            real_revenue_col = sales_cols["invoice_value_inr"]
-            has_revenue = True
-        elif "taxable_value" in sales_cols:
-            real_revenue_col = sales_cols["taxable_value"]
-            has_revenue = True
-        elif "taxable_value_inr" in sales_cols:
-            real_revenue_col = sales_cols["taxable_value_inr"]
-            has_revenue = True
-        elif "ndp_inr" in sales_cols:
-            real_revenue_col = sales_cols["ndp_inr"]
-            has_revenue = True
+        # Determine sales fact expression and columns (union of CurrentSales and SalesHistory if both exist)
+        if curr_sales_tbl and hist_sales_tbl:
+            sales_from = f"(SELECT * FROM `{curr_sales_tbl}` UNION ALL SELECT * FROM `{hist_sales_tbl}`) s"
+            sales_cols = table_columns.get(curr_sales_tbl) or table_columns.get(hist_sales_tbl) or {}
+            primary_sales_tbl = curr_sales_tbl
+        elif curr_sales_tbl:
+            sales_from = f"`{curr_sales_tbl}` s"
+            sales_cols = table_columns.get(curr_sales_tbl, {})
+            primary_sales_tbl = curr_sales_tbl
+        elif hist_sales_tbl:
+            sales_from = f"`{hist_sales_tbl}` s"
+            sales_cols = table_columns.get(hist_sales_tbl, {})
+            primary_sales_tbl = hist_sales_tbl
+        elif sales_data_tbl:
+            sales_from = f"`{sales_data_tbl}` s"
+            sales_cols = table_columns.get(sales_data_tbl, {})
+            primary_sales_tbl = sales_data_tbl
         else:
-            has_revenue = False
+            # Fallback to tbl_name or table with revenue column
+            found_tbl = tbl_name
+            for tbl, cols in table_columns.items():
+                if check_col(cols, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]):
+                    found_tbl = tbl
+                    break
+            sales_from = f"`{found_tbl}` s"
+            sales_cols = table_columns.get(found_tbl, {})
+            primary_sales_tbl = found_tbl
+
+        real_revenue_col = check_col(sales_cols, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value", "taxable_value_inr", "ndp_inr"])
+        has_revenue = bool(real_revenue_col)
 
         if has_revenue:
-            revenue_expr = f"CAST(REPLACE(TRIM(`{real_revenue_col}`), ',', '') AS DECIMAL(18,2))"
-            # For JOIN queries where the sales table has alias 's'
             join_revenue_expr = f"CAST(REPLACE(TRIM(s.`{real_revenue_col}`), ',', '') AS DECIMAL(18,2))"
         else:
-            revenue_expr = "0.0"
             join_revenue_expr = "0.0"
 
         # 1. Total Sales Revenue
         total_revenue = 0.0
         if has_revenue:
             try:
-                cursor.execute(f"SELECT SUM({revenue_expr}) AS total_sales_revenue FROM `{sales_table}`")
-                total_revenue = cursor.fetchone()["total_sales_revenue"] or 0
+                cursor.execute(f"SELECT SUM({join_revenue_expr}) AS total_sales_revenue FROM {sales_from}")
+                row = cursor.fetchone()
+                total_revenue = float(row["total_sales_revenue"] or 0) if row else 0.0
             except Exception as rev_err:
                 print(f"[Default Metrics] Total revenue query failed: {rev_err}")
 
         # 2. Top Performing Tyre
         top_tyre = "N/A"
         if has_revenue:
-            if "vehicle_type" in sales_cols:
-                real_tyre_col = sales_cols["vehicle_type"]
+            # Case A: vehicle_type directly in sales table
+            sales_tyre = check_col(sales_cols, ["vehicle_type", "tyre_type"])
+            if sales_tyre:
                 try:
                     cursor.execute(f"""
                         SELECT
-                            `{real_tyre_col}` AS vehicle_type,
-                            ROUND(SUM({revenue_expr}), 2) AS revenue
-                        FROM `{sales_table}`
-                        WHERE `{real_tyre_col}` IS NOT NULL
-                          AND `{real_tyre_col}` <> ''
-                        GROUP BY `{real_tyre_col}`
+                            s.`{sales_tyre}` AS vehicle_type,
+                            ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                        FROM {sales_from}
+                        WHERE s.`{sales_tyre}` IS NOT NULL AND s.`{sales_tyre}` <> ''
+                        GROUP BY s.`{sales_tyre}`
                         ORDER BY revenue DESC
                         LIMIT 1
                     """)
@@ -2032,56 +2056,69 @@ def default_dashboard_metrics_controller(get_db_connection):
                     if row:
                         top_tyre = row["vehicle_type"]
                 except Exception as tyre_err:
-                    print(f"[Default Metrics] Top tyre query failed: {tyre_err}")
-            else:
-                sku_table = None
-                tyre_table = None
-                for tbl, cols in table_columns.items():
-                    if "matnr" in cols and "tyre_type" in cols:
-                        sku_table = tbl
-                    if "tyre_type_code" in cols and "tyre_type_name" in cols:
-                        tyre_table = tbl
+                    print(f"[Default Metrics] Top tyre direct query failed: {tyre_err}")
+            elif sku_tbl:
+                # Case B: SKU master (SAP ZIVR_SKUMaster_01_TR has TYRE_TYPE directly!)
+                sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
+                sku_mat = check_col(table_columns[sku_tbl], ["matnr", "sku", "material"])
+                sku_tyre = check_col(table_columns[sku_tbl], ["tyre_type", "tyretype", "vehicle_type", "maktx"])
 
-                if sku_table and tyre_table:
-                    sales_material = sales_cols["material"]
-                    sku_material = table_columns[sku_table]["matnr"]
-                    sku_tyre = table_columns[sku_table]["tyre_type"]
-                    tyre_code = table_columns[tyre_table]["tyre_type_code"]
-                    tyre_name = table_columns[tyre_table]["tyre_type_name"]
-                    try:
-                        cursor.execute(f"""
-                        SELECT
-                            t.`{tyre_name}` AS vehicle_type,
-                            ROUND(SUM({join_revenue_expr}),2) revenue
-                        FROM `{sales_table}` s
-                        JOIN `{sku_table}` k
-                            ON s.`{sales_material}` = k.`{sku_material}`
-                        JOIN `{tyre_table}` t
-                            ON k.`{sku_tyre}` = t.`{tyre_code}`
-                        GROUP BY t.`{tyre_name}`
-                        ORDER BY revenue DESC
-                        LIMIT 1
-                        """)
-                        row = cursor.fetchone()
-                        if row:
-                            top_tyre = row["vehicle_type"]
-                    except Exception as tyre_err:
-                        print(f"[Default Metrics] Joined top tyre query failed: {tyre_err}")
+                if sales_mat and sku_mat and sku_tyre:
+                    # Check if tyre_tbl exists for name resolution (legacy)
+                    if tyre_tbl:
+                        tyre_code = check_col(table_columns[tyre_tbl], ["tyre_type_code", "tyre_type"])
+                        tyre_name = check_col(table_columns[tyre_tbl], ["tyre_type_name", "tyre_name"])
+                        if tyre_code and tyre_name:
+                            try:
+                                cursor.execute(f"""
+                                    SELECT
+                                        t.`{tyre_name}` AS vehicle_type,
+                                        ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                                    FROM {sales_from}
+                                    JOIN `{sku_tbl}` k ON s.`{sales_mat}` = k.`{sku_mat}`
+                                    JOIN `{tyre_tbl}` t ON k.`{sku_tyre}` = t.`{tyre_code}`
+                                    GROUP BY t.`{tyre_name}`
+                                    ORDER BY revenue DESC
+                                    LIMIT 1
+                                """)
+                                row = cursor.fetchone()
+                                if row:
+                                    top_tyre = row["vehicle_type"]
+                            except Exception as tyre_err:
+                                print(f"[Default Metrics] Joined tyre_tbl query failed: {tyre_err}")
+                    if top_tyre == "N/A":
+                        # Query directly from SKU master
+                        try:
+                            cursor.execute(f"""
+                                SELECT
+                                    k.`{sku_tyre}` AS vehicle_type,
+                                    ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                                FROM {sales_from}
+                                JOIN `{sku_tbl}` k ON s.`{sales_mat}` = k.`{sku_mat}`
+                                WHERE k.`{sku_tyre}` IS NOT NULL AND k.`{sku_tyre}` <> ''
+                                GROUP BY k.`{sku_tyre}`
+                                ORDER BY revenue DESC
+                                LIMIT 1
+                            """)
+                            row = cursor.fetchone()
+                            if row:
+                                top_tyre = row["vehicle_type"]
+                        except Exception as tyre_err:
+                            print(f"[Default Metrics] SKU tyre query failed: {tyre_err}")
 
         # 3. Leading Region
         leading_region = "N/A"
         if has_revenue:
-            if "region" in sales_cols:
-                real_region_col = sales_cols["region"]
+            sales_reg = check_col(sales_cols, ["region", "region_name"])
+            if sales_reg:
                 try:
                     cursor.execute(f"""
                         SELECT
-                            `{real_region_col}` AS region,
-                            ROUND(SUM({revenue_expr}), 2) AS revenue
-                        FROM `{sales_table}`
-                        WHERE `{real_region_col}` IS NOT NULL
-                          AND `{real_region_col}` <> ''
-                        GROUP BY `{real_region_col}`
+                            s.`{sales_reg}` AS region,
+                            ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                        FROM {sales_from}
+                        WHERE s.`{sales_reg}` IS NOT NULL AND s.`{sales_reg}` <> ''
+                        GROUP BY s.`{sales_reg}`
                         ORDER BY revenue DESC
                         LIMIT 1
                     """)
@@ -2089,82 +2126,87 @@ def default_dashboard_metrics_controller(get_db_connection):
                     if row:
                         leading_region = row["region"]
                 except Exception as reg_err:
-                    print(f"[Default Metrics] Leading region query failed: {reg_err}")
-            else:
-                customer_table = None
-                territory_table = None
-                region_table = None
-                for tbl, cols in table_columns.items():
-                    if "kunnr" in cols and "territory" in cols:
-                        customer_table = tbl
-                    elif "territory_code" in cols and "region_code" in cols:
-                        territory_table = tbl
-                    elif "region" in cols and "region_name" in cols:
-                        region_table = tbl
+                    print(f"[Default Metrics] Leading region direct query failed: {reg_err}")
+            elif cust_tbl and reg_tbl:
+                sales_cust = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
+                cust_id = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
+                r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
 
-                if customer_table and territory_table and region_table:
-                    sales_customer = sales_cols["customer"]
-                    cust_id = table_columns[customer_table]["kunnr"]
-                    cust_territory = table_columns[customer_table]["territory"]
-                    terr_code = table_columns[territory_table]["territory_code"]
-                    terr_region = table_columns[territory_table]["region_code"]
-                    region_code = table_columns[region_table]["region"]
-                    region_name = table_columns[region_table]["region_name"]
-                    try:
-                        cursor.execute(f"""
-                        SELECT
-                            r.`{region_name}` AS region_name,
-                            ROUND(SUM({join_revenue_expr}),2) revenue
-                        FROM `{sales_table}` s
-                        JOIN `{customer_table}` c
-                            ON s.`{sales_customer}` = c.`{cust_id}`
-                        JOIN `{territory_table}` t
-                            ON c.`{cust_territory}` = t.`{terr_code}`
-                        JOIN `{region_table}` r
-                            ON t.`{terr_region}` = r.`{region_code}`
-                        GROUP BY r.`{region_name}`
-                        ORDER BY revenue DESC
-                        LIMIT 1
-                        """)
-                        row = cursor.fetchone()
-                        if row:
-                            leading_region = row["region_name"]
-                    except Exception as reg_err:
-                        print(f"[Default Metrics] Joined region query failed: {reg_err}")
+                if terr_tbl:
+                    cust_terr = check_col(table_columns[cust_tbl], ["bzirk", "territory", "territory_code"])
+                    terr_code = check_col(table_columns[terr_tbl], ["bzirk", "territory_code", "territory"])
+                    terr_reg = check_col(table_columns[terr_tbl], ["regio", "region_code", "region"])
+                    r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
+
+                    if sales_cust and cust_id and cust_terr and terr_code and terr_reg and r_code and r_name:
+                        try:
+                            cursor.execute(f"""
+                                SELECT
+                                    r.`{r_name}` AS region_name,
+                                    ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                                FROM {sales_from}
+                                JOIN `{cust_tbl}` c ON s.`{sales_cust}` = c.`{cust_id}`
+                                JOIN `{terr_tbl}` t ON c.`{cust_terr}` = t.`{terr_code}`
+                                JOIN `{reg_tbl}` r ON t.`{terr_reg}` = r.`{r_code}`
+                                WHERE r.`{r_name}` IS NOT NULL AND r.`{r_name}` <> ''
+                                GROUP BY r.`{r_name}`
+                                ORDER BY revenue DESC
+                                LIMIT 1
+                            """)
+                            row = cursor.fetchone()
+                            if row:
+                                leading_region = row["region_name"]
+                        except Exception as reg_err:
+                            print(f"[Default Metrics] Joined territory region query failed: {reg_err}")
+
+                if leading_region == "N/A" and sales_cust and cust_id and r_name:
+                    # Direct join Customer -> Region if Customer has REGIO
+                    cust_reg = check_col(table_columns[cust_tbl], ["regio", "region_code", "region"])
+                    r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
+                    if cust_reg and r_code:
+                        try:
+                            cursor.execute(f"""
+                                SELECT
+                                    r.`{r_name}` AS region_name,
+                                    ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                                FROM {sales_from}
+                                JOIN `{cust_tbl}` c ON s.`{sales_cust}` = c.`{cust_id}`
+                                JOIN `{reg_tbl}` r ON c.`{cust_reg}` = r.`{r_code}`
+                                WHERE r.`{r_name}` IS NOT NULL AND r.`{r_name}` <> ''
+                                GROUP BY r.`{r_name}`
+                                ORDER BY revenue DESC
+                                LIMIT 1
+                            """)
+                            row = cursor.fetchone()
+                            if row:
+                                leading_region = row["region_name"]
+                        except Exception as reg_err:
+                            print(f"[Default Metrics] Direct customer region query failed: {reg_err}")
 
         # 4. YoY Growth
         current_year = 0.0
         previous_year = 0.0
         yoy = 0.0
-        real_date_col = None
-
-        if "invoice_date" in sales_cols:
-            real_date_col = sales_cols["invoice_date"]
-        elif "billing__doc_date" in sales_cols:
-            real_date_col = sales_cols["billing__doc_date"]
-        elif "billing_doc_date" in sales_cols:
-            real_date_col = sales_cols["billing_doc_date"]
-        elif "date" in sales_cols:
-            real_date_col = sales_cols["date"]
+        real_date_col = check_col(sales_cols, ["invoice_date", "date", "billing__doc_date", "billing_doc_date"])
 
         if has_revenue and real_date_col:
             try:
-                # Detect column type to decide date parsing strategy
-                cursor.execute(f"SHOW COLUMNS FROM `{sales_table}` LIKE %s", (real_date_col,))
+                # Detect column type
+                cursor.execute(f"SHOW COLUMNS FROM `{primary_sales_tbl}` LIKE %s", (real_date_col,))
                 col_info = cursor.fetchone()
                 col_type = col_info["Type"].lower() if col_info else "text"
 
                 if "date" in col_type or "timestamp" in col_type:
-                    year_expr = f"YEAR(`{real_date_col}`)"
-                    date_filter = f"`{real_date_col}` IS NOT NULL"
+                    year_expr = f"YEAR(s.`{real_date_col}`)"
+                    date_filter = f"s.`{real_date_col}` IS NOT NULL"
                 else:
-                    year_expr = f"YEAR(COALESCE(STR_TO_DATE(`{real_date_col}`, '%Y-%m-%d'), STR_TO_DATE(`{real_date_col}`, '%d-%m-%Y'), STR_TO_DATE(`{real_date_col}`, '%d/%m/%Y')))"
-                    date_filter = f"`{real_date_col}` IS NOT NULL AND `{real_date_col}` != ''"
+                    year_expr = f"YEAR(COALESCE(STR_TO_DATE(s.`{real_date_col}`, '%Y-%m-%d'), STR_TO_DATE(s.`{real_date_col}`, '%d-%m-%Y'), STR_TO_DATE(s.`{real_date_col}`, '%d/%m/%Y')))"
+                    date_filter = f"s.`{real_date_col}` IS NOT NULL AND s.`{real_date_col}` != ''"
 
                 # Current Year Revenue
                 cursor.execute(f"""
-                    SELECT ROUND(SUM({revenue_expr}), 2) AS revenue
-                    FROM `{sales_table}`
+                    SELECT ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                    FROM {sales_from}
                     WHERE {date_filter}
                       AND {year_expr} = YEAR(CURDATE())
                 """)
@@ -2173,8 +2215,8 @@ def default_dashboard_metrics_controller(get_db_connection):
 
                 # Previous Year Revenue
                 cursor.execute(f"""
-                    SELECT ROUND(SUM({revenue_expr}), 2) AS revenue
-                    FROM `{sales_table}`
+                    SELECT ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                    FROM {sales_from}
                     WHERE {date_filter}
                       AND {year_expr} = YEAR(CURDATE()) - 1
                 """)
@@ -2186,67 +2228,93 @@ def default_dashboard_metrics_controller(get_db_connection):
             except Exception as yoy_err:
                 print(f"[Default Metrics] YoY query failed: {yoy_err}")
 
-        # 5. Billing Scope
+        # 5. Billing Scope (Distinct active customers billed)
         billing_scope = "N/A"
-        real_cust_col_sales = None
-        if "customer" in sales_cols:
-            real_cust_col_sales = sales_cols["customer"]
-        elif "kunnr" in sales_cols:
-            real_cust_col_sales = sales_cols["kunnr"]
+        real_cust_col_sales = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
         
         if real_cust_col_sales:
             try:
-                cursor.execute(f"SELECT COUNT(DISTINCT `{real_cust_col_sales}`) AS count FROM `{sales_table}`")
+                cursor.execute(f"SELECT COUNT(DISTINCT s.`{real_cust_col_sales}`) AS count FROM {sales_from}")
                 row = cursor.fetchone()
                 if row and row["count"] is not None:
                     billing_scope = str(row["count"])
             except Exception as e:
                 print(f"[Default Metrics] Billing scope query failed: {e}")
 
-        # 6. Dealer Spread
+        # 6. Dealer Spread (Active dealers with CH_TYPE='DL' or KTOKD='Z001')
         dealer_spread = "N/A"
-        customer_table = None
-        for tbl, cols in table_columns.items():
-            if "kunnr" in cols and "acc_grp" in cols:
-                customer_table = tbl
-                break
-        
-        if real_cust_col_sales and customer_table:
-            cust_id_col = table_columns[customer_table]["kunnr"]
-            acc_grp_col = table_columns[customer_table]["acc_grp"]
-            try:
-                cursor.execute(f"""
-                    SELECT COUNT(DISTINCT s.`{real_cust_col_sales}`) AS count
-                    FROM `{sales_table}` s
-                    JOIN `{customer_table}` c ON s.`{real_cust_col_sales}` = c.`{cust_id_col}`
-                    WHERE c.`{acc_grp_col}` = 'Z001'
-                """)
-                row = cursor.fetchone()
-                if row and row["count"] is not None:
-                    dealer_spread = str(row["count"])
-            except Exception as e:
-                print(f"[Default Metrics] Dealer spread query failed: {e}")
+        if real_cust_col_sales and cust_tbl:
+            cust_id_col = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
+            dealer_type_col = check_col(table_columns[cust_tbl], ["ch_type", "ktokd", "acc_grp", "customer_type"])
+            if cust_id_col and dealer_type_col:
+                try:
+                    cursor.execute(f"""
+                        SELECT COUNT(DISTINCT s.`{real_cust_col_sales}`) AS count
+                        FROM {sales_from}
+                        JOIN `{cust_tbl}` c ON s.`{real_cust_col_sales}` = c.`{cust_id_col}`
+                        WHERE c.`{dealer_type_col}` = 'DL' OR c.`{dealer_type_col}` = 'Z001'
+                    """)
+                    row = cursor.fetchone()
+                    if row and row["count"] is not None:
+                        dealer_spread = str(row["count"])
+                except Exception as e:
+                    print(f"[Default Metrics] Dealer spread query failed: {e}")
 
-        # 7. Attrition
+        # 7. Credit Exposure and Outstanding (from SAP Customer Master ZIVF_CustomerMaster_01_MD)
+        exposure_val = "N/A"
+        overdue_val = "N/A"
+        if cust_tbl:
+            exp_col = check_col(table_columns[cust_tbl], ["exposure"])
+            out_col = check_col(table_columns[cust_tbl], ["outstand", "outstanding"])
+            if exp_col:
+                try:
+                    cursor.execute(f"SELECT SUM(CAST(REPLACE(TRIM(`{exp_col}`), ',', '') AS DECIMAL(18,2))) AS val FROM `{cust_tbl}` WHERE `{exp_col}` IS NOT NULL AND `{exp_col}` != ''")
+                    row = cursor.fetchone()
+                    if row and row["val"] is not None:
+                        v = float(row["val"])
+                        if v >= 10000000:
+                            exposure_val = f"₹{(v / 10000000):.2f} Cr"
+                        elif v >= 100000:
+                            exposure_val = f"₹{(v / 100000):.2f} Lac"
+                        else:
+                            exposure_val = f"₹{v:,.2f}"
+                except Exception as e:
+                    print(f"[Default Metrics] Exposure query failed: {e}")
+            if out_col:
+                try:
+                    cursor.execute(f"SELECT SUM(CAST(REPLACE(TRIM(`{out_col}`), ',', '') AS DECIMAL(18,2))) AS val FROM `{cust_tbl}` WHERE `{out_col}` IS NOT NULL AND `{out_col}` != ''")
+                    row = cursor.fetchone()
+                    if row and row["val"] is not None:
+                        v = float(row["val"])
+                        if v >= 10000000:
+                            overdue_val = f"₹{(v / 10000000):.2f} Cr"
+                        elif v >= 100000:
+                            overdue_val = f"₹{(v / 100000):.2f} Lac"
+                        else:
+                            overdue_val = f"₹{v:,.2f}"
+                except Exception as e:
+                    print(f"[Default Metrics] Outstanding query failed: {e}")
+
+        # 8. Attrition
         attrition = "N/A"
         if real_cust_col_sales and real_date_col:
             try:
                 if "date" in col_type or "timestamp" in col_type:
-                    date_expr = f"`{real_date_col}`"
+                    date_expr = f"s.`{real_date_col}`"
                 else:
-                    date_expr = f"STR_TO_DATE(`{real_date_col}`, '%d-%m-%Y')"
+                    date_expr = f"STR_TO_DATE(s.`{real_date_col}`, '%d-%m-%Y')"
                     
                 cursor.execute(f"""
                     SELECT COUNT(DISTINCT prev_month_cust) AS attrition_count
                     FROM (
-                        SELECT DISTINCT `{real_cust_col_sales}` AS prev_month_cust
-                        FROM `{sales_table}`
+                        SELECT DISTINCT s.`{real_cust_col_sales}` AS prev_month_cust
+                        FROM {sales_from}
                         WHERE {date_expr} >= DATE_FORMAT(CURRENT_DATE - INTERVAL 1 MONTH, '%Y-%m-01')
                           AND {date_expr} < DATE_FORMAT(CURRENT_DATE, '%Y-%m-01')
                     ) AS prev
                     WHERE prev_month_cust NOT IN (
-                        SELECT DISTINCT `{real_cust_col_sales}`
-                        FROM `{sales_table}`
+                        SELECT DISTINCT s.`{real_cust_col_sales}`
+                        FROM {sales_from}
                         WHERE {date_expr} >= DATE_FORMAT(CURRENT_DATE, '%Y-%m-01')
                     )
                 """)
@@ -2256,24 +2324,18 @@ def default_dashboard_metrics_controller(get_db_connection):
             except Exception as e:
                 print(f"[Default Metrics] Attrition query failed: {e}")
 
-        # 8. Sales Target and Achievement
+        # 9. Sales Target and Achievement
         sales_target_val = "N/A"
         achievement_val = "N/A"
         
-        target_table = None
-        for tbl in table_columns.keys():
-            if tbl.lower() == "sales_target":
-                target_table = tbl
-                break
-                
-        if target_table:
+        if target_tbl:
             try:
-                cursor.execute(f"SELECT SUM(Value) AS total_target FROM `{target_table}`")
+                target_col = check_col(table_columns[target_tbl], ["value", "target", "target_value"]) or "Value"
+                cursor.execute(f"SELECT SUM(`{target_col}`) AS total_target FROM `{target_tbl}`")
                 t_row = cursor.fetchone()
                 if t_row and t_row["total_target"] is not None:
                     t_val = float(t_row["total_target"])
                     if t_val > 0:
-                        # Format target like revenue
                         formatted_target = f"₹{t_val:,.2f}"
                         if t_val >= 10000000:
                             formatted_target = f"₹{(t_val / 10000000):.2f} Cr"
@@ -2324,8 +2386,8 @@ def default_dashboard_metrics_controller(get_db_connection):
             "metric_9": {"label": "SAS Variance", "value": "N/A", "subtext": "Variance"},
             "metric_10": {"label": "Billing Scope", "value": billing_scope, "subtext": "Customers billed"},
             "metric_11": {"label": "Dealer Spread", "value": dealer_spread, "subtext": "Active dealers"},
-            "metric_12": {"label": "Overdue", "value": "N/A", "subtext": "Overdue percentage"},
-            "metric_13": {"label": "Exposure", "value": "N/A", "subtext": "Exposure percentage"},
+            "metric_12": {"label": "Overdue", "value": overdue_val, "subtext": "Outstanding balance"},
+            "metric_13": {"label": "Exposure", "value": exposure_val, "subtext": "Credit exposure"},
             "metric_14": {"label": "Rotation", "value": "N/A", "subtext": "Rotation metric"},
             "metric_15": {"label": "New Dealer", "value": "N/A", "subtext": "New dealers"},
             "metric_16": {"label": "Attrition", "value": attrition, "subtext": "Inactive from last month"}

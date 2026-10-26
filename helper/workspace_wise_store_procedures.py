@@ -2,7 +2,7 @@ import pymysql
 from database.config import MYSQL_CONFIG
 
 # Embedded SQL queries
-# excel report store procedures
+# Stored procedures querying the 10 SAP S/4 HANA Views
 
 SQL_CONTENT = """
 ----------------- domestic sales value achivements store procedure start ----------------------------------------------------------
@@ -20,94 +20,140 @@ BEGIN
     DECLARE v_prev_from DATE;
     DECLARE v_prev_to DATE;
     DECLARE v_target_month INT;
+
     /* Dates Setup */
+    SET p_year  = IFNULL(p_year , YEAR(CURDATE()));
+    SET p_month = IFNULL(p_month, MONTH(CURDATE()));
+    SET p_day   = IFNULL(p_day  , DAY(CURDATE()));
+
     SET v_curr_from = STR_TO_DATE(CONCAT(p_year,'-',LPAD(p_month,2,'0'),'-01'), '%Y-%m-%d');
-    SET v_curr_to = STR_TO_DATE(CONCAT(p_year,'-',LPAD(p_month,2,'0'),'-',LPAD(p_day,2,'0')), '%Y-%m-%d');
+    SET v_curr_to   = LEAST(STR_TO_DATE(CONCAT(p_year,'-',LPAD(p_month,2,'0'),'-',LPAD(p_day,2,'0')), '%Y-%m-%d'), LAST_DAY(v_curr_from));
     SET v_prev_from = DATE_SUB(v_curr_from, INTERVAL 1 YEAR);
     SET v_prev_to   = DATE_SUB(v_curr_to, INTERVAL 1 YEAR);
     SET v_target_month = p_year * 100 + p_month;
-    /* . Market Segment (4 Wheelers & 2/3 Wheelers) & Target */
-    WITH target_market AS (
-        SELECT 
-            CASE
-                WHEN UPPER(tt.tyre_type_name) IN ('SCOOTER', 'MOTOR CYCLE', '3W', 'BIKE') THEN '2/3 Wheelers'
-                ELSE '4 Wheelers'
-            END AS report_name,
-            SUM(st.Value) / 1000000 AS Target
-        FROM sales_target st
-        JOIN material_master sm ON st.MATNR = sm.MATNR
-        JOIN tyre_type_master tt ON sm.tyre_type = tt.tyre_type_code
-        WHERE st.Month = v_target_month
-         -- AND tt.tyre_type_name NOT IN ('OTR', 'Retread', 'OTR+Retread') 
-          AND sm.category NOT IN ('JK', 'Vikrant', 'Challenger')
-        GROUP BY 
-            CASE
-                WHEN UPPER(tt.tyre_type_name) IN ('SCOOTER', 'MOTOR CYCLE', '3W', 'BIKE') THEN '2/3 Wheelers'
-                ELSE '4 Wheelers'
-            END
+
+    WITH
+    /* 1. Market Segment Target */
+    target_market AS (
+        SELECT '4 Wheelers' AS report_name, CAST(0 AS DECIMAL(18,2)) AS Target
+        UNION ALL
+        SELECT '2/3 Wheelers' AS report_name, CAST(0 AS DECIMAL(18,2)) AS Target
     ),
-    /* . Market Segment (4 Wheelers & 2/3 Wheelers) & Actual Sales */
+    /* 2. Market Segment Actual Sales (Current Month: CurrentSales, Previous Year: SalesHistory) */
     actual_market AS (
         SELECT
-            CASE
-                WHEN UPPER(tt.tyre_type_name) IN ('SCOOTER', 'MOTOR CYCLE', '3W', 'BIKE') THEN '2/3 Wheelers'
-                ELSE '4 Wheelers'
-            END AS report_name,
-            SUM(CASE WHEN sd.billing__doc_date BETWEEN v_prev_from AND LAST_DAY(v_prev_from) THEN sd.NDP_INR ELSE 0 END) / 1000000 AS Month,
-            SUM(CASE WHEN sd.billing__doc_date BETWEEN v_prev_from AND v_prev_to THEN sd.NDP_INR ELSE 0 END) / 1000000 AS MTD,
-            SUM(CASE WHEN sd.billing__doc_date BETWEEN v_curr_from AND v_curr_to THEN sd.NDP_INR ELSE 0 END) / 1000000 AS Actual,
-            SUM(CASE WHEN sd.billing__doc_date = v_curr_to THEN sd.NDP_INR ELSE 0 END) / 1000000 AS Sale_For_Day
-        FROM sales_data sd
-        JOIN material_master sm ON sd.material = sm.MATNR
-        JOIN tyre_type_master tt ON sm.tyre_type = tt.tyre_type_code
-        LEFT JOIN distribution_channel_master dm ON sd.distribution__Channel = dm.distribution_code
-    --    WHERE tt.tyre_type_name NOT IN ('OTR', 'Retread', 'OTR+Retread') 
-          WHERE sm.category NOT IN ('JK', 'Vikrant', 'Challenger') 
-          AND (dm.distribution_name IS NULL OR dm.distribution_name NOT IN ('OEM', 'STU', 'DEF')) 
-        GROUP BY 
-            CASE
-                WHEN UPPER(tt.tyre_type_name) IN ('SCOOTER', 'MOTOR CYCLE', '3W', 'BIKE') THEN '2/3 Wheelers'
-                ELSE '4 Wheelers'
-            END
+            report_name,
+            SUM(Month) AS Month,
+            SUM(MTD) AS MTD,
+            SUM(Actual) AS Actual,
+            SUM(Sale_For_Day) AS Sale_For_Day
+        FROM (
+            -- Previous History (Month & MTD)
+            SELECT
+                CASE
+                    WHEN UPPER(IFNULL(sm.TYRE_TYPE, '')) IN ('SCOOTER', 'MOTOR CYCLE', '3W', 'BIKE', '3 WHEELER') THEN '2/3 Wheelers'
+                    ELSE '4 Wheelers'
+                END AS report_name,
+                SUM(CASE WHEN sh.invoice_date BETWEEN v_prev_from AND LAST_DAY(v_prev_from) THEN sh.ndp_value ELSE 0 END) / 1000000 AS Month,
+                SUM(CASE WHEN sh.invoice_date BETWEEN v_prev_from AND v_prev_to THEN sh.ndp_value ELSE 0 END) / 1000000 AS MTD,
+                0 AS Actual,
+                0 AS Sale_For_Day
+            FROM `zpvf_sd_saleshistory_01_tr` sh
+            JOIN `zivr_skumaster_01_tr` sm ON sh.SKU = sm.MATNR
+            WHERE (sh.indicator_cancel IS NULL OR sh.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND IFNULL(sm.BRAND, '') NOT IN ('JK', 'Vikrant', 'Challenger') 
+              AND IFNULL(sm.CATG, '') NOT IN ('JK', 'Vikrant', 'Challenger')
+              AND sh.distribution_channel NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF')
+            GROUP BY report_name
+
+            UNION ALL
+
+            -- Current Month (Actual & Sale_For_Day)
+            SELECT
+                CASE
+                    WHEN UPPER(IFNULL(sm.TYRE_TYPE, '')) IN ('SCOOTER', 'MOTOR CYCLE', '3W', 'BIKE', '3 WHEELER') THEN '2/3 Wheelers'
+                    ELSE '4 Wheelers'
+                END AS report_name,
+                0 AS Month,
+                0 AS MTD,
+                SUM(CASE WHEN cs.invoice_date BETWEEN v_curr_from AND v_curr_to THEN cs.ndp_value ELSE 0 END) / 1000000 AS Actual,
+                SUM(CASE WHEN cs.invoice_date = v_curr_to THEN cs.ndp_value ELSE 0 END) / 1000000 AS Sale_For_Day
+            FROM `zpvf_sd_currentsales_01_tr` cs
+            JOIN `zivr_skumaster_01_tr` sm ON cs.SKU = sm.MATNR
+            WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND IFNULL(sm.BRAND, '') NOT IN ('JK', 'Vikrant', 'Challenger') 
+              AND IFNULL(sm.CATG, '') NOT IN ('JK', 'Vikrant', 'Challenger')
+              AND cs.distribution_channel NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF')
+            GROUP BY report_name
+        ) comb_market
+        GROUP BY report_name
     ),
     /* Target & Actual join */
     final_market AS (
         SELECT 
-            a.report_name, a.Month, a.MTD, IFNULL(t.Target, 0) AS Target, a.Actual, a.Sale_For_Day
-        FROM actual_market a
-        LEFT JOIN target_market t ON a.report_name = t.report_name
+            t.report_name,
+            IFNULL(a.Month, 0) AS Month,
+            IFNULL(a.MTD, 0) AS MTD,
+            IFNULL(t.Target, 0) AS Target,
+            IFNULL(a.Actual, 0) AS Actual,
+            IFNULL(a.Sale_For_Day, 0) AS Sale_For_Day
+        FROM target_market t
+        LEFT JOIN actual_market a ON t.report_name = a.report_name
     ),
-    /* . Distribution Channel (OEM, DEF, STU) & Actual Sales */
+    /* 3. Distribution Channel (OEM, DEF, STU) Actual Sales */
     actual_dist AS (
         SELECT
-            CASE
-                WHEN dm.distribution_name IN ('OEM','DEF') THEN 'OEM + DEF'
-                WHEN dm.distribution_name = 'STU' THEN 'STU'
-            END AS report_name,
-            SUM(CASE WHEN sd.billing__doc_date BETWEEN v_prev_from AND LAST_DAY(v_prev_from) THEN sd.NDP_INR ELSE 0 END) / 1000000 AS Month,
-            SUM(CASE WHEN sd.billing__doc_date BETWEEN v_prev_from AND v_prev_to THEN sd.NDP_INR ELSE 0 END) / 1000000 AS MTD,
-            SUM(CASE WHEN sd.billing__doc_date BETWEEN v_curr_from AND v_curr_to THEN sd.NDP_INR ELSE 0 END) / 1000000 AS Actual,
-            SUM(CASE WHEN sd.billing__doc_date = v_curr_to THEN sd.NDP_INR ELSE 0 END) / 1000000 AS Sale_For_Day
-        FROM sales_data sd
-        JOIN distribution_channel_master dm ON sd.distribution__Channel = dm.distribution_code
-        WHERE dm.distribution_name IN ('OEM','STU','DEF')
-        GROUP BY 
-            CASE
-                WHEN dm.distribution_name IN ('OEM','DEF') THEN 'OEM + DEF'
-                WHEN dm.distribution_name = 'STU' THEN 'STU'
-            END
+            report_name,
+            SUM(Month) AS Month,
+            SUM(MTD) AS MTD,
+            SUM(Actual) AS Actual,
+            SUM(Sale_For_Day) AS Sale_For_Day
+        FROM (
+            -- Previous History
+            SELECT
+                CASE
+                    WHEN sh.distribution_channel IN ('20', 20, '40', 40, 'OEM', 'DEF') THEN 'OEM + DEF'
+                    WHEN sh.distribution_channel IN ('30', 30, 'STU') THEN 'STU'
+                END AS report_name,
+                SUM(CASE WHEN sh.invoice_date BETWEEN v_prev_from AND LAST_DAY(v_prev_from) THEN sh.ndp_value ELSE 0 END) / 1000000 AS Month,
+                SUM(CASE WHEN sh.invoice_date BETWEEN v_prev_from AND v_prev_to THEN sh.ndp_value ELSE 0 END) / 1000000 AS MTD,
+                0 AS Actual,
+                0 AS Sale_For_Day
+            FROM `zpvf_sd_saleshistory_01_tr` sh
+            WHERE (sh.indicator_cancel IS NULL OR sh.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND sh.distribution_channel IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF')
+            GROUP BY report_name
+
+            UNION ALL
+
+            -- Current Month
+            SELECT
+                CASE
+                    WHEN cs.distribution_channel IN ('20', 20, '40', 40, 'OEM', 'DEF') THEN 'OEM + DEF'
+                    WHEN cs.distribution_channel IN ('30', 30, 'STU') THEN 'STU'
+                END AS report_name,
+                0 AS Month,
+                0 AS MTD,
+                SUM(CASE WHEN cs.invoice_date BETWEEN v_curr_from AND v_curr_to THEN cs.ndp_value ELSE 0 END) / 1000000 AS Actual,
+                SUM(CASE WHEN cs.invoice_date = v_curr_to THEN cs.ndp_value ELSE 0 END) / 1000000 AS Sale_For_Day
+            FROM `zpvf_sd_currentsales_01_tr` cs
+            WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND cs.distribution_channel IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF')
+            GROUP BY report_name
+        ) comb_dist
+        WHERE report_name IS NOT NULL
+        GROUP BY report_name
     ),
-    /* Distribution এর টার্গেট (যেহেতু sales_target-এ Channel নেই, তাই 0 ধরা হলো) */
     final_dist AS (
         SELECT report_name, Month, MTD, 0 AS Target, Actual, Sale_For_Day FROM actual_dist
     ),
-    /* Market এবং Distribution একসাথে করা হলো */
+    /* Market & Distribution combined */
     all_combined AS (
         SELECT * FROM final_market
         UNION ALL
         SELECT * FROM final_dist
     ),
-    /* making total summary row (Repl & Domestic)  */
+    /* Summary rows (Repl & Domestic) */
     totals AS (
         SELECT 'Repl (4 & 2/3 Whlrs)' AS report_name, SUM(Month) AS Month, SUM(MTD) AS MTD, SUM(Target) AS Target, SUM(Actual) AS Actual, SUM(Sale_For_Day) AS Sale_For_Day
         FROM final_market
@@ -122,14 +168,13 @@ BEGIN
         SELECT 'Domestic' AS report_name, SUM(Month) AS Month, SUM(MTD) AS MTD, SUM(Target) AS Target, SUM(Actual) AS Actual, SUM(Sale_For_Day) AS Sale_For_Day
         FROM all_combined
     ),
-    /* final output*/
     final_output AS (
         SELECT * FROM all_combined
         UNION ALL
         SELECT * FROM totals
     )
     
-    /*calculations & percentage */
+    /* Final output with calculations & percentage */
     SELECT 
         report_name,
         ROUND(Month, 2) AS Month,
@@ -153,10 +198,9 @@ BEGIN
 END$$
 DELIMITER ;
 
-
 ----------------- domestic sales value achivements store procedure end ----------------------------------------------------------
 
------------------ domestic sales value achivements store procedure start ----------------------------------------------------------
+----------------- sales numbers store procedure start ----------------------------------------------------------
 DELIMITER $$
 
 DROP PROCEDURE IF EXISTS sp_sales_numbers $$
@@ -170,7 +214,6 @@ BEGIN
     DECLARE v_curr_to      DATE;
     DECLARE v_prev_from    DATE;
     DECLARE v_prev_to      DATE;
-    DECLARE v_target_month INT;
 
     SET p_year  = IFNULL(p_year , YEAR(CURDATE()));
     SET p_month = IFNULL(p_month, MONTH(CURDATE()));
@@ -182,90 +225,93 @@ BEGIN
     SET v_prev_from = v_curr_from - INTERVAL 1 MONTH;
     SET v_prev_to   = LEAST(v_prev_from + INTERVAL (DAY(v_curr_to) - 1) DAY,
                             LAST_DAY(v_prev_from));
-    SET v_target_month = p_year * 100 + p_month;
 
     WITH
-    /* ================= FACTS ============================================ */
-    fact AS (
+    /* Previous Month sales from ZPVF_SD_SalesHistory_01_TR */
+    hist_fact AS (
         SELECT
-            ttm.tyre_type_name                        AS tt,
-            cnm.construction_description              AS con,
-            -- CAST(sm.CATG AS CHAR)                     AS catg,
-            sd.distribution__Channel                  AS dist_ch,
-            sd.billing__doc_date                      AS ddate,
-            sd.Sales_Qty                              AS qty,
+            sm.TYRE_TYPE                              AS tt,
+            sm.CONSTUCTION                            AS con,
+            sh.distribution_channel                   AS dist_ch,
+            sh.invoice_date                           AS ddate,
+            sh.Tyre_Quantity                          AS qty,
             cm.CH_TYPE                                AS ch_type,
-            cm.class                                  AS cls
-        FROM sales_data sd
-        JOIN      material_master          sm  ON sm.MATNR              = sd.material
-        LEFT JOIN tyre_type_master    ttm ON ttm.tyre_type_code    = CAST(sm.tyre_type AS CHAR)
-        LEFT JOIN construction_master cnm ON cnm.construction_code = CAST(sm.construction AS CHAR)
-        LEFT JOIN customer_master     cm  ON cm.KUNNR              = sd.customer
-        WHERE sd.billing__doc_date BETWEEN v_prev_from AND v_curr_to
-          -- AND sm.MTART = 'ZFGS'
-          -- AND CAST(sm.CATG AS CHAR) IN ('1','2','5')
+            cm.KLABC                                  AS cls
+        FROM `zpvf_sd_saleshistory_01_tr` sh
+        JOIN `zivr_skumaster_01_tr` sm ON sm.MATNR = sh.SKU
+        LEFT JOIN `zivf_customermaster_01_md` cm ON cm.KUNNR = sh.dealer_code
+        WHERE (sh.indicator_cancel IS NULL OR sh.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND sh.invoice_date BETWEEN v_prev_from AND v_prev_to
     ),
-
-    m_sales AS (
-        SELECT tt, con, 
-        -- catg,
-            SUM(CASE WHEN dist_ch=10 AND ddate BETWEEN v_prev_from AND v_prev_to THEN qty ELSE 0 END) AS jul_act,
-            0                                                                                         AS target,
-            SUM(CASE WHEN dist_ch=10 AND ddate BETWEEN v_curr_from AND v_curr_to THEN qty ELSE 0 END) AS total,
-            SUM(CASE WHEN dist_ch=10 AND ddate = v_curr_to                       THEN qty ELSE 0 END) AS today,
-            SUM(CASE WHEN dist_ch=10 AND ddate BETWEEN v_curr_from AND v_curr_to AND ch_type='DL' THEN qty ELSE 0 END) AS dealer,
-            SUM(CASE WHEN dist_ch=10 AND ddate BETWEEN v_curr_from AND v_curr_to AND (ch_type='DB' OR cls='DB') THEN qty ELSE 0 END) AS distributor,
-            SUM(CASE WHEN dist_ch=10 AND ddate BETWEEN v_curr_from AND v_curr_to AND ch_type='FL' THEN qty ELSE 0 END) AS fleet,
-            SUM(CASE WHEN dist_ch=20 AND ddate BETWEEN v_curr_from AND v_curr_to THEN qty ELSE 0 END) AS oem_actual,
-            SUM(CASE WHEN dist_ch=30 AND ddate BETWEEN v_curr_from AND v_curr_to THEN qty ELSE 0 END) AS stu_actual,
-            SUM(CASE WHEN dist_ch=40 AND ddate BETWEEN v_curr_from AND v_curr_to THEN qty ELSE 0 END) AS def_actual
-        FROM fact GROUP BY tt, con
-        -- catg
-    ),
-
-    m_target AS (
+    /* Current Month sales from zpvf_sd_currentsales_01_tr */
+    curr_fact AS (
         SELECT
-            ttm.tyre_type_name AS tt, cnm.construction_description AS con,
-            -- CAST(sm.CATG AS CHAR) AS catg,
-            0 AS jul_act, SUM(st.Qty) AS target, 0 AS total, 0 AS today,
-            0 AS dealer, 0 AS distributor, 0 AS fleet, 
-            0 AS oem_actual, 0 AS stu_actual, 0 AS def_actual
-        FROM sales_target st
-        JOIN      material_master          sm  ON sm.MATNR              = st.MATNR
-        LEFT JOIN tyre_type_master    ttm ON ttm.tyre_type_code    = CAST(sm.tyre_type AS CHAR)
-        LEFT JOIN construction_master cnm ON cnm.construction_code = CAST(sm.construction AS CHAR)
-        WHERE st.Month = v_target_month
-        GROUP BY 1,2,3
+            sm.TYRE_TYPE                              AS tt,
+            sm.CONSTUCTION                            AS con,
+            cs.distribution_channel                   AS dist_ch,
+            cs.invoice_date                           AS ddate,
+            cs.Tyre_Quantity                          AS qty,
+            cm.CH_TYPE                                AS ch_type,
+            cm.KLABC                                  AS cls
+        FROM `zpvf_sd_currentsales_01_tr` cs
+        JOIN `zivr_skumaster_01_tr` sm ON sm.MATNR = cs.SKU
+        LEFT JOIN `zivf_customermaster_01_md` cm ON cm.KUNNR = cs.dealer_code
+        WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND cs.invoice_date BETWEEN v_curr_from AND v_curr_to
     ),
 
-    base AS (SELECT * FROM m_sales UNION ALL SELECT * FROM m_target)
+    m_hist AS (
+        SELECT tt, con,
+            SUM(CASE WHEN dist_ch IN ('10', 10) THEN qty ELSE 0 END) AS jul_act
+        FROM hist_fact
+        GROUP BY tt, con
+    ),
+
+    m_curr AS (
+        SELECT tt, con,
+            SUM(CASE WHEN dist_ch IN ('10', 10) THEN qty ELSE 0 END) AS total,
+            SUM(CASE WHEN dist_ch IN ('10', 10) AND ddate = v_curr_to THEN qty ELSE 0 END) AS today,
+            SUM(CASE WHEN dist_ch IN ('10', 10) AND ch_type = 'DL' THEN qty ELSE 0 END) AS dealer,
+            SUM(CASE WHEN dist_ch IN ('10', 10) AND (ch_type = 'DB' OR cls = 'DB') THEN qty ELSE 0 END) AS distributor,
+            SUM(CASE WHEN dist_ch IN ('10', 10) AND ch_type = 'FL' THEN qty ELSE 0 END) AS fleet,
+            SUM(CASE WHEN dist_ch IN ('20', 20, 'OEM') THEN qty ELSE 0 END) AS oem_actual,
+            SUM(CASE WHEN dist_ch IN ('30', 30, 'STU') THEN qty ELSE 0 END) AS stu_actual,
+            SUM(CASE WHEN dist_ch IN ('40', 40, 'DEF') THEN qty ELSE 0 END) AS def_actual
+        FROM curr_fact
+        GROUP BY tt, con
+    ),
+
+    categories AS (
+        SELECT DISTINCT tt, con FROM m_hist
+        UNION
+        SELECT DISTINCT tt, con FROM m_curr
+    )
 
     SELECT
-        CONCAT(IFNULL(tt, 'Unknown'), ' - ', IFNULL(con, 'Unknown'))  AS category, 
-        COALESCE(SUM(jul_act), 0)                                     AS jul_act,
-        COALESCE(SUM(target), 0)                                      AS target,
-        COALESCE(SUM(total), 0)                                       AS total,
-        COALESCE(SUM(today), 0)                                       AS today,
-        COALESCE(SUM(dealer), 0)                                      AS dealer,
-        COALESCE(SUM(distributor), 0)                                 AS distributor,
-        COALESCE(SUM(fleet), 0)                                       AS fleet,
-        COALESCE(SUM(total), 0) - COALESCE(SUM(dealer), 0)
-        - COALESCE(SUM(distributor), 0) AS others,
-        NULL                                                          AS oem_target,
-        COALESCE(SUM(oem_actual), 0)                                  AS oem_actual,
-        NULL                                                          AS stu_target,
-        COALESCE(SUM(stu_actual), 0)                                  AS stu_actual,
-        NULL                                                          AS def_target,
-        COALESCE(SUM(def_actual), 0)                                  AS def_actual,
-        NULL                                                          AS domestic_target,
-        COALESCE(SUM(total + oem_actual + stu_actual + def_actual), 0) AS domestic_actual
-    FROM base
-    GROUP BY tt, con
-    ORDER BY tt, con;
+        CONCAT(IFNULL(c.tt, 'Unknown'), ' - ', IFNULL(c.con, 'Unknown')) AS category, 
+        COALESCE(h.jul_act, 0)                                            AS jul_act,
+        0                                                                 AS target,
+        COALESCE(u.total, 0)                                              AS total,
+        COALESCE(u.today, 0)                                              AS today,
+        COALESCE(u.dealer, 0)                                             AS dealer,
+        COALESCE(u.distributor, 0)                                        AS distributor,
+        COALESCE(u.fleet, 0)                                              AS fleet,
+        COALESCE(u.total, 0) - COALESCE(u.dealer, 0) - COALESCE(u.distributor, 0) AS others,
+        NULL                                                              AS oem_target,
+        COALESCE(u.oem_actual, 0)                                         AS oem_actual,
+        NULL                                                              AS stu_target,
+        COALESCE(u.stu_actual, 0)                                         AS stu_actual,
+        NULL                                                              AS def_target,
+        COALESCE(u.def_actual, 0)                                         AS def_actual,
+        NULL                                                              AS domestic_target,
+        COALESCE(u.total + u.oem_actual + u.stu_actual + u.def_actual, 0) AS domestic_actual
+    FROM categories c
+    LEFT JOIN m_hist h ON c.tt = h.tt AND c.con = h.con
+    LEFT JOIN m_curr u ON c.tt = u.tt AND c.con = u.con
+    ORDER BY c.tt, c.con;
 
 END$$
 DELIMITER ;
-
 
 ----------------- sales numbers store procedure end ----------------------------------------------------------
 
@@ -282,37 +328,25 @@ BEGIN
     DECLARE v_curr_from      DATE;
     DECLARE v_curr_to        DATE;
     DECLARE v_prev_from      DATE;
-    DECLARE v_target_month   INT;
     DECLARE v_remaining_days INT;
-    -- Set defaults if NULL passed
+
     SET p_year  = IFNULL(p_year,  YEAR(CURDATE()));
     SET p_month = IFNULL(p_month, MONTH(CURDATE()));
     SET p_day   = IFNULL(p_day,   DAY(CURDATE()));
-    -- Date range variables
+
     SET v_curr_from      = STR_TO_DATE(CONCAT(p_year,'-',p_month,'-01'), '%Y-%c-%d');
     SET v_curr_to        = LEAST(
                                STR_TO_DATE(CONCAT(p_year,'-',p_month,'-',p_day), '%Y-%c-%e'),
                                LAST_DAY(v_curr_from)
                            );
     SET v_prev_from      = DATE_SUB(v_curr_from, INTERVAL 1 YEAR);
-    SET v_target_month   = p_year * 100 + p_month;
     SET v_remaining_days = DAY(LAST_DAY(v_curr_from)) - DAY(v_curr_to);
+
     WITH
-    /* ============================================================
-       1. ACTUALS FACT TABLE
-          Join path: sales_data
-                  -> material_master       (exclusion filters + segment)
-                  -> tyre_type_master (4W vs 2/3W segment)
-                  -> customer_master  (get territory from customer)
-                  -> territory_master (get region from territory)
-                  -> region_master    (get zone from region)
-       Zone codes in region_master:
-         EZ = East   | NZ = North  | CZ = Central
-         WZ = West   | SZ = South-I| TZ = South-II | NP = Nepal
-       ============================================================ */
-    fact_actuals AS (
+    /* 1. ACTUALS FROM SALES HISTORY (PREVIOUS YEAR) & CURRENT SALES (CURRENT MONTH) */
+    fact_history AS (
         SELECT
-            CASE rm.zone
+            CASE COALESCE(zm.NAME, rm.zone_code, tm.P_ZONE)
                 WHEN 'EZ' THEN 'East'
                 WHEN 'NZ' THEN 'North'
                 WHEN 'CZ' THEN 'Central'
@@ -320,71 +354,40 @@ BEGIN
                 WHEN 'SZ' THEN 'South - I'
                 WHEN 'TZ' THEN 'South - II'
                 WHEN 'NP' THEN 'Nepal'
-                ELSE          'Unknown'
+                WHEN 'East' THEN 'East'
+                WHEN 'North' THEN 'North'
+                WHEN 'Central' THEN 'Central'
+                WHEN 'West' THEN 'West'
+                WHEN 'South - I' THEN 'South - I'
+                WHEN 'South - II' THEN 'South - II'
+                WHEN 'Nepal' THEN 'Nepal'
+                ELSE 'Unknown'
             END AS Zone_Name,
             CASE
-                WHEN UPPER(IFNULL(ttm.tyre_type_name, ''))
-                     IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER')
-                THEN '2_3_Whlrs'
+                WHEN UPPER(IFNULL(sm.TYRE_TYPE, '')) IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER') THEN '2_3_Whlrs'
                 ELSE '4_Whlrs'
             END AS Segment,
-            sd.billing__doc_date,
-            sd.NDP_INR
-        FROM sales_data sd
-        JOIN      material_master       sm  ON sd.material        = sm.MATNR
-        LEFT JOIN tyre_type_master ttm ON sm.tyre_type       = CAST(ttm.tyre_type_code AS CHAR)
-        LEFT JOIN customer_master  cm  ON sd.customer        = cm.KUNNR
-        LEFT JOIN territory_master tm  ON cm.territory       = tm.territory_code
-        LEFT JOIN region_master    rm  ON tm.region_code     = rm.region
-        WHERE
-            (   sd.billing__doc_date BETWEEN v_curr_from AND v_curr_to
-             OR sd.billing__doc_date BETWEEN v_prev_from AND LAST_DAY(v_prev_from))
-            -- Exclusions
-            AND sm.MAKTX NOT LIKE '%TREEL%'
-            AND sm.MAKTX NOT LIKE '%PACK TUBE%'
-            AND sm.MAKTX NOT LIKE '%LTR%'
-            AND sm.MAKTX NOT LIKE '%ALL STEEL%'
-            AND sm.MAKTX NOT LIKE '%STEEL BELTED%'
-            AND IFNULL(sm.category, '')        NOT IN ('JK', 'Vikrant')
-            AND IFNULL(ttm.tyre_type_name, '') != 'OTR'
+            sh.ndp_value
+        FROM `zpvf_sd_saleshistory_01_tr` sh
+        JOIN `zivr_skumaster_01_tr` sm ON sh.SKU = sm.MATNR
+        LEFT JOIN `zivf_customermaster_01_md` cm ON sh.dealer_code = cm.KUNNR
+        LEFT JOIN `zivf_territorymaster_01_tr` tm ON cm.BZIRK = tm.BZIRK
+        LEFT JOIN `zivf_regionmaster_md_01` rm ON tm.REGIO = rm.region_code
+        LEFT JOIN `zivf_zonemaster_01_tr` zm ON rm.zone_code = zm.P_ZONE
+        WHERE (sh.indicator_cancel IS NULL OR sh.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND sh.invoice_date BETWEEN v_prev_from AND LAST_DAY(v_prev_from)
+          AND sm.MAKTX NOT LIKE '%TREEL%'
+          AND sm.MAKTX NOT LIKE '%PACK TUBE%'
+          AND sm.MAKTX NOT LIKE '%LTR%'
+          AND sm.MAKTX NOT LIKE '%ALL STEEL%'
+          AND sm.MAKTX NOT LIKE '%STEEL BELTED%'
+          AND IFNULL(sm.BRAND, '') NOT IN ('JK', 'Vikrant')
+          AND IFNULL(sm.CATG, '') NOT IN ('JK', 'Vikrant')
+          AND IFNULL(sm.TYRE_TYPE, '') != 'OTR'
     ),
-    /* ============================================================
-       2. AGGREGATE ACTUALS BY ZONE (converted to Crores)
-       ============================================================ */
-    agg_actuals AS (
+    fact_current AS (
         SELECT
-            Zone_Name,
-            SUM(CASE WHEN billing__doc_date BETWEEN v_prev_from AND LAST_DAY(v_prev_from)
-                      AND Segment = '4_Whlrs'
-                     THEN NDP_INR ELSE 0 END) / 10000000 AS Prev_4W,
-            SUM(CASE WHEN billing__doc_date BETWEEN v_prev_from AND LAST_DAY(v_prev_from)
-                      AND Segment = '2_3_Whlrs'
-                     THEN NDP_INR ELSE 0 END) / 10000000 AS Prev_23W,
-            SUM(CASE WHEN billing__doc_date BETWEEN v_curr_from AND v_curr_to
-                      AND Segment = '4_Whlrs'
-                     THEN NDP_INR ELSE 0 END) / 10000000 AS Curr_4W,
-            SUM(CASE WHEN billing__doc_date BETWEEN v_curr_from AND v_curr_to
-                      AND Segment = '2_3_Whlrs'
-                     THEN NDP_INR ELSE 0 END) / 10000000 AS Curr_23W,
-            SUM(CASE WHEN billing__doc_date = v_curr_to
-                     THEN NDP_INR ELSE 0 END) / 10000000 AS Sale_For_Day
-        FROM fact_actuals
-        GROUP BY Zone_Name
-    ),
-    /* ============================================================
-       3. TARGETS FACT TABLE
-          Join path: sales_target
-                  -> material_master       (exclusion filters + segment)
-                  -> tyre_type_master (4W vs 2/3W segment)
-                  -> territory_master (get region from Terr Code)
-                  -> region_master    (get zone from region)
-       ============================================================ */
-      /* ============================================================
-       3. TARGETS FACT TABLE
-       ============================================================ */
-       fact_targets AS (
-        SELECT
-            CASE rm.zone
+            CASE COALESCE(zm.NAME, rm.zone_code, tm.P_ZONE)
                 WHEN 'EZ' THEN 'East'
                 WHEN 'NZ' THEN 'North'
                 WHEN 'CZ' THEN 'Central'
@@ -392,49 +395,57 @@ BEGIN
                 WHEN 'SZ' THEN 'South - I'
                 WHEN 'TZ' THEN 'South - II'
                 WHEN 'NP' THEN 'Nepal'
-                ELSE          'Unknown'
+                WHEN 'East' THEN 'East'
+                WHEN 'North' THEN 'North'
+                WHEN 'Central' THEN 'Central'
+                WHEN 'West' THEN 'West'
+                WHEN 'South - I' THEN 'South - I'
+                WHEN 'South - II' THEN 'South - II'
+                WHEN 'Nepal' THEN 'Nepal'
+                ELSE 'Unknown'
             END AS Zone_Name,
-
             CASE
-                WHEN UPPER(IFNULL(ttm.tyre_type_name, ''))
-                     IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER')
-                THEN '2_3_Whlrs'
+                WHEN UPPER(IFNULL(sm.TYRE_TYPE, '')) IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER') THEN '2_3_Whlrs'
                 ELSE '4_Whlrs'
             END AS Segment,
-
-            CAST(REPLACE(IFNULL(st.Value, '0'), ',', '') AS DECIMAL(18, 2)) AS Target_Val
-
-        FROM sales_target st                                     -- ✅ direct, no subquery
-        JOIN      material_master       sm  ON st.MATNR       = sm.MATNR
-        LEFT JOIN tyre_type_master ttm ON sm.tyre_type   = CAST(ttm.tyre_type_code AS CHAR)
-        LEFT JOIN territory_master tm  ON st.Terr_Code   = tm.territory_code  -- ✅ underscore
-        LEFT JOIN region_master    rm  ON tm.region_code = rm.region
-
-        WHERE st.Month = v_target_month
-            AND sm.MAKTX NOT LIKE '%TREEL%'
-            AND sm.MAKTX NOT LIKE '%PACK TUBE%'
-            AND sm.MAKTX NOT LIKE '%LTR%'
-            AND sm.MAKTX NOT LIKE '%ALL STEEL%'
-            AND sm.MAKTX NOT LIKE '%STEEL BELTED%'
-            AND IFNULL(sm.category, '')        NOT IN ('JK', 'Vikrant')
-            AND IFNULL(ttm.tyre_type_name, '') != 'OTR'
+            cs.invoice_date,
+            cs.ndp_value
+        FROM `zpvf_sd_currentsales_01_tr` cs
+        JOIN `zivr_skumaster_01_tr` sm ON cs.SKU = sm.MATNR
+        LEFT JOIN `zivf_customermaster_01_md` cm ON cs.dealer_code = cm.KUNNR
+        LEFT JOIN `zivf_territorymaster_01_tr` tm ON cm.BZIRK = tm.BZIRK
+        LEFT JOIN `zivf_regionmaster_md_01` rm ON tm.REGIO = rm.region_code
+        LEFT JOIN `zivf_zonemaster_01_tr` zm ON rm.zone_code = zm.P_ZONE
+        WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND cs.invoice_date BETWEEN v_curr_from AND v_curr_to
+          AND sm.MAKTX NOT LIKE '%TREEL%'
+          AND sm.MAKTX NOT LIKE '%PACK TUBE%'
+          AND sm.MAKTX NOT LIKE '%LTR%'
+          AND sm.MAKTX NOT LIKE '%ALL STEEL%'
+          AND sm.MAKTX NOT LIKE '%STEEL BELTED%'
+          AND IFNULL(sm.BRAND, '') NOT IN ('JK', 'Vikrant')
+          AND IFNULL(sm.CATG, '') NOT IN ('JK', 'Vikrant')
+          AND IFNULL(sm.TYRE_TYPE, '') != 'OTR'
     ),
-
-    /* ============================================================
-       4. AGGREGATE TARGETS BY ZONE (converted to Crores)
-       ============================================================ */
-    agg_targets AS (
+    /* 2. AGGREGATE ACTUALS BY ZONE (in Crores) */
+    agg_history AS (
         SELECT
             Zone_Name,
-            SUM(CASE WHEN Segment = '4_Whlrs'   THEN Target_Val ELSE 0 END) / 10000000 AS Tgt_4W,
-            SUM(CASE WHEN Segment = '2_3_Whlrs' THEN Target_Val ELSE 0 END) / 10000000 AS Tgt_23W
-        FROM fact_targets
+            SUM(CASE WHEN Segment = '4_Whlrs' THEN ndp_value ELSE 0 END) / 10000000 AS Prev_4W,
+            SUM(CASE WHEN Segment = '2_3_Whlrs' THEN ndp_value ELSE 0 END) / 10000000 AS Prev_23W
+        FROM fact_history
         GROUP BY Zone_Name
     ),
-    /* ============================================================
-       5. FIXED ZONE LIST
-          All 7 zones always appear even when no data exists
-       ============================================================ */
+    agg_current AS (
+        SELECT
+            Zone_Name,
+            SUM(CASE WHEN Segment = '4_Whlrs' THEN ndp_value ELSE 0 END) / 10000000 AS Curr_4W,
+            SUM(CASE WHEN Segment = '2_3_Whlrs' THEN ndp_value ELSE 0 END) / 10000000 AS Curr_23W,
+            SUM(CASE WHEN invoice_date = v_curr_to THEN ndp_value ELSE 0 END) / 10000000 AS Sale_For_Day
+        FROM fact_current
+        GROUP BY Zone_Name
+    ),
+    /* 3. FIXED ZONE LIST */
     all_zones AS (
         SELECT 'East'        AS Zone_Name, 1 AS Sort_Order UNION ALL
         SELECT 'North',                    2               UNION ALL
@@ -445,28 +456,24 @@ BEGIN
         SELECT 'Nepal',                    7               UNION ALL
         SELECT 'Unknown',                  8   
     ),
-    /* ============================================================
-       6. COMBINE ACTUALS + TARGETS ON FIXED ZONE LIST
-       ============================================================ */
+    /* 4. COMBINE ACTUALS */
     final AS (
         SELECT
             z.Zone_Name,
             z.Sort_Order,
-            IFNULL(a.Prev_4W,      0) AS Prev_4W,
-            IFNULL(a.Prev_23W,     0) AS Prev_23W,
-            IFNULL(a.Curr_4W,      0) AS Curr_4W,
-            IFNULL(a.Curr_23W,     0) AS Curr_23W,
-            IFNULL(a.Sale_For_Day, 0) AS Sale_For_Day,
-            IFNULL(t.Tgt_4W,       0) AS Tgt_4W,
-            IFNULL(t.Tgt_23W,      0) AS Tgt_23W
+            IFNULL(h.Prev_4W,      0) AS Prev_4W,
+            IFNULL(h.Prev_23W,     0) AS Prev_23W,
+            IFNULL(c.Curr_4W,      0) AS Curr_4W,
+            IFNULL(c.Curr_23W,     0) AS Curr_23W,
+            IFNULL(c.Sale_For_Day, 0) AS Sale_For_Day,
+            0                         AS Tgt_4W,
+            0                         AS Tgt_23W
         FROM all_zones z
-        LEFT JOIN agg_actuals a ON z.Zone_Name = a.Zone_Name
-        LEFT JOIN agg_targets t ON z.Zone_Name = t.Zone_Name
+        LEFT JOIN agg_history h ON z.Zone_Name = h.Zone_Name
+        LEFT JOIN agg_current c ON z.Zone_Name = c.Zone_Name
     )
-    /* ============================================================
-       7. FINAL OUTPUT + TOTAL ROW
-       ============================================================ */
-      SELECT
+    /* 5. FINAL OUTPUT + TOTAL ROW */
+    SELECT
         Zone_Name                                                            AS `Zone`,
         CAST(ROUND(Prev_4W,            2) AS CHAR)                           AS `Jul-25 4 Whlrs`,
         CAST(ROUND(Prev_23W,           2) AS CHAR)                           AS `Jul-25 2/3 Whlrs`,
@@ -504,34 +511,28 @@ BEGIN
         CONCAT(IFNULL(ROUND(SUM(Curr_23W)/NULLIF(SUM(Tgt_23W),0)*100,0),0),'%'),
         CONCAT(IFNULL(ROUND(SUM(Curr_4W+Curr_23W)/NULLIF(SUM(Tgt_4W+Tgt_23W),0)*100,0),0),'%')
     FROM final
-     UNION ALL
-
-    -- % Contribution row: only for 2026 (Target + Actual) columns
+    UNION ALL
+    -- % Contribution row
     SELECT
         '% Contribution',
-        NULL,   -- Jul-25 4 Whlrs: blank
-        NULL,   -- Jul-25 2/3 Whlrs: blank
-        NULL,   -- Jul-25 Total: blank
-        -- Target 4W contribution
+        NULL,
+        NULL,
+        NULL,
         CONCAT(IFNULL(ROUND(SUM(Tgt_4W) / NULLIF(SUM(Tgt_4W+Tgt_23W),0)*100, 0),0),'%'),
-        -- Target 2/3W contribution
         CONCAT(IFNULL(ROUND(SUM(Tgt_23W)/ NULLIF(SUM(Tgt_4W+Tgt_23W),0)*100, 0),0),'%'),
-        NULL,   -- Target Total: blank
-        -- Actual 4W contribution
+        NULL,
         CONCAT(IFNULL(ROUND(SUM(Curr_4W) / NULLIF(SUM(Curr_4W+Curr_23W),0)*100, 0),0),'%'),
-        -- Actual 2/3W contribution
         CONCAT(IFNULL(ROUND(SUM(Curr_23W)/ NULLIF(SUM(Curr_4W+Curr_23W),0)*100, 0),0),'%'),
-        NULL,   -- Actual Total: blank
-        NULL,   -- % Achvd
-        NULL,   -- Sale for the Day
-        NULL,   -- Asking Rate
-        NULL,   -- % Achvt 4W
-        NULL,   -- % Achvt 2/3W
-        NULL    -- % Achvt Total
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL
     FROM final
 
-
-   ORDER BY CASE `Zone`
+    ORDER BY CASE `Zone`
         WHEN 'East'           THEN 1
         WHEN 'North'          THEN 2
         WHEN 'Central'        THEN 3
@@ -539,14 +540,13 @@ BEGIN
         WHEN 'South - I'      THEN 5
         WHEN 'South - II'     THEN 6
         WHEN 'Nepal'          THEN 7
-        WHEN 'Unknown'        THEN 8       -- add this
+        WHEN 'Unknown'        THEN 8
         WHEN 'Total'          THEN 9
         WHEN '% Contribution' THEN 10
         ELSE 99
     END;
 END$$
 DELIMITER ;
-
 
 ----------------- sp_sales_report_by_values store procedure end ----------------------------------------------------------
 
@@ -562,20 +562,21 @@ CREATE PROCEDURE `sp_sales_summary_in_no_and_values_for_month`(
 BEGIN
     DECLARE v_curr_from    DATE;
     DECLARE v_curr_to      DATE;
-    DECLARE v_target_month INT;
+
     SET p_year  = IFNULL(p_year , YEAR(CURDATE()));
     SET p_month = IFNULL(p_month, MONTH(CURDATE()));
     SET p_day   = IFNULL(p_day  , DAY(CURDATE()));
+
     SET v_curr_from = STR_TO_DATE(CONCAT(p_year,'-',p_month,'-01'), '%Y-%c-%d');
     SET v_curr_to   = LEAST(STR_TO_DATE(CONCAT(p_year,'-',p_month,'-',p_day), '%Y-%c-%e'),
                             LAST_DAY(v_curr_from));
-    SET v_target_month = p_year * 100 + p_month;
+
     WITH
-    -- 1. Actual Sales Data Aggregated by Zone
+    -- 1. Actual Sales Data Aggregated by Zone (Current Month from zpvf_sd_currentsales_01_tr)
     agg_actuals AS (
         SELECT 
             IFNULL(
-                CASE rm.zone
+                CASE COALESCE(zm.NAME, rm.zone_code, tm.P_ZONE)
                     WHEN 'EZ' THEN 'East'
                     WHEN 'NZ' THEN 'North'
                     WHEN 'CZ' THEN 'Central'
@@ -583,93 +584,53 @@ BEGIN
                     WHEN 'SZ' THEN 'South - I'
                     WHEN 'TZ' THEN 'South - II'
                     WHEN 'NP' THEN 'Nepal'
+                    WHEN 'East' THEN 'East'
+                    WHEN 'North' THEN 'North'
+                    WHEN 'Central' THEN 'Central'
+                    WHEN 'West' THEN 'West'
+                    WHEN 'South - I' THEN 'South - I'
+                    WHEN 'South - II' THEN 'South - II'
+                    WHEN 'Nepal' THEN 'Nepal'
                     ELSE 'Unknown'
                 END, 'Unknown'
             ) AS Zone_Name,
             
-            SUM(CASE WHEN UPPER(IFNULL(tt.tyre_type_name, '')) NOT IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER') THEN sd.NDP_INR ELSE 0 END) / 10000000 AS `Val_4_Whlrs`,
-            SUM(CASE WHEN UPPER(IFNULL(tt.tyre_type_name, '')) IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER') THEN sd.NDP_INR ELSE 0 END) / 10000000 AS `Val_2_3_Whlrs`,
-            SUM(CASE WHEN tt.tyre_type_name = 'TRUCK' AND IFNULL(cm.construction_description, sm.construction) IN ('BIAS', '1') THEN sd.Sales_Qty ELSE 0 END) AS `TBB_Total`,
-            SUM(CASE WHEN tt.tyre_type_name = 'TRUCK' AND IFNULL(cm.construction_description, sm.construction) IN ('RADIAL', '2') THEN sd.Sales_Qty ELSE 0 END) AS `TBR_Total`,
-            SUM(CASE WHEN tt.tyre_type_name = 'LCV' AND IFNULL(cm.construction_description, sm.construction) IN ('BIAS', '1') THEN sd.Sales_Qty ELSE 0 END) AS `LCV_Bias`,
-            SUM(CASE WHEN tt.tyre_type_name = 'LCV' AND IFNULL(cm.construction_description, sm.construction) IN ('RADIAL', '2') THEN sd.Sales_Qty ELSE 0 END) AS `LCV_Radial`,
-            SUM(CASE WHEN tt.tyre_type_name = 'SCV' AND IFNULL(cm.construction_description, sm.construction) IN ('BIAS', '1') THEN sd.Sales_Qty ELSE 0 END) AS `SCV_Bias`,
-            SUM(CASE WHEN tt.tyre_type_name = 'SCV' AND IFNULL(cm.construction_description, sm.construction) IN ('RADIAL', '2') THEN sd.Sales_Qty ELSE 0 END) AS `SCV_Radial`,
-            SUM(CASE WHEN tt.tyre_type_name = 'CAR' AND IFNULL(cm.construction_description, sm.construction) IN ('BIAS', '1') THEN sd.Sales_Qty ELSE 0 END) AS `Car_Bias`,
-            SUM(CASE WHEN tt.tyre_type_name = 'CAR' AND IFNULL(cm.construction_description, sm.construction) IN ('RADIAL', '2') THEN sd.Sales_Qty ELSE 0 END) AS `Car_Radial`,
-            SUM(CASE WHEN tt.tyre_type_name = 'JEEP' AND IFNULL(cm.construction_description, sm.construction) IN ('BIAS', '1') THEN sd.Sales_Qty ELSE 0 END) AS `Jeep_Bias`,
-            SUM(CASE WHEN tt.tyre_type_name = 'JEEP' AND IFNULL(cm.construction_description, sm.construction) IN ('RADIAL', '2') THEN sd.Sales_Qty ELSE 0 END) AS `Jeep_Radial`,
-            SUM(CASE WHEN tt.tyre_type_name = 'TRACTOR FRONT' THEN sd.Sales_Qty ELSE 0 END) AS `Tr_Front`,
-            SUM(CASE WHEN tt.tyre_type_name = 'TRACTOR REAR' THEN sd.Sales_Qty ELSE 0 END) AS `Tr_Rear`,
-            SUM(CASE WHEN tt.tyre_type_name = 'TRACTOR TRAILER' THEN sd.Sales_Qty ELSE 0 END) AS `Tr_Trail`,
-            SUM(CASE WHEN tt.tyre_type_name = 'ADV' THEN sd.Sales_Qty ELSE 0 END) AS `ADV`,
-            SUM(CASE WHEN tt.tyre_type_name = '3W' THEN sd.Sales_Qty ELSE 0 END) AS `3_Whlrs`,
-            SUM(CASE WHEN tt.tyre_type_name = 'SCOOTER' THEN sd.Sales_Qty ELSE 0 END) AS `Scooter`,
-            SUM(CASE WHEN tt.tyre_type_name = 'Motor Cycle' THEN sd.Sales_Qty ELSE 0 END) AS `Motor`
-        FROM sales_data sd
-        JOIN material_master sm ON sd.material = sm.MATNR
-        LEFT JOIN tyre_type_master tt ON tt.tyre_type_code = CAST(sm.tyre_type AS CHAR)
-        LEFT JOIN construction_master cm ON cm.construction_code = CAST(sm.construction AS CHAR)
-        LEFT JOIN customer_master cust ON cust.KUNNR = sd.customer
-        LEFT JOIN territory_master tm ON tm.territory_code = CAST(cust.territory AS CHAR)
-        LEFT JOIN region_master rm ON rm.region = tm.region_code
-        WHERE sd.billing__doc_date BETWEEN v_curr_from AND v_curr_to
+            SUM(CASE WHEN UPPER(IFNULL(sm.TYRE_TYPE, '')) NOT IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER') THEN cs.ndp_value ELSE 0 END) / 10000000 AS `Val_4_Whlrs`,
+            SUM(CASE WHEN UPPER(IFNULL(sm.TYRE_TYPE, '')) IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER') THEN cs.ndp_value ELSE 0 END) / 10000000 AS `Val_2_3_Whlrs`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'TRUCK' AND UPPER(IFNULL(sm.CONSTUCTION, '')) IN ('BIAS', '1') THEN cs.Tyre_Quantity ELSE 0 END) AS `TBB_Total`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'TRUCK' AND UPPER(IFNULL(sm.CONSTUCTION, '')) IN ('RADIAL', '2') THEN cs.Tyre_Quantity ELSE 0 END) AS `TBR_Total`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'LCV' AND UPPER(IFNULL(sm.CONSTUCTION, '')) IN ('BIAS', '1') THEN cs.Tyre_Quantity ELSE 0 END) AS `LCV_Bias`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'LCV' AND UPPER(IFNULL(sm.CONSTUCTION, '')) IN ('RADIAL', '2') THEN cs.Tyre_Quantity ELSE 0 END) AS `LCV_Radial`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'SCV' AND UPPER(IFNULL(sm.CONSTUCTION, '')) IN ('BIAS', '1') THEN cs.Tyre_Quantity ELSE 0 END) AS `SCV_Bias`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'SCV' AND UPPER(IFNULL(sm.CONSTUCTION, '')) IN ('RADIAL', '2') THEN cs.Tyre_Quantity ELSE 0 END) AS `SCV_Radial`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'CAR' AND UPPER(IFNULL(sm.CONSTUCTION, '')) IN ('BIAS', '1') THEN cs.Tyre_Quantity ELSE 0 END) AS `Car_Bias`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'CAR' AND UPPER(IFNULL(sm.CONSTUCTION, '')) IN ('RADIAL', '2') THEN cs.Tyre_Quantity ELSE 0 END) AS `Car_Radial`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'JEEP' AND UPPER(IFNULL(sm.CONSTUCTION, '')) IN ('BIAS', '1') THEN cs.Tyre_Quantity ELSE 0 END) AS `Jeep_Bias`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'JEEP' AND UPPER(IFNULL(sm.CONSTUCTION, '')) IN ('RADIAL', '2') THEN cs.Tyre_Quantity ELSE 0 END) AS `Jeep_Radial`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'TRACTOR FRONT' THEN cs.Tyre_Quantity ELSE 0 END) AS `Tr_Front`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'TRACTOR REAR' THEN cs.Tyre_Quantity ELSE 0 END) AS `Tr_Rear`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'TRACTOR TRAILER' THEN cs.Tyre_Quantity ELSE 0 END) AS `Tr_Trail`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'ADV' THEN cs.Tyre_Quantity ELSE 0 END) AS `ADV`,
+            SUM(CASE WHEN sm.TYRE_TYPE = '3W' THEN cs.Tyre_Quantity ELSE 0 END) AS `3_Whlrs`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'SCOOTER' THEN cs.Tyre_Quantity ELSE 0 END) AS `Scooter`,
+            SUM(CASE WHEN sm.TYRE_TYPE = 'Motor Cycle' THEN cs.Tyre_Quantity ELSE 0 END) AS `Motor`
+        FROM `zpvf_sd_currentsales_01_tr` cs
+        JOIN `zivr_skumaster_01_tr` sm ON cs.SKU = sm.MATNR
+        LEFT JOIN `zivf_customermaster_01_md` cust ON cust.KUNNR = cs.dealer_code
+        LEFT JOIN `zivf_territorymaster_01_tr` tm ON tm.BZIRK = cust.BZIRK
+        LEFT JOIN `zivf_regionmaster_md_01` rm ON rm.region_code = tm.REGIO
+        LEFT JOIN `zivf_zonemaster_01_tr` zm ON rm.zone_code = zm.P_ZONE
+        WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND cs.invoice_date BETWEEN v_curr_from AND v_curr_to
           AND sm.MTART = 'ZFGS'
           AND sm.MAKTX NOT LIKE '%TREEL%'
           AND sm.MAKTX NOT LIKE '%PACK TUBE%'
           AND sm.MAKTX NOT LIKE '%SMART TYRE%'
-          AND IFNULL(sm.category, '') NOT IN ('JK', 'Vikrant')
+          AND IFNULL(sm.BRAND, '') NOT IN ('JK', 'Vikrant')
+          AND IFNULL(sm.CATG, '') NOT IN ('JK', 'Vikrant')
         GROUP BY Zone_Name
     ),
-    -- 2. Target Data Aggregated by Zone
-    agg_targets AS (
-        SELECT 
-            IFNULL(
-                CASE rm.zone
-                    WHEN 'EZ' THEN 'East'
-                    WHEN 'NZ' THEN 'North'
-                    WHEN 'CZ' THEN 'Central'
-                    WHEN 'WZ' THEN 'West'
-                    WHEN 'SZ' THEN 'South - I'
-                    WHEN 'TZ' THEN 'South - II'
-                    WHEN 'NP' THEN 'Nepal'
-                    ELSE 'Unknown'
-                END, 'Unknown'
-            ) AS Zone_Name,
-            
-            SUM(CASE WHEN UPPER(IFNULL(tt.tyre_type_name, '')) NOT IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER') THEN CAST(REPLACE(IFNULL(st.Value, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) / 10000000 AS `Val_4_Whlrs`, 
-            SUM(CASE WHEN UPPER(IFNULL(tt.tyre_type_name, '')) IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER') THEN CAST(REPLACE(IFNULL(st.Value, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) / 10000000 AS `Val_2_3_Whlrs`,
-            SUM(CASE WHEN tt.tyre_type_name = 'TRUCK' AND IFNULL(cm.construction_description, sm.construction) IN ('BIAS', '1') THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `TBB_Total`,
-            SUM(CASE WHEN tt.tyre_type_name = 'TRUCK' AND IFNULL(cm.construction_description, sm.construction) IN ('RADIAL', '2') THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `TBR_Total`,
-            SUM(CASE WHEN tt.tyre_type_name = 'LCV' AND IFNULL(cm.construction_description, sm.construction) IN ('BIAS', '1') THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `LCV_Bias`,
-            SUM(CASE WHEN tt.tyre_type_name = 'LCV' AND IFNULL(cm.construction_description, sm.construction) IN ('RADIAL', '2') THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `LCV_Radial`,
-            SUM(CASE WHEN tt.tyre_type_name = 'SCV' AND IFNULL(cm.construction_description, sm.construction) IN ('BIAS', '1') THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `SCV_Bias`,
-            SUM(CASE WHEN tt.tyre_type_name = 'SCV' AND IFNULL(cm.construction_description, sm.construction) IN ('RADIAL', '2') THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `SCV_Radial`,
-            SUM(CASE WHEN tt.tyre_type_name = 'CAR' AND IFNULL(cm.construction_description, sm.construction) IN ('BIAS', '1') THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `Car_Bias`,
-            SUM(CASE WHEN tt.tyre_type_name = 'CAR' AND IFNULL(cm.construction_description, sm.construction) IN ('RADIAL', '2') THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `Car_Radial`,
-            SUM(CASE WHEN tt.tyre_type_name = 'JEEP' AND IFNULL(cm.construction_description, sm.construction) IN ('BIAS', '1') THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `Jeep_Bias`,
-            SUM(CASE WHEN tt.tyre_type_name = 'JEEP' AND IFNULL(cm.construction_description, sm.construction) IN ('RADIAL', '2') THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `Jeep_Radial`,
-            SUM(CASE WHEN tt.tyre_type_name = 'TRACTOR FRONT' THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `Tr_Front`,
-            SUM(CASE WHEN tt.tyre_type_name = 'TRACTOR REAR' THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `Tr_Rear`,
-            SUM(CASE WHEN tt.tyre_type_name = 'TRACTOR TRAILER' THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `Tr_Trail`,
-            SUM(CASE WHEN tt.tyre_type_name = 'ADV' THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `ADV`,
-            SUM(CASE WHEN tt.tyre_type_name = '3W' THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `3_Whlrs`,
-            SUM(CASE WHEN tt.tyre_type_name = 'SCOOTER' THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `Scooter`,
-            SUM(CASE WHEN tt.tyre_type_name = 'Motor Cycle' THEN CAST(REPLACE(IFNULL(st.Qty, '0'), ',', '') AS DECIMAL(18, 2)) ELSE 0 END) AS `Motor`
-        FROM sales_target st
-        JOIN material_master sm ON st.MATNR = sm.MATNR
-        LEFT JOIN tyre_type_master tt ON tt.tyre_type_code = CAST(sm.tyre_type AS CHAR)
-        LEFT JOIN construction_master cm ON cm.construction_code = CAST(sm.construction AS CHAR)
-        LEFT JOIN territory_master tm ON tm.territory_code = st.Terr_Code
-        LEFT JOIN region_master rm ON rm.region = tm.region_code
-        WHERE st.Month = v_target_month
-          AND sm.MAKTX NOT LIKE '%TREEL%'
-          AND sm.MAKTX NOT LIKE '%PACK TUBE%'
-          AND sm.MAKTX NOT LIKE '%SMART TYRE%'
-          AND IFNULL(sm.category, '') NOT IN ('JK', 'Vikrant')
-        GROUP BY Zone_Name
-    ),
-    -- 3. All Zones List to ensure consistent order
+    -- 2. All Zones List
     all_zones AS (
         SELECT 'East' AS Zone_Name UNION ALL
         SELECT 'North' UNION ALL
@@ -680,35 +641,34 @@ BEGIN
         SELECT 'Nepal' UNION ALL
         SELECT 'Unknown'
     ),
-    -- 4. Final Combined Data
+    -- 3. Final Combined Data
     final_data AS (
         SELECT 
             z.Zone_Name,
-            IFNULL(a.Val_4_Whlrs, 0) AS Act_Val_4W, IFNULL(t.Val_4_Whlrs, 0) AS Tgt_Val_4W,
-            IFNULL(a.Val_2_3_Whlrs, 0) AS Act_Val_23W, IFNULL(t.Val_2_3_Whlrs, 0) AS Tgt_Val_23W,
-            IFNULL(a.TBB_Total, 0) AS Act_TBB, IFNULL(t.TBB_Total, 0) AS Tgt_TBB,
-            IFNULL(a.TBR_Total, 0) AS Act_TBR, IFNULL(t.TBR_Total, 0) AS Tgt_TBR,
-            IFNULL(a.LCV_Bias, 0) AS Act_LCV_B, IFNULL(t.LCV_Bias, 0) AS Tgt_LCV_B,
-            IFNULL(a.LCV_Radial, 0) AS Act_LCV_R, IFNULL(t.LCV_Radial, 0) AS Tgt_LCV_R,
-            IFNULL(a.SCV_Bias, 0) AS Act_SCV_B, IFNULL(t.SCV_Bias, 0) AS Tgt_SCV_B,
-            IFNULL(a.SCV_Radial, 0) AS Act_SCV_R, IFNULL(t.SCV_Radial, 0) AS Tgt_SCV_R,
-            IFNULL(a.Car_Bias, 0) AS Act_Car_B, IFNULL(t.Car_Bias, 0) AS Tgt_Car_B,
-            IFNULL(a.Car_Radial, 0) AS Act_Car_R, IFNULL(t.Car_Radial, 0) AS Tgt_Car_R,
-            IFNULL(a.Jeep_Bias, 0) AS Act_Jeep_B, IFNULL(t.Jeep_Bias, 0) AS Tgt_Jeep_B,
-            IFNULL(a.Jeep_Radial, 0) AS Act_Jeep_R, IFNULL(t.Jeep_Radial, 0) AS Tgt_Jeep_R,
-            IFNULL(a.Tr_Front, 0) AS Act_TrF, IFNULL(t.Tr_Front, 0) AS Tgt_TrF,
-            IFNULL(a.Tr_Rear, 0) AS Act_TrR, IFNULL(t.Tr_Rear, 0) AS Tgt_TrR,
-            IFNULL(a.Tr_Trail, 0) AS Act_TrT, IFNULL(t.Tr_Trail, 0) AS Tgt_TrT,
-            IFNULL(a.ADV, 0) AS Act_ADV, IFNULL(t.ADV, 0) AS Tgt_ADV,
-            IFNULL(a.`3_Whlrs`, 0) AS Act_3W, IFNULL(t.`3_Whlrs`, 0) AS Tgt_3W,
-            IFNULL(a.Scooter, 0) AS Act_Scoot, IFNULL(t.Scooter, 0) AS Tgt_Scoot,
-            IFNULL(a.Motor, 0) AS Act_Motor, IFNULL(t.Motor, 0) AS Tgt_Motor
+            IFNULL(a.Val_4_Whlrs, 0) AS Act_Val_4W, 0 AS Tgt_Val_4W,
+            IFNULL(a.Val_2_3_Whlrs, 0) AS Act_Val_23W, 0 AS Tgt_Val_23W,
+            IFNULL(a.TBB_Total, 0) AS Act_TBB, 0 AS Tgt_TBB,
+            IFNULL(a.TBR_Total, 0) AS Act_TBR, 0 AS Tgt_TBR,
+            IFNULL(a.LCV_Bias, 0) AS Act_LCV_B, 0 AS Tgt_LCV_B,
+            IFNULL(a.LCV_Radial, 0) AS Act_LCV_R, 0 AS Tgt_LCV_R,
+            IFNULL(a.SCV_Bias, 0) AS Act_SCV_B, 0 AS Tgt_SCV_B,
+            IFNULL(a.SCV_Radial, 0) AS Act_SCV_R, 0 AS Tgt_SCV_R,
+            IFNULL(a.Car_Bias, 0) AS Act_Car_B, 0 AS Tgt_Car_B,
+            IFNULL(a.Car_Radial, 0) AS Act_Car_R, 0 AS Tgt_Car_R,
+            IFNULL(a.Jeep_Bias, 0) AS Act_Jeep_B, 0 AS Tgt_Jeep_B,
+            IFNULL(a.Jeep_Radial, 0) AS Act_Jeep_R, 0 AS Tgt_Jeep_R,
+            IFNULL(a.Tr_Front, 0) AS Act_TrF, 0 AS Tgt_TrF,
+            IFNULL(a.Tr_Rear, 0) AS Act_TrR, 0 AS Tgt_TrR,
+            IFNULL(a.Tr_Trail, 0) AS Act_TrT, 0 AS Tgt_TrT,
+            IFNULL(a.ADV, 0) AS Act_ADV, 0 AS Tgt_ADV,
+            IFNULL(a.`3_Whlrs`, 0) AS Act_3W, 0 AS Tgt_3W,
+            IFNULL(a.Scooter, 0) AS Act_Scoot, 0 AS Tgt_Scoot,
+            IFNULL(a.Motor, 0) AS Act_Motor, 0 AS Tgt_Motor
         FROM all_zones z
         LEFT JOIN agg_actuals a ON z.Zone_Name = a.Zone_Name
-        LEFT JOIN agg_targets t ON z.Zone_Name = t.Zone_Name
     )
     
-    -- 5. Final Output
+    -- 4. Final Output
     -- ACTUAL ROWS
     SELECT 
         Zone_Name AS `Zone`, 'Actual' AS `Type`,
@@ -827,7 +787,6 @@ BEGIN
 END$$
 DELIMITER ;
 
-
 ----------------- sp_sales_summary_in_no_and_values_for_month store procedure end ----------------------------------------------------------
 
 ----------------- sp_get_sales_revenue_by_zone store procedure start ----------------------------------------------------------
@@ -838,71 +797,34 @@ CREATE PROCEDURE `sp_get_sales_revenue_by_zone`(IN p_zone VARCHAR(50))
 BEGIN
     IF p_zone IS NULL OR p_zone = '' OR p_zone = 'All' THEN
         SELECT 
-            COALESCE(s.zone, t.zone) AS zone,
-            COALESCE(s.saleValueCr, 0) AS saleValueCr,
-            COALESCE(t.planValueCr, 0) AS planValueCr,
-            CASE 
-                WHEN COALESCE(t.planValueCr, 0) > 0 THEN ROUND((COALESCE(s.saleValueCr, 0) / t.planValueCr) * 100, 2)
-                ELSE 0 
-            END AS achievValuePct
-        FROM (
-            -- Sales Data (Actual)
-            SELECT 
-                rm.zone AS zone, 
-                ROUND(SUM(sd.Invoice_Value_INR) / 10000000, 2) AS saleValueCr
-            FROM sales_data sd
-            JOIN customer_master cust ON sd.customer = cust.KUNNR
-            JOIN territory_master tm ON cust.territory = tm.territory_code
-            JOIN region_master rm ON tm.region_code = rm.region
-            GROUP BY rm.zone
-        ) s
-        LEFT JOIN (
-            -- Target Data (Plan)
-            SELECT 
-                rm.zone AS zone, 
-                ROUND(SUM(st.Value) / 10000000, 2) AS planValueCr
-            FROM sales_target st
-            JOIN territory_master tm ON st.Terr_Code = tm.territory_code
-            JOIN region_master rm ON tm.region_code = rm.region
-            GROUP BY rm.zone
-        ) t ON s.zone = t.zone;
-
+            COALESCE(zm.NAME, rm.zone_code, tm.P_ZONE, 'Unknown') AS zone, 
+            ROUND(SUM(cs.invoice_value) / 10000000, 2)              AS saleValueCr,
+            0                                                      AS planValueCr,
+            0                                                      AS achievValuePct
+        FROM `zpvf_sd_currentsales_01_tr` cs
+        JOIN `zivf_customermaster_01_md` cust ON cs.dealer_code = cust.KUNNR
+        JOIN `zivf_territorymaster_01_tr` tm ON cust.BZIRK = tm.BZIRK
+        JOIN `zivf_regionmaster_md_01` rm ON tm.REGIO = rm.region_code
+        LEFT JOIN `zivf_zonemaster_01_tr` zm ON rm.zone_code = zm.P_ZONE
+        WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+        GROUP BY COALESCE(zm.NAME, rm.zone_code, tm.P_ZONE, 'Unknown');
     ELSE
         SELECT 
-            COALESCE(s.region, t.region) AS region,
-            COALESCE(s.saleValueCr, 0) AS saleValueCr,
-            COALESCE(t.planValueCr, 0) AS planValueCr,
-            CASE 
-                WHEN COALESCE(t.planValueCr, 0) > 0 THEN ROUND((COALESCE(s.saleValueCr, 0) / t.planValueCr) * 100, 2)
-                ELSE 0 
-            END AS achievValuePct
-        FROM (
-            -- Sales Data (Actual)
-            SELECT 
-                rm.region_name AS region, 
-                ROUND(SUM(sd.Invoice_Value_INR) / 10000000, 2) AS saleValueCr
-            FROM sales_data sd
-            JOIN customer_master cust ON sd.customer = cust.KUNNR
-            JOIN territory_master tm ON cust.territory = tm.territory_code
-            JOIN region_master rm ON tm.region_code = rm.region
-            WHERE rm.zone = p_zone
-            GROUP BY rm.region_name
-        ) s
-        LEFT JOIN (
-            -- Target Data (Plan)
-            SELECT 
-                rm.region_name AS region, 
-                ROUND(SUM(st.Value) / 10000000, 2) AS planValueCr
-            FROM sales_target st
-            JOIN territory_master tm ON st.Terr_Code = tm.territory_code
-            JOIN region_master rm ON tm.region_code = rm.region
-            WHERE rm.zone = p_zone
-            GROUP BY rm.region_name
-        ) t ON s.region = t.region;
+            rm.region_name                             AS region, 
+            ROUND(SUM(cs.invoice_value) / 10000000, 2) AS saleValueCr,
+            0                                          AS planValueCr,
+            0                                          AS achievValuePct
+        FROM `zpvf_sd_currentsales_01_tr` cs
+        JOIN `zivf_customermaster_01_md` cust ON cs.dealer_code = cust.KUNNR
+        JOIN `zivf_territorymaster_01_tr` tm ON cust.BZIRK = tm.BZIRK
+        JOIN `zivf_regionmaster_md_01` rm ON tm.REGIO = rm.region_code
+        LEFT JOIN `zivf_zonemaster_01_tr` zm ON rm.zone_code = zm.P_ZONE
+        WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (zm.NAME = p_zone OR rm.zone_code = p_zone OR tm.P_ZONE = p_zone)
+        GROUP BY rm.region_name;
     END IF;
 END$$
 DELIMITER ;
-
 
 ----------------- sp_get_sales_revenue_by_zone store procedure end ----------------------------------------------------------
 
@@ -912,24 +834,38 @@ DELIMITER $$
 DROP PROCEDURE IF EXISTS sp_get_sales_by_account_category $$
 CREATE PROCEDURE `sp_get_sales_by_account_category`(IN p_zone VARCHAR(50))
 BEGIN
+    WITH filtered_data AS (
+        SELECT 
+            CASE 
+                WHEN cm.BRAND_SHOP = 'Y' THEN 'Brand Shops'
+                WHEN cm.CH_TYPE = 'DL' THEN 'Dealers'
+                WHEN cm.CH_TYPE = 'DB' THEN 'Distributors'
+                WHEN cm.CH_TYPE = 'FL' THEN 'Fleets'
+                WHEN cm.CH_TYPE IS NOT NULL AND cm.CH_TYPE != '' THEN cm.CH_TYPE
+                WHEN cm.KTOKD IS NOT NULL AND cm.KTOKD != '' THEN cm.KTOKD
+                ELSE 'Other'
+            END AS title,
+            cs.invoice_value
+        FROM `zpvf_sd_currentsales_01_tr` cs
+        JOIN `zivf_customermaster_01_md` cm ON cs.dealer_code = cm.KUNNR
+        LEFT JOIN `zivf_territorymaster_01_tr` tm ON cm.BZIRK = tm.BZIRK
+        LEFT JOIN `zivf_regionmaster_md_01` rm ON tm.REGIO = rm.region_code
+        LEFT JOIN `zivf_zonemaster_01_tr` zm ON rm.zone_code = zm.P_ZONE
+        WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (p_zone IS NULL OR p_zone = '' OR p_zone = 'All' OR zm.NAME = p_zone OR rm.zone_code = p_zone OR tm.P_ZONE = p_zone)
+    ),
+    totals AS (
+        SELECT SUM(invoice_value) AS grand_total FROM filtered_data
+    )
     SELECT 
-        CASE 
-            WHEN cm.BRAND_SHOP = 'Y' THEN 'Brand Shops'
-            ELSE COALESCE(ag.account_group_name, 'Other')
-        END AS title,
-        ROUND(SUM(sd.Invoice_Value_INR) / 10000000, 2) AS valCr,
-        CONCAT(ROUND(SUM(sd.Invoice_Value_INR) / 10000000, 2), ' (', 
-               ROUND((SUM(sd.Invoice_Value_INR) / (SELECT SUM(Invoice_Value_INR) FROM sales_data)) * 100, 0), '%)') AS value
-    FROM sales_data sd
-    JOIN customer_master cm ON sd.customer = cm.KUNNR
-    LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
-    LEFT JOIN territory_master tm ON cm.territory = tm.territory_code
-    LEFT JOIN region_master rm ON tm.region_code = rm.region
-    WHERE (p_zone IS NULL OR p_zone = '' OR rm.zone = p_zone)
+        title,
+        ROUND(SUM(invoice_value) / 10000000, 2) AS valCr,
+        CONCAT(ROUND(SUM(invoice_value) / 10000000, 2), ' (', 
+               ROUND((SUM(invoice_value) / NULLIF((SELECT grand_total FROM totals), 0)) * 100, 0), '%)') AS value
+    FROM filtered_data
     GROUP BY title;
 END$$
 DELIMITER ;
-
 
 ----------------- sp_get_sales_by_account_category store procedure end ----------------------------------------------------------
 
@@ -939,24 +875,31 @@ DELIMITER $$
 DROP PROCEDURE IF EXISTS sp_get_non_billed_accounts_pct $$
 CREATE PROCEDURE `sp_get_non_billed_accounts_pct`(IN p_zone VARCHAR(50))
 BEGIN
+    WITH current_month_sales AS (
+        SELECT DISTINCT dealer_code
+        FROM `zpvf_sd_currentsales_01_tr`
+        WHERE (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1'))
+    )
     SELECT 
         CASE 
             WHEN cm.BRAND_SHOP = 'Y' THEN 'Brand Shops'
-            ELSE COALESCE(ag.account_group_name, 'Other')
+            WHEN cm.CH_TYPE = 'DL' THEN 'Dealers'
+            WHEN cm.CH_TYPE = 'DB' THEN 'Distributors'
+            WHEN cm.CH_TYPE = 'FL' THEN 'Fleets'
+            WHEN cm.CH_TYPE IS NOT NULL AND cm.CH_TYPE != '' THEN cm.CH_TYPE
+            WHEN cm.KTOKD IS NOT NULL AND cm.KTOKD != '' THEN cm.KTOKD
+            ELSE 'Other'
         END AS category_name,
-        ROUND((COUNT(DISTINCT CASE WHEN sd.customer IS NULL THEN cm.KUNNR END) / NULLIF(COUNT(DISTINCT cm.KUNNR), 0)) * 100, 2) AS nonBilledPct
-    FROM customer_master cm
-    LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
-    LEFT JOIN sales_data sd ON cm.KUNNR = sd.customer 
-        AND MONTH(sd.billing__doc_date) = MONTH(CURDATE()) 
-        AND YEAR(sd.billing__doc_date) = YEAR(CURDATE())
-    LEFT JOIN territory_master tm ON cm.territory = tm.territory_code
-    LEFT JOIN region_master rm ON tm.region_code = rm.region
-    WHERE (p_zone IS NULL OR p_zone = '' OR rm.zone = p_zone)
+        ROUND((COUNT(DISTINCT CASE WHEN cms.dealer_code IS NULL THEN cm.KUNNR END) / NULLIF(COUNT(DISTINCT cm.KUNNR), 0)) * 100, 2) AS nonBilledPct
+    FROM `zivf_customermaster_01_md` cm
+    LEFT JOIN current_month_sales cms ON cm.KUNNR = cms.dealer_code
+    LEFT JOIN `zivf_territorymaster_01_tr` tm ON cm.BZIRK = tm.BZIRK
+    LEFT JOIN `zivf_regionmaster_md_01` rm ON tm.REGIO = rm.region_code
+    LEFT JOIN `zivf_zonemaster_01_tr` zm ON rm.zone_code = zm.P_ZONE
+    WHERE (p_zone IS NULL OR p_zone = '' OR p_zone = 'All' OR zm.NAME = p_zone OR rm.zone_code = p_zone OR tm.P_ZONE = p_zone)
     GROUP BY category_name;
 END$$
 DELIMITER ;
-
 
 ----------------- sp_get_non_billed_accounts_pct store procedure end ----------------------------------------------------------
 
@@ -966,29 +909,22 @@ DELIMITER $$
 DROP PROCEDURE IF EXISTS sp_get_overdue_pct $$
 CREATE PROCEDURE `sp_get_overdue_pct`(IN p_zone VARCHAR(50))
 BEGIN
-    SELECT '31 - 45' AS name, ROUND((COUNT(*) * 7.5) % 65, 1) AS value, '#38BDF8' AS fill
-    FROM sales_data sd
-    JOIN customer_master cm ON sd.customer = cm.KUNNR
-    LEFT JOIN territory_master tm ON cm.territory = tm.territory_code
-    LEFT JOIN region_master rm ON tm.region_code = rm.region
-    WHERE (p_zone IS NULL OR p_zone = '' OR rm.zone = p_zone)
+    DECLARE v_cnt INT DEFAULT 0;
+
+    SELECT COUNT(*) INTO v_cnt
+    FROM `zivf_customermaster_01_md` cm
+    LEFT JOIN `zivf_territorymaster_01_tr` tm ON cm.BZIRK = tm.BZIRK
+    LEFT JOIN `zivf_regionmaster_md_01` rm ON tm.REGIO = rm.region_code
+    LEFT JOIN `zivf_zonemaster_01_tr` zm ON rm.zone_code = zm.P_ZONE
+    WHERE (p_zone IS NULL OR p_zone = '' OR p_zone = 'All' OR zm.NAME = p_zone OR rm.zone_code = p_zone OR tm.P_ZONE = p_zone);
+
+    SELECT '31 - 45' AS name, ROUND((v_cnt * 7.5) % 65, 1) AS value, '#38BDF8' AS fill
     UNION ALL
-    SELECT '46 - 90', ROUND((COUNT(*) * 3.2) % 25, 1), '#A3E635'
-    FROM sales_data sd
-    JOIN customer_master cm ON sd.customer = cm.KUNNR
-    LEFT JOIN territory_master tm ON cm.territory = tm.territory_code
-    LEFT JOIN region_master rm ON tm.region_code = rm.region
-    WHERE (p_zone IS NULL OR p_zone = '' OR rm.zone = p_zone)
+    SELECT '46 - 90', ROUND((v_cnt * 3.2) % 25, 1), '#A3E635'
     UNION ALL
-    SELECT '90+', ROUND((COUNT(*) * 5.1) % 10, 1), '#FBBF24'
-    FROM sales_data sd
-    JOIN customer_master cm ON sd.customer = cm.KUNNR
-    LEFT JOIN territory_master tm ON cm.territory = tm.territory_code
-    LEFT JOIN region_master rm ON tm.region_code = rm.region
-    WHERE (p_zone IS NULL OR p_zone = '' OR rm.zone = p_zone);
+    SELECT '90+', ROUND((v_cnt * 5.1) % 10, 1), '#FBBF24';
 END$$
 DELIMITER ;
-
 
 ----------------- sp_get_overdue_pct store procedure end ----------------------------------------------------------
 
@@ -1001,69 +937,54 @@ BEGIN
     SELECT 
         CASE 
             WHEN cm.BRAND_SHOP = 'Y' THEN 'Brand Shops'
-            ELSE COALESCE(ag.account_group_name, 'Other')
+            WHEN cm.CH_TYPE = 'DL' THEN 'Dealers'
+            WHEN cm.CH_TYPE = 'DB' THEN 'Distributors'
+            WHEN cm.CH_TYPE = 'FL' THEN 'Fleets'
+            WHEN cm.CH_TYPE IS NOT NULL AND cm.CH_TYPE != '' THEN cm.CH_TYPE
+            WHEN cm.KTOKD IS NOT NULL AND cm.KTOKD != '' THEN cm.KTOKD
+            ELSE 'Other'
         END AS name,
         ROUND((COUNT(cm.KUNNR) * 12.5) % 100, 0) AS value
-    FROM customer_master cm
-    LEFT JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
-    LEFT JOIN territory_master tm ON cm.territory = tm.territory_code
-    LEFT JOIN region_master rm ON tm.region_code = rm.region
-    WHERE (p_zone IS NULL OR p_zone = '' OR rm.zone = p_zone)
+    FROM `zivf_customermaster_01_md` cm
+    LEFT JOIN `zivf_territorymaster_01_tr` tm ON cm.BZIRK = tm.BZIRK
+    LEFT JOIN `zivf_regionmaster_md_01` rm ON tm.REGIO = rm.region_code
+    LEFT JOIN `zivf_zonemaster_01_tr` zm ON rm.zone_code = zm.P_ZONE
+    WHERE (p_zone IS NULL OR p_zone = '' OR p_zone = 'All' OR zm.NAME = p_zone OR rm.zone_code = p_zone OR tm.P_ZONE = p_zone)
     GROUP BY name;
 END$$
 DELIMITER ;
 
-
 ----------------- sp_get_exposure_pct store procedure end ----------------------------------------------------------
-
 
 ----------------- sp_get_category_sales store procedure start ----------------------------------------------------------
 DELIMITER $$
 
 DROP PROCEDURE IF EXISTS sp_get_category_sales $$
-
 CREATE PROCEDURE `sp_get_category_sales`(IN p_zone VARCHAR(50))
 BEGIN
-    IF p_zone IS NULL OR p_zone = '' OR p_zone = 'null' THEN
-        -- No zone filter, fast query (Default Page Load)
-        SELECT 
-            cm.category_name AS category, 
-            ROUND(SUM(sd.Invoice_Value_INR) / 10000000, 2) AS total_sales_cr
-        FROM sales_data sd
-        JOIN material_master sku ON sd.material = sku.matnr
-        JOIN category_master cm ON sku.category = cm.category_code
-        GROUP BY cm.category_name
-        HAVING total_sales_cr > 0;
-    ELSE
-        -- Filter by zone using IN clause for much better performance
-        SELECT 
-            cm.category_name AS category, 
-            ROUND(SUM(sd.Invoice_Value_INR) / 10000000, 2) AS total_sales_cr
-        FROM sales_data sd
-        JOIN material_master sku ON sd.material = sku.matnr
-        JOIN category_master cm ON sku.category = cm.category_code
-        WHERE sd.customer IN (
-            SELECT cust.KUNNR
-            FROM customer_master cust
-            JOIN territory_master tm ON cust.territory = tm.territory_code
-            JOIN region_master rm ON tm.region_code = rm.region
-            WHERE rm.zone = p_zone
-        )
-        GROUP BY cm.category_name
-        HAVING total_sales_cr > 0;
-    END IF;
+    SELECT 
+        COALESCE(cat.CAT_DESC, sku.TYRE_TYPE, sku.CAT_CODE, 'Other') AS category, 
+        ROUND(SUM(cs.invoice_value) / 10000000, 2)                     AS total_sales_cr
+    FROM `zpvf_sd_currentsales_01_tr` cs
+    JOIN `zivr_skumaster_01_tr` sku ON cs.SKU = sku.MATNR
+    LEFT JOIN `zivf_categorymaster_01_tr` cat ON sku.CAT_CODE = cat.CAT_CODE
+    JOIN `zivf_customermaster_01_md` cust ON cs.dealer_code = cust.KUNNR
+    LEFT JOIN `zivf_territorymaster_01_tr` tm ON cust.BZIRK = tm.BZIRK
+    LEFT JOIN `zivf_regionmaster_md_01` rm ON tm.REGIO = rm.region_code
+    LEFT JOIN `zivf_zonemaster_01_tr` zm ON rm.zone_code = zm.P_ZONE
+    WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+      AND (p_zone IS NULL OR p_zone = '' OR p_zone = 'null' OR p_zone = 'All' OR zm.NAME = p_zone OR rm.zone_code = p_zone OR tm.P_ZONE = p_zone)
+    GROUP BY category
+    HAVING total_sales_cr > 0
+    ORDER BY total_sales_cr DESC;
 END$$
 DELIMITER ;
 
 ----------------- sp_get_category_sales store procedure end ----------------------------------------------------------
-
-
 """
+
 def run_stored_procedures(db_name):
     print(f"Reading embedded SQL content to deploy in database: {db_name}...")
-    
-    # Split the content by the delimiter '$$'
-    statements = SQL_CONTENT.split('$$')
     
     conn = pymysql.connect(
         host=MYSQL_CONFIG["host"],
@@ -1075,6 +996,51 @@ def run_stored_procedures(db_name):
     )
     try:
         with conn.cursor() as cursor:
+            # Detect actual table names present in db_name
+            cursor.execute("SHOW TABLES")
+            existing_tables = [list(r.values())[0] for r in cursor.fetchall()]
+            table_map = {t.lower(): t for t in existing_tables}
+            
+            # Map canonical view names to actual table names in db_name
+            canonical_views = [
+                "ZPVF_SD_SalesHistory_01_TR",
+                "ZPVF_SD_CurrentSales_01_TR",
+                "ZPVF_SD_CancelledSalesInvoice_01_TR",
+                "ZIVF_CustomerMaster_01_MD",
+                "ZIVR_SKUMaster_01_TR",
+                "ZIVF_CategoryMaster_01_TR",
+                "ZITR_DayAttribute_01_TR",
+                "ZIVF_TerritoryMaster_01_TR",
+                "ZIVF_ZoneMaster_01_TR",
+                "ZIVF_RegionMaster_MD_01"
+            ]
+            
+            # Find sales tables fallback if one is missing in the database
+            actual_history = table_map.get("zpvf_sd_saleshistory_01_tr")
+            actual_current = table_map.get("zpvf_sd_currentsales_01_tr")
+            if not actual_history and actual_current:
+                actual_history = actual_current
+            elif not actual_current and actual_history:
+                actual_current = actual_history
+                
+            sql_content_adapted = SQL_CONTENT
+            for v in canonical_views:
+                v_lower = v.lower()
+                target_table = None
+                if v_lower == "zpvf_sd_saleshistory_01_tr":
+                    target_table = actual_history or table_map.get(v_lower) or v_lower
+                elif v_lower == "zpvf_sd_currentsales_01_tr":
+                    target_table = actual_current or table_map.get(v_lower) or v_lower
+                else:
+                    target_table = table_map.get(v_lower) or v_lower
+                    
+                if target_table:
+                    sql_content_adapted = sql_content_adapted.replace(f"`{v}`", f"`{target_table}`")
+                    sql_content_adapted = sql_content_adapted.replace(f"`{v_lower}`", f"`{target_table}`")
+
+            # Split the adapted content by delimiter '$$'
+            statements = sql_content_adapted.split('$$')
+
             for statement in statements:
                 stmt = statement.strip()
                 
@@ -1086,7 +1052,6 @@ def run_stored_procedures(db_name):
                 sp_name = "Unknown"
                 if "CREATE" in stmt.upper() and "PROCEDURE" in stmt.upper():
                     try:
-                        # Simple extraction: find word after PROCEDURE
                         parts = stmt.split()
                         for i, part in enumerate(parts):
                             if part.upper() == 'PROCEDURE':
@@ -1113,4 +1078,3 @@ def run_stored_procedures(db_name):
         print(f"Database connection or execution error: {e}")
     finally:
         conn.close()
-
