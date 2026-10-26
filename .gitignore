@@ -8,3 +8,4 @@ chroma_store
 *.xlsx
 /lib
 *.zip
+/local_models
