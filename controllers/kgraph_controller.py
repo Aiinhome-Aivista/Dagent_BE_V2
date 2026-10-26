@@ -35,7 +35,7 @@ def _get_backup_collection_names(db, target_timestamp: str, nodes_col_name: str 
 
 def rollback_kgraph_controller(get_db_connection):
     try:
-        data = request.json or {}
+        data = request.get_json(silent=True) or {}
         session_id = data.get("session_id")
         target_timestamp = data.get("backup_timestamp")
 
@@ -126,3 +126,55 @@ def get_all_kgraphs_controller(get_db_connection):
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+def get_kgraph_ontology_analysis_controller(get_db_connection):
+    """
+    Returns the Golden Sales Ontology comparison and AI missing node analysis
+    for the given session/workspace.
+    """
+    try:
+        body = request.get_json(silent=True) or {}
+        session_id = request.args.get("session_id") or body.get("session_id")
+        if not session_id:
+            return jsonify({"status": "error", "message": "session_id is required"}), 400
+
+        conn = get_db_connection()
+        workspace_arango_db = None
+        workspace_db = None
+        try:
+            with conn.cursor(dictionary=True) as cur:
+                cur.execute("SELECT workspace_db, workspace_arango_db FROM workspaces WHERE session_id = %s", (session_id,))
+                row = cur.fetchone()
+                if row:
+                    workspace_db = row["workspace_db"]
+                    workspace_arango_db = row["workspace_arango_db"]
+        finally:
+            if conn:
+                conn.close()
+
+        # 1. Retrieve persisted analysis from ArangoDB session_metadata
+        if workspace_arango_db:
+            try:
+                from arango import ArangoClient
+                from database.config import ARANGO_HOST, ARANGO_USER, ARANGO_PASS
+                client = ArangoClient(hosts=ARANGO_HOST)
+                db = client.db(workspace_arango_db, username=ARANGO_USER, password=ARANGO_PASS)
+                if db.has_collection("session_metadata"):
+                    meta_col = db.collection("session_metadata")
+                    if meta_col.has("ontology_analysis"):
+                        doc = meta_col.get("ontology_analysis")
+                        return jsonify({"status": "success", "data": doc.get("data")}), 200
+            except Exception as arango_err:
+                print(f"[KGRAPH] Could not fetch cached ontology analysis from Arango: {arango_err}")
+
+        # 2. If not ready/cached yet, return a pending status instead of generating a false 0% report
+        return jsonify({
+            "status": "pending",
+            "message": "Ontology analysis is pending or data has not been synced yet for this workspace."
+        }), 200
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+

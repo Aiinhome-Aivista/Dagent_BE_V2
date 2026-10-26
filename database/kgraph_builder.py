@@ -389,6 +389,16 @@ def _build_kgraph_inner(allocated_db_name, db_host, db_user, db_pass, db_port,
             "metrics":     graph.get("metrics", []),
         }
 
+        # ── Compare with Golden Sales Ontology Graph ────────
+        ontology_analysis = None
+        try:
+            from database.kgraph_ontology_comparator import compare_kgraph_with_ontology
+            ontology_analysis = compare_kgraph_with_ontology(verified_graph, schema)
+            verified_graph["ontology_analysis"] = ontology_analysis
+            print(f"[KGRAPH] Golden Ontology comparison complete: completeness={ontology_analysis.get('completeness_score')}%")
+        except Exception as on_e:
+            print(f"[KGRAPH] Ontology comparison failed: {on_e}")
+
         # ── Sync to ArangoDB (Auto-backup and upsert) ────────
         try:
             _sync_kgraph_to_arango(allocated_db_name, verified_graph)
@@ -404,18 +414,19 @@ def _build_kgraph_inner(allocated_db_name, db_host, db_user, db_pass, db_port,
               f"{len(hierarchies)} hierarchies in {elapsed}s")
 
         return {
-            "status":         "ok",
-            "tables":         len(schema),
-            "schema_hash":    shash,
-            "edges":          len(edges),
-            "edges_verified": edges_verified,
-            "hierarchies":    len(hierarchies),
-            "synonyms":       len(graph.get("synonyms", [])),
-            "metrics":        len(graph.get("metrics", [])),
-            "graph":          verified_graph,
-            "dim_values":     dim_values,
-            "trigger_source": trigger_source,
-            "elapsed_s":      elapsed,
+            "status":            "ok",
+            "tables":            len(schema),
+            "schema_hash":       shash,
+            "edges":             len(edges),
+            "edges_verified":    edges_verified,
+            "hierarchies":       len(hierarchies),
+            "synonyms":          len(graph.get("synonyms", [])),
+            "metrics":           len(graph.get("metrics", [])),
+            "graph":             verified_graph,
+            "ontology_analysis": ontology_analysis,
+            "dim_values":        dim_values,
+            "trigger_source":    trigger_source,
+            "elapsed_s":         elapsed,
         }
 
     except Exception as e:
@@ -468,12 +479,34 @@ def _sync_kgraph_to_arango(allocated_db_name, verified_graph):
     if not db.has_collection(edges_col_name):
         db.create_collection(edges_col_name, edge=True)
 
+    # 1. Save ontology analysis metadata FIRST in an isolated try/except block
+    # This guarantees that even if collection backup fails, the analysis result is still preserved.
+    if "ontology_analysis" in verified_graph and verified_graph["ontology_analysis"]:
+        try:
+            meta_col_name = "session_metadata"
+            if not db.has_collection(meta_col_name):
+                db.create_collection(meta_col_name)
+            meta_col = db.collection(meta_col_name)
+            meta_doc = {
+                "_key": "ontology_analysis",
+                "session_id": session_id,
+                "data": verified_graph["ontology_analysis"]
+            }
+            if meta_col.has("ontology_analysis"):
+                meta_col.update(meta_doc)
+            else:
+                meta_col.insert(meta_doc)
+        except Exception as e:
+            print(f"[KGRAPH] Failed to persist ontology_analysis to Arango: {e}")
+
+    # 2. Backup existing collections
     from database.kgraph_backup_service import backup_kgraph_collections
     try:
         backup_kgraph_collections(db, nodes_col_name, edges_col_name)
     except Exception as e:
-        print(f"[KGRAPH] Backup failed, aborting sync: {e}")
-        return
+        print(f"[KGRAPH] Backup failed: {e}")
+        # Proceed with syncing nodes/edges instead of discarding everything
+
 
     nodes_col = db.collection(nodes_col_name)
     edges_col = db.collection(edges_col_name)
@@ -517,5 +550,5 @@ def _sync_kgraph_to_arango(allocated_db_name, verified_graph):
             if edges_col.has(edge_key): edges_col.update(doc)
             else: edges_col.insert(doc)
         except Exception: pass
-    
+
     print("[KGRAPH] ArangoDB sync completed.")

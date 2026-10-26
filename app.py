@@ -46,7 +46,7 @@ from database.llm_service import LLMService
 from database.database_service import DatabaseService
 from controllers.orchestrator_controller import process_books
 from controllers.admin_login import staff_login_controller, create_staff_account_controller,get_all_staff_controller
-from controllers.kgraph_controller import rollback_kgraph_controller, get_all_kgraphs_controller
+from controllers.kgraph_controller import rollback_kgraph_controller, get_all_kgraphs_controller, get_kgraph_ontology_analysis_controller
 load_dotenv()
 from controllers.captcha_controller import generate_captcha_controller
 from flask import send_from_directory
@@ -1008,6 +1008,10 @@ def delete_scheduled_report(schedule_id):
 @app.route("/kgraph-rollback", methods=["POST"])
 def rollback_kgraph():
     return rollback_kgraph_controller(get_db_connection)
+
+@app.route("/api/kgraph/ontology-analysis", methods=["GET", "POST"])
+def get_kgraph_ontology_analysis():
+    return get_kgraph_ontology_analysis_controller(get_db_connection)
 
 @app.route("/api/store-chat-session", methods=["POST"])
 def api_store_hub_data():
