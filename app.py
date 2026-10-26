@@ -910,6 +910,50 @@ def export_domestic_sales_report():
 def export_domestic_sales_preview():
     return export_domestic_sales_preview_controller(get_db_connection)
 
+@app.route("/deploy-sp", methods=["GET", "POST"])
+def deploy_sp():
+    from flask import jsonify
+    from helper.workspace_wise_store_procedures import run_stored_procedures
+    session_id = request.args.get("session_id") or (request.json.get("session_id") if request.is_json else None)
+    db_name = request.args.get("db_name") or (request.json.get("db_name") if request.is_json else None)
+    
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "DB connection failed"}), 500
+    
+    try:
+        cursor = conn.cursor(dictionary=True)
+        if not db_name and session_id:
+            cursor.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s AND workspace_db IS NOT NULL AND workspace_db != '' ORDER BY id DESC LIMIT 1", (session_id,))
+            r = cursor.fetchone()
+            if r and r.get('workspace_db'): 
+                db_name = r['workspace_db']
+            else:
+                cursor.execute("SELECT new_user_db FROM external_db_sync_log WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != '' ORDER BY id DESC LIMIT 1", (session_id,))
+                r2 = cursor.fetchone()
+                if r2 and r2.get('new_user_db'): 
+                    db_name = r2['new_user_db']
+        if not db_name:
+            cursor.execute("SELECT new_user_db FROM external_db_sync_log WHERE new_user_db IS NOT NULL AND new_user_db != '' ORDER BY id DESC LIMIT 1")
+            r3 = cursor.fetchone()
+            if r3 and r3.get('new_user_db'): 
+                db_name = r3['new_user_db']
+            
+        if not db_name:
+            return jsonify({"status": "error", "message": "No workspace database found to deploy SPs"}), 400
+            
+        run_stored_procedures(db_name)
+        return jsonify({
+            "status": "success", 
+            "message": f"All stored procedures successfully deployed to database: '{db_name}'!"
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
 from controllers.master_data_controller import (
     get_data_categories, create_data_category, update_data_category, delete_data_category,
     get_prompt_types_crud, create_prompt_type, update_prompt_type, delete_prompt_type
@@ -998,4 +1042,4 @@ if __name__ == '__main__':
     scheduler.start()
 
 
-    app.run(host="0.0.0.0", port=3020, debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=3019, debug=True, use_reloader=False)

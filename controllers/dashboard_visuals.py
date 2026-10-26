@@ -1128,7 +1128,10 @@ def dashboard_filters_controller(get_db_connection):
         if not conn:
             return jsonify({"status": "success", **filters_data}), 200
             
-        cursor = conn.cursor(dictionary=True)
+        try:
+            cursor = conn.cursor(dictionary=True)
+        except TypeError:
+            cursor = conn.cursor()
         
         # Find user_db for session
         cursor.execute("""
@@ -1197,17 +1200,24 @@ def dashboard_filters_controller(get_db_connection):
                     except Exception as e:
                         print(f"Error fetching tyreTypes from {t_name}: {e}")
 
-            # Find years and months across all tables (both CurrentSales and SalesHistory)
+            # Find years and months across actual sales tables (both CurrentSales and SalesHistory)
             all_years = set()
             month_map = {}
             for tbl in tables:
+                tbl_lower = tbl.lower()
+                # Exclude calendar/master/attribute/cancelled/target tables
+                if any(k in tbl_lower for k in ["dayattribute", "master", "calendar", "attribute", "cancelled", "target", "budget"]):
+                    continue
+                if not any(k in tbl_lower for k in ["sales", "invoice"]):
+                    continue
+
                 t_name = f"`{user_db}`.`{tbl}`"
                 date_col = get_actual_column_name(cursor, t_name, ["invoice_date", "date", "billing__doc_date"])
                 if date_col:
                     try:
                         cursor.execute(f"SELECT DISTINCT YEAR({date_col}) as yr FROM {t_name} WHERE {date_col} IS NOT NULL ORDER BY yr ASC")
                         for r in cursor.fetchall():
-                            if r["yr"]:
+                            if r["yr"] and 2000 <= int(r["yr"]) <= 2100:
                                 all_years.add(int(r["yr"]))
                         
                         cursor.execute(f"SELECT DISTINCT MONTHNAME({date_col}) as m_name, MONTH({date_col}) as m_num FROM {t_name} WHERE {date_col} IS NOT NULL ORDER BY m_num ASC")
@@ -1236,8 +1246,15 @@ def dashboard_filters_controller(get_db_connection):
     finally:
         if cursor:
             cursor.close()
-        if conn and conn.is_connected():
-            conn.close()
+        if conn:
+            try:
+                if hasattr(conn, "is_connected"):
+                    if conn.is_connected():
+                        conn.close()
+                else:
+                    conn.close()
+            except Exception:
+                pass
 
 
 
@@ -1685,7 +1702,10 @@ def available_years_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
             
-        cursor = conn.cursor(dictionary=True)
+        try:
+            cursor = conn.cursor(dictionary=True)
+        except TypeError:
+            cursor = conn.cursor()
 
         # Look up the dynamic table name and database from external_db_sync_log
         cursor.execute("""
@@ -1725,10 +1745,17 @@ def available_years_controller(get_db_connection):
         cursor.execute("SHOW TABLES")
         tables = [list(r.values())[0] for r in cursor.fetchall()]
 
-        # 1. Fetch Years and Months across all sales tables (CurrentSales & SalesHistory)
+        # 1. Fetch Years and Months across actual sales tables (CurrentSales & SalesHistory)
         all_years = set()
         month_map = {}
         for tbl in tables:
+            tbl_lower = tbl.lower()
+            # Exclude non-sales tables like dayattribute, calendar, master, attribute, cancelled, target
+            if any(k in tbl_lower for k in ["dayattribute", "master", "calendar", "attribute", "cancelled", "target", "budget"]):
+                continue
+            if not any(k in tbl_lower for k in ["sales", "invoice"]):
+                continue
+
             t_name = f"`{user_db}`.`{tbl}`"
             actual_invoice_date = get_actual_column_name(cursor, t_name, ["invoice_date", "date", "billing__doc_date"])
             if actual_invoice_date:
@@ -1742,7 +1769,7 @@ def available_years_controller(get_db_connection):
                             ORDER BY yr ASC
                         """)
                         for r in cursor.fetchall():
-                            if r["yr"]:
+                            if r["yr"] and 2000 <= int(r["yr"]) <= 2100:
                                 all_years.add(int(r["yr"]))
 
                         cursor.execute(f"""
@@ -1862,8 +1889,15 @@ def available_years_controller(get_db_connection):
     finally:
         if cursor:
             cursor.close()
-        if conn and conn.is_connected():
-            conn.close()
+        if conn:
+            try:
+                if hasattr(conn, "is_connected"):
+                    if conn.is_connected():
+                        conn.close()
+                else:
+                    conn.close()
+            except Exception:
+                pass
 
 def default_dashboard_metrics_controller(get_db_connection):
     """
@@ -1907,7 +1941,10 @@ def default_dashboard_metrics_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
             
-        cursor = conn.cursor(dictionary=True)
+        try:
+            cursor = conn.cursor(dictionary=True)
+        except TypeError:
+            cursor = conn.cursor()
 
         # 1. Look up the dynamic table name and database from external_db_sync_log
         cursor.execute("""
@@ -1986,8 +2023,10 @@ def default_dashboard_metrics_controller(get_db_connection):
         reg_tbl = find_table(["zivfregionmaster", "regionmaster", "region"])
         zone_tbl = find_table(["zivfzonemaster", "zonemaster", "zone"])
         sku_tbl = find_table(["zivrskumaster", "skumaster", "materialmaster", "material", "sku"])
+        cat_tbl = find_table(["zivfcategorymaster", "categorymaster", "category"])
         tyre_tbl = find_table(["tyretypemaster", "tyretype"])
-        target_tbl = find_table(["salestarget", "sales_target", "target"])
+        day_attr_tbl = find_table(["zitrdayattribute", "dayattribute", "day_attribute"])
+        target_tbl = find_table(["salestarget", "sales_target", "target", "budget"])
 
         # Determine sales fact expression and columns (union of CurrentSales and SalesHistory if both exist)
         if curr_sales_tbl and hist_sales_tbl:
@@ -2038,77 +2077,134 @@ def default_dashboard_metrics_controller(get_db_connection):
         # 2. Top Performing Tyre
         top_tyre = "N/A"
         if has_revenue:
-            # Case A: vehicle_type directly in sales table
-            sales_tyre = check_col(sales_cols, ["vehicle_type", "tyre_type"])
-            if sales_tyre:
-                try:
-                    cursor.execute(f"""
-                        SELECT
-                            s.`{sales_tyre}` AS vehicle_type,
-                            ROUND(SUM({join_revenue_expr}), 2) AS revenue
-                        FROM {sales_from}
-                        WHERE s.`{sales_tyre}` IS NOT NULL AND s.`{sales_tyre}` <> ''
-                        GROUP BY s.`{sales_tyre}`
-                        ORDER BY revenue DESC
-                        LIMIT 1
-                    """)
-                    row = cursor.fetchone()
-                    if row:
-                        top_tyre = row["vehicle_type"]
-                except Exception as tyre_err:
-                    print(f"[Default Metrics] Top tyre direct query failed: {tyre_err}")
-            elif sku_tbl:
-                # Case B: SKU master (SAP ZIVR_SKUMaster_01_TR has TYRE_TYPE directly!)
+            # Priority 1: Join SKU Master with Category Master (SAP Standard: sku -> matnr -> cat_code -> cat_desc)
+            if sku_tbl and cat_tbl:
+                sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
+                sku_mat = check_col(table_columns[sku_tbl], ["matnr", "sku", "material"])
+                sku_cat = check_col(table_columns[sku_tbl], ["cat_code", "catcode", "category_code", "category"])
+                cat_code = check_col(table_columns[cat_tbl], ["cat_code", "catcode", "category_code"])
+                cat_desc = check_col(table_columns[cat_tbl], ["cat_desc", "catdesc", "category_desc", "category_name", "cat_name"])
+                
+                if sales_mat and sku_mat and sku_cat and cat_code and cat_desc:
+                    try:
+                        cursor.execute(f"""
+                            SELECT
+                                cat.`{cat_desc}` AS vehicle_type,
+                                ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                            FROM {sales_from}
+                            JOIN `{sku_tbl}` sm ON s.`{sales_mat}` = sm.`{sku_mat}`
+                            JOIN `{cat_tbl}` cat ON sm.`{sku_cat}` = cat.`{cat_code}`
+                            WHERE cat.`{cat_desc}` IS NOT NULL AND cat.`{cat_desc}` <> ''
+                            GROUP BY cat.`{cat_desc}`
+                            ORDER BY revenue DESC
+                            LIMIT 1
+                        """)
+                        row = cursor.fetchone()
+                        if row and row.get("vehicle_type"):
+                            top_tyre = row["vehicle_type"]
+                    except Exception as tyre_err:
+                        print(f"[Default Metrics] Category master join query failed: {tyre_err}")
+
+            # Priority 2: Direct join Sales SKU with Category Master (cat.matnr)
+            if top_tyre == "N/A" and cat_tbl:
+                sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
+                cat_mat = check_col(table_columns[cat_tbl], ["matnr", "sku", "material"])
+                cat_desc = check_col(table_columns[cat_tbl], ["cat_desc", "catdesc", "category_desc", "category_name"])
+                if sales_mat and cat_mat and cat_desc:
+                    try:
+                        cursor.execute(f"""
+                            SELECT
+                                cat.`{cat_desc}` AS vehicle_type,
+                                ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                            FROM {sales_from}
+                            JOIN `{cat_tbl}` cat ON s.`{sales_mat}` = cat.`{cat_mat}`
+                            WHERE cat.`{cat_desc}` IS NOT NULL AND cat.`{cat_desc}` <> ''
+                            GROUP BY cat.`{cat_desc}`
+                            ORDER BY revenue DESC
+                            LIMIT 1
+                        """)
+                        row = cursor.fetchone()
+                        if row and row.get("vehicle_type"):
+                            top_tyre = row["vehicle_type"]
+                    except Exception as tyre_err:
+                        print(f"[Default Metrics] Direct category master query failed: {tyre_err}")
+
+            # Priority 3: Tyre Type from tyre_tbl (legacy)
+            if top_tyre == "N/A" and tyre_tbl and sku_tbl:
+                sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
+                sku_mat = check_col(table_columns[sku_tbl], ["matnr", "sku", "material"])
+                sku_tyre = check_col(table_columns[sku_tbl], ["tyre_type", "tyretype", "vehicle_type"])
+                tyre_code = check_col(table_columns[tyre_tbl], ["tyre_type_code", "tyre_type"])
+                tyre_name = check_col(table_columns[tyre_tbl], ["tyre_type_name", "tyre_name"])
+                if sales_mat and sku_mat and sku_tyre and tyre_code and tyre_name:
+                    try:
+                        cursor.execute(f"""
+                            SELECT
+                                t.`{tyre_name}` AS vehicle_type,
+                                ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                            FROM {sales_from}
+                            JOIN `{sku_tbl}` k ON s.`{sales_mat}` = k.`{sku_mat}`
+                            JOIN `{tyre_tbl}` t ON k.`{sku_tyre}` = t.`{tyre_code}`
+                            WHERE t.`{tyre_name}` IS NOT NULL AND t.`{tyre_name}` NOT IN ('', '0', '-')
+                            GROUP BY t.`{tyre_name}`
+                            ORDER BY revenue DESC
+                            LIMIT 1
+                        """)
+                        row = cursor.fetchone()
+                        if row and row.get("vehicle_type"):
+                            top_tyre = row["vehicle_type"]
+                    except Exception as tyre_err:
+                        print(f"[Default Metrics] Joined tyre_tbl query failed: {tyre_err}")
+
+            # Priority 4: vehicle_type directly in sales table
+            if top_tyre == "N/A":
+                sales_tyre = check_col(sales_cols, ["vehicle_type", "tyre_type"])
+                if sales_tyre:
+                    try:
+                        cursor.execute(f"""
+                            SELECT
+                                s.`{sales_tyre}` AS vehicle_type,
+                                ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                            FROM {sales_from}
+                            WHERE s.`{sales_tyre}` IS NOT NULL AND s.`{sales_tyre}` NOT IN ('', '0', '-')
+                            GROUP BY s.`{sales_tyre}`
+                            ORDER BY revenue DESC
+                            LIMIT 1
+                        """)
+                        row = cursor.fetchone()
+                        if row and row.get("vehicle_type"):
+                            top_tyre = row["vehicle_type"]
+                    except Exception as tyre_err:
+                        print(f"[Default Metrics] Top tyre direct query failed: {tyre_err}")
+
+            # Priority 5: From SKU Master (excluding '0', '', '-')
+            if top_tyre == "N/A" and sku_tbl:
                 sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
                 sku_mat = check_col(table_columns[sku_tbl], ["matnr", "sku", "material"])
                 sku_tyre = check_col(table_columns[sku_tbl], ["tyre_type", "tyretype", "vehicle_type", "maktx"])
-
                 if sales_mat and sku_mat and sku_tyre:
-                    # Check if tyre_tbl exists for name resolution (legacy)
-                    if tyre_tbl:
-                        tyre_code = check_col(table_columns[tyre_tbl], ["tyre_type_code", "tyre_type"])
-                        tyre_name = check_col(table_columns[tyre_tbl], ["tyre_type_name", "tyre_name"])
-                        if tyre_code and tyre_name:
-                            try:
-                                cursor.execute(f"""
-                                    SELECT
-                                        t.`{tyre_name}` AS vehicle_type,
-                                        ROUND(SUM({join_revenue_expr}), 2) AS revenue
-                                    FROM {sales_from}
-                                    JOIN `{sku_tbl}` k ON s.`{sales_mat}` = k.`{sku_mat}`
-                                    JOIN `{tyre_tbl}` t ON k.`{sku_tyre}` = t.`{tyre_code}`
-                                    GROUP BY t.`{tyre_name}`
-                                    ORDER BY revenue DESC
-                                    LIMIT 1
-                                """)
-                                row = cursor.fetchone()
-                                if row:
-                                    top_tyre = row["vehicle_type"]
-                            except Exception as tyre_err:
-                                print(f"[Default Metrics] Joined tyre_tbl query failed: {tyre_err}")
-                    if top_tyre == "N/A":
-                        # Query directly from SKU master
-                        try:
-                            cursor.execute(f"""
-                                SELECT
-                                    k.`{sku_tyre}` AS vehicle_type,
-                                    ROUND(SUM({join_revenue_expr}), 2) AS revenue
-                                FROM {sales_from}
-                                JOIN `{sku_tbl}` k ON s.`{sales_mat}` = k.`{sku_mat}`
-                                WHERE k.`{sku_tyre}` IS NOT NULL AND k.`{sku_tyre}` <> ''
-                                GROUP BY k.`{sku_tyre}`
-                                ORDER BY revenue DESC
-                                LIMIT 1
-                            """)
-                            row = cursor.fetchone()
-                            if row:
-                                top_tyre = row["vehicle_type"]
-                        except Exception as tyre_err:
-                            print(f"[Default Metrics] SKU tyre query failed: {tyre_err}")
+                    try:
+                        cursor.execute(f"""
+                            SELECT
+                                k.`{sku_tyre}` AS vehicle_type,
+                                ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                            FROM {sales_from}
+                            JOIN `{sku_tbl}` k ON s.`{sales_mat}` = k.`{sku_mat}`
+                            WHERE k.`{sku_tyre}` IS NOT NULL AND k.`{sku_tyre}` NOT IN ('', '0', '-')
+                            GROUP BY k.`{sku_tyre}`
+                            ORDER BY revenue DESC
+                            LIMIT 1
+                        """)
+                        row = cursor.fetchone()
+                        if row and row.get("vehicle_type"):
+                            top_tyre = row["vehicle_type"]
+                    except Exception as tyre_err:
+                        print(f"[Default Metrics] SKU tyre query failed: {tyre_err}")
 
         # 3. Leading Region
         leading_region = "N/A"
         if has_revenue:
+            # Priority 1: Direct region column in sales table
             sales_reg = check_col(sales_cols, ["region", "region_name"])
             if sales_reg:
                 try:
@@ -2123,11 +2219,41 @@ def default_dashboard_metrics_controller(get_db_connection):
                         LIMIT 1
                     """)
                     row = cursor.fetchone()
-                    if row:
+                    if row and row.get("region"):
                         leading_region = row["region"]
                 except Exception as reg_err:
                     print(f"[Default Metrics] Leading region direct query failed: {reg_err}")
-            elif cust_tbl and reg_tbl:
+
+            # Priority 2: SAP Plant mapping (sales.plant -> territorymaster.werks -> territorymaster.area -> regionmaster.region_code)
+            if leading_region == "N/A" and terr_tbl and reg_tbl:
+                sales_plant = check_col(sales_cols, ["plant", "werks"])
+                terr_werks = check_col(table_columns[terr_tbl], ["werks", "plant"])
+                terr_area = check_col(table_columns[terr_tbl], ["area", "region_code", "region", "regio"])
+                r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
+                r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
+
+                if sales_plant and terr_werks and terr_area and r_code and r_name:
+                    try:
+                        cursor.execute(f"""
+                            SELECT
+                                r.`{r_name}` AS region_name,
+                                ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                            FROM {sales_from}
+                            JOIN `{terr_tbl}` t ON s.`{sales_plant}` = t.`{terr_werks}`
+                            JOIN `{reg_tbl}` r ON (t.`{terr_area}` = r.`{r_code}`)
+                            WHERE r.`{r_name}` IS NOT NULL AND r.`{r_name}` <> ''
+                            GROUP BY r.`{r_name}`
+                            ORDER BY revenue DESC
+                            LIMIT 1
+                        """)
+                        row = cursor.fetchone()
+                        if row and row.get("region_name"):
+                            leading_region = row["region_name"]
+                    except Exception as reg_err:
+                        print(f"[Default Metrics] Plant territory region query failed: {reg_err}")
+
+            # Priority 3: Customer -> Territory -> Region join
+            if leading_region == "N/A" and cust_tbl and reg_tbl:
                 sales_cust = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
                 cust_id = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
                 r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
@@ -2135,7 +2261,7 @@ def default_dashboard_metrics_controller(get_db_connection):
                 if terr_tbl:
                     cust_terr = check_col(table_columns[cust_tbl], ["bzirk", "territory", "territory_code"])
                     terr_code = check_col(table_columns[terr_tbl], ["bzirk", "territory_code", "territory"])
-                    terr_reg = check_col(table_columns[terr_tbl], ["regio", "region_code", "region"])
+                    terr_reg = check_col(table_columns[terr_tbl], ["regio", "region_code", "region", "area"])
                     r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
 
                     if sales_cust and cust_id and cust_terr and terr_code and terr_reg and r_code and r_name:
@@ -2147,14 +2273,14 @@ def default_dashboard_metrics_controller(get_db_connection):
                                 FROM {sales_from}
                                 JOIN `{cust_tbl}` c ON s.`{sales_cust}` = c.`{cust_id}`
                                 JOIN `{terr_tbl}` t ON c.`{cust_terr}` = t.`{terr_code}`
-                                JOIN `{reg_tbl}` r ON t.`{terr_reg}` = r.`{r_code}`
+                                JOIN `{reg_tbl}` r ON (t.`{terr_reg}` = r.`{r_code}`)
                                 WHERE r.`{r_name}` IS NOT NULL AND r.`{r_name}` <> ''
                                 GROUP BY r.`{r_name}`
                                 ORDER BY revenue DESC
                                 LIMIT 1
                             """)
                             row = cursor.fetchone()
-                            if row:
+                            if row and row.get("region_name"):
                                 leading_region = row["region_name"]
                         except Exception as reg_err:
                             print(f"[Default Metrics] Joined territory region query failed: {reg_err}")
@@ -2178,7 +2304,7 @@ def default_dashboard_metrics_controller(get_db_connection):
                                 LIMIT 1
                             """)
                             row = cursor.fetchone()
-                            if row:
+                            if row and row.get("region_name"):
                                 leading_region = row["region_name"]
                         except Exception as reg_err:
                             print(f"[Default Metrics] Direct customer region query failed: {reg_err}")
@@ -2186,7 +2312,10 @@ def default_dashboard_metrics_controller(get_db_connection):
         # 4. YoY Growth
         current_year = 0.0
         previous_year = 0.0
+        current_year_num = None
+        prev_year_num = None
         yoy = 0.0
+        yoy_subtext = "No data available"
         real_date_col = check_col(sales_cols, ["invoice_date", "date", "billing__doc_date", "billing_doc_date"])
 
         if has_revenue and real_date_col:
@@ -2203,28 +2332,35 @@ def default_dashboard_metrics_controller(get_db_connection):
                     year_expr = f"YEAR(COALESCE(STR_TO_DATE(s.`{real_date_col}`, '%Y-%m-%d'), STR_TO_DATE(s.`{real_date_col}`, '%d-%m-%Y'), STR_TO_DATE(s.`{real_date_col}`, '%d/%m/%Y')))"
                     date_filter = f"s.`{real_date_col}` IS NOT NULL AND s.`{real_date_col}` != ''"
 
-                # Current Year Revenue
+                # Fetch available revenue by year dynamically (descending order)
                 cursor.execute(f"""
-                    SELECT ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                    SELECT {year_expr} AS yr, ROUND(SUM({join_revenue_expr}), 2) AS revenue
                     FROM {sales_from}
-                    WHERE {date_filter}
-                      AND {year_expr} = YEAR(CURDATE())
+                    WHERE {date_filter} AND {year_expr} IS NOT NULL AND {year_expr} > 2000
+                    GROUP BY {year_expr}
+                    ORDER BY yr DESC
                 """)
-                curr_row = cursor.fetchone()
-                current_year = float(curr_row["revenue"] or 0) if curr_row else 0.0
+                year_rows = cursor.fetchall()
+                if year_rows and len(year_rows) > 0:
+                    current_year_row = year_rows[0]
+                    current_year = float(current_year_row["revenue"] or 0)
+                    current_year_num = current_year_row["yr"]
 
-                # Previous Year Revenue
-                cursor.execute(f"""
-                    SELECT ROUND(SUM({join_revenue_expr}), 2) AS revenue
-                    FROM {sales_from}
-                    WHERE {date_filter}
-                      AND {year_expr} = YEAR(CURDATE()) - 1
-                """)
-                prev_row = cursor.fetchone()
-                previous_year = float(prev_row["revenue"] or 0) if prev_row else 0.0
+                    if len(year_rows) > 1:
+                        prev_year_row = year_rows[1]
+                        previous_year = float(prev_year_row["revenue"] or 0)
+                        prev_year_num = prev_year_row["yr"]
 
-                if previous_year > 0:
-                    yoy = round(((current_year - previous_year) / previous_year) * 100, 2)
+                        if previous_year > 0:
+                            yoy = round(((current_year - previous_year) / previous_year) * 100, 2)
+                            if current_year_num - prev_year_num == 1:
+                                yoy_subtext = "Compared to last year"
+                            else:
+                                yoy_subtext = f"Compared to {prev_year_num}"
+                        else:
+                            yoy_subtext = f"{current_year_num} sales only"
+                    else:
+                        yoy_subtext = f"{current_year_num} sales only"
             except Exception as yoy_err:
                 print(f"[Default Metrics] YoY query failed: {yoy_err}")
 
@@ -2376,8 +2512,8 @@ def default_dashboard_metrics_controller(get_db_connection):
             },
             "metric_4": {
                 "label": "Year-over-Year Growth", 
-                "value": f"{yoy}%" if (current_year > 0 or previous_year > 0) else "N/A", 
-                "subtext": "Compared to last year" if (current_year > 0 or previous_year > 0) else "No data available"
+                "value": f"{yoy:+0.1f}%" if previous_year > 0 else ("0.0%" if current_year > 0 else "N/A"), 
+                "subtext": yoy_subtext
             },
             "metric_5": {"label": "Achievement", "value": achievement_val, "subtext": "Current achievement"},
             "metric_6": {"label": "Sales Target", "value": sales_target_val, "subtext": "Target sales"},
@@ -2405,6 +2541,16 @@ def default_dashboard_metrics_controller(get_db_connection):
 
     finally:
         if cursor:
-            cursor.close()
-        if conn and conn.is_connected():
-            conn.close()
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if conn:
+            try:
+                if hasattr(conn, "is_connected"):
+                    if conn.is_connected():
+                        conn.close()
+                else:
+                    conn.close()
+            except Exception:
+                pass
