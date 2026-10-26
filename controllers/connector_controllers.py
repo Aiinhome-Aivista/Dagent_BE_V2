@@ -162,7 +162,7 @@ def create_workspace_controller(get_db_connection):
             db_conn.commit()
             
             # --- RUN WORKSPACE WISE STORE PROCEDURES FOR TYRE SALES ---
-            if workspace_type and workspace_type.lower() == 'tyre sales':
+            if workspace_type and str(workspace_type).strip().lower().replace("_", " ") == 'tyre sales':
                 try:
                     run_stored_procedures(workspace_db)
                 except Exception as e:
