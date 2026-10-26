@@ -1852,6 +1852,35 @@ def delete_connection_history_controller(get_db_connection):
         # Delete credential and connection history
         cursor.execute("DELETE FROM database_credential WHERE connection_id = %s", (item_id,))
         cursor.execute("DELETE FROM connection_history WHERE id = %s", (item_id,))
+
+        # Delete SAP HANA KG & Metadata
+        try:
+            cursor.execute("DELETE FROM sap_hana_kgraph WHERE connection_id = %s", (item_id,))
+            cursor.execute("DELETE FROM sap_hana_view_metadata WHERE connection_id = %s", (item_id,))
+        except Exception as hana_del_err:
+            print(f"[DELETE] Error cleaning up SAP HANA tables for connection {item_id}: {hana_del_err}")
+
+        # Delete SAP HANA nodes & edges from ArangoDB for this connection
+        try:
+            from database.config import ARANGO_HOST, ARANGO_USER, ARANGO_PASS, ARANGO_DB
+            from arango import ArangoClient
+            target_arango_db = workspace_row.get("workspace_arango_db") if workspace_row else None
+            arango_db_name = target_arango_db or ARANGO_DB
+            arango_client = ArangoClient(hosts=ARANGO_HOST)
+            sys_db = arango_client.db('_system', username=ARANGO_USER, password=ARANGO_PASS)
+            if sys_db.has_database(arango_db_name):
+                adb = arango_client.db(arango_db_name, username=ARANGO_USER, password=ARANGO_PASS)
+                for col in ["session_edges", "session_nodes"]:
+                    if adb.has_collection(col):
+                        try:
+                            adb.aql.execute(
+                                f"FOR d IN {col} FILTER d.connection_id == @cid REMOVE d IN {col}",
+                                bind_vars={"cid": int(item_id)}
+                            )
+                        except Exception as aql_e:
+                            print(f"[DELETE] ArangoDB {col} cleanup warning for connection {item_id}: {aql_e}")
+        except Exception as arango_conn_err:
+            print(f"[DELETE] ArangoDB cleanup skipped for connection {item_id}: {arango_conn_err}")
         
         # We DO NOT delete from session_analysis_cache, session_chat_history, or unstructured_docs here,
         # because those apply to the ENTIRE session (which may contain other active connections).
@@ -2118,7 +2147,8 @@ def delete_workspace_controller(workspace_id, get_db_connection):
             "graph", "saved_web_results", "session_analysis_cache", 
             "session_chat_history", "session_log", "session_tracking", 
             "sheet_scans", "tracker", "tracker2", "unstructured_docs", 
-            "vector_store", "web_searches", "workspace_tables"
+            "vector_store", "web_searches", "workspace_tables",
+            "sap_hana_kgraph", "sap_hana_view_metadata"
         ]
 
         for table in tables_to_clean:
