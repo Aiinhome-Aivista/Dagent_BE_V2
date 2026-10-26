@@ -1429,6 +1429,9 @@ def _fetch_db_data(session_id: str, databases: list, conn) -> list:
                 if pg_conn:
                     try: pg_conn.close()
                     except: pass
+        except Exception as outer_e:
+            print(f"[Analysis] Outer PostgreSQL block error: {outer_e}")
+
     # ── 3. SAP HANA (Stored Metadata & Trigger K-Graph Build) ──
     hana_cursor = None
     try:
