@@ -942,13 +942,32 @@ def export_domestic_sales_report_controller(get_db_connection):
                         db_to_use = row.get('new_user_db') or row.get('external_database')
                         
                 table_prefix = f"`{db_to_use}`." if db_to_use else ""
-                cursor.execute(f"SELECT MAX(billing__doc_date) as max_dt FROM {table_prefix}sales_data WHERE billing__doc_date <= CURDATE()")
-                max_dt_row = cursor.fetchone()
-                if max_dt_row and max_dt_row.get('max_dt'):
-                    max_dt = max_dt_row['max_dt']
-                    if not year: year = max_dt.year
-                    if not month: month = max_dt.month
-                    if not day: day = max_dt.day
+                sales_candidates = [
+                    "ZPVF_SD_CurrentSales_01_TR", "zpvf_sd_currentsales_01_tr",
+                    "ZPVF_SD_SalesHistory_01_TR", "zpvf_sd_saleshistory_01_tr",
+                    "sales_data"
+                ]
+                max_dt_val = None
+                for cand in sales_candidates:
+                    try:
+                        cursor.execute(f"SELECT MAX(invoice_date) as max_dt FROM {table_prefix}`{cand}` WHERE invoice_date <= CURDATE()")
+                        r = cursor.fetchone()
+                        if r and r.get('max_dt'):
+                            max_dt_val = r['max_dt']
+                            break
+                    except Exception:
+                        try:
+                            cursor.execute(f"SELECT MAX(billing__doc_date) as max_dt FROM {table_prefix}`{cand}` WHERE billing__doc_date <= CURDATE()")
+                            r = cursor.fetchone()
+                            if r and r.get('max_dt'):
+                                max_dt_val = r['max_dt']
+                                break
+                        except Exception:
+                            pass
+                if max_dt_val:
+                    if not year: year = max_dt_val.year
+                    if not month: month = max_dt_val.month
+                    if not day: day = max_dt_val.day
             except Exception as e:
                 print(f"[Excel Export] Failed to fetch max date: {e}")
             finally:
@@ -1032,13 +1051,32 @@ def export_domestic_sales_preview_controller(get_db_connection):
                         db_to_use = row.get('new_user_db') or row.get('external_database')
                         
                 table_prefix = f"`{db_to_use}`." if db_to_use else ""
-                cursor.execute(f"SELECT MAX(billing__doc_date) as max_dt FROM {table_prefix}sales_data WHERE billing__doc_date <= CURDATE()")
-                max_dt_row = cursor.fetchone()
-                if max_dt_row and max_dt_row.get('max_dt'):
-                    max_dt = max_dt_row['max_dt']
-                    if not year: year = max_dt.year
-                    if not month: month = max_dt.month
-                    if not day: day = max_dt.day
+                sales_candidates = [
+                    "ZPVF_SD_CurrentSales_01_TR", "zpvf_sd_currentsales_01_tr",
+                    "ZPVF_SD_SalesHistory_01_TR", "zpvf_sd_saleshistory_01_tr",
+                    "sales_data"
+                ]
+                max_dt_val = None
+                for cand in sales_candidates:
+                    try:
+                        cursor.execute(f"SELECT MAX(invoice_date) as max_dt FROM {table_prefix}`{cand}` WHERE invoice_date <= CURDATE()")
+                        r = cursor.fetchone()
+                        if r and r.get('max_dt'):
+                            max_dt_val = r['max_dt']
+                            break
+                    except Exception:
+                        try:
+                            cursor.execute(f"SELECT MAX(billing__doc_date) as max_dt FROM {table_prefix}`{cand}` WHERE billing__doc_date <= CURDATE()")
+                            r = cursor.fetchone()
+                            if r and r.get('max_dt'):
+                                max_dt_val = r['max_dt']
+                                break
+                        except Exception:
+                            pass
+                if max_dt_val:
+                    if not year: year = max_dt_val.year
+                    if not month: month = max_dt_val.month
+                    if not day: day = max_dt_val.day
             except Exception as e:
                 print(f"[Excel Export Preview] Failed to fetch max date: {e}")
             finally:
