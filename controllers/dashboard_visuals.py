@@ -83,7 +83,15 @@ def get_sap_connection_for_session(mysql_conn, session_id, user_id=None):
             return None, None, None
 
         hana_conn, tunnel, effective_schema = get_hana_connection_from_credential(external_db)
-        schema = effective_schema or external_db.get("schema") or external_db.get("database") or TARGET_SCHEMA or "SAP_S4"
+        # Determine actual schema: SAP S/4HANA views live in 'SAP_S4'.
+        # If user/credential has 'SAP_S4#AI_BI_EXT', strip the '#...' suffix or use 'SAP_S4'.
+        schema = "SAP_S4"
+        raw_schema = effective_schema or external_db.get("schema") or external_db.get("database")
+        if raw_schema:
+            clean_s = str(raw_schema).split("#")[0].strip()
+            schema = clean_s if clean_s else "SAP_S4"
+        else:
+            schema = TARGET_SCHEMA or "SAP_S4"
         return hana_conn, tunnel, schema
 
     except Exception as e:
@@ -397,7 +405,11 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
     user_db = None
 
     if is_hana:
-        user_db = hana_schema or TARGET_SCHEMA or "SAP_S4"
+        raw_schema = hana_schema or TARGET_SCHEMA or "SAP_S4"
+        if raw_schema and "#" in str(raw_schema):
+            user_db = str(raw_schema).split("#")[0].strip() or "SAP_S4"
+        else:
+            user_db = str(raw_schema).strip() if raw_schema else "SAP_S4"
         table_columns = hana_table_columns or {}
         if not table_columns and mysql_conn:
             table_columns = get_sap_table_columns(mysql_conn, cursor, user_db, session_id)
@@ -484,7 +496,12 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
         return f'"{n}"' if is_hana else f"`{n}`"
 
     def q_tbl(t):
-        return f'"{user_db}"."{t}"' if is_hana else f"`{user_db}`.`{t}`"
+        if is_hana:
+            # SAP S/4HANA CDS views always live in schema SAP_S4
+            if any(str(t).lower().startswith(p) for p in ("zivf", "zivr", "zitr", "zpvf")):
+                return f'"SAP_S4"."{t}"'
+            return f'"{user_db}"."{t}"'
+        return f"`{user_db}`.`{t}`"
 
     def q_col(alias, c):
         return f'{alias}."{c}"' if is_hana else f'{alias}.`{c}`'

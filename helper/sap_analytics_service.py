@@ -117,7 +117,15 @@ def get_sap_connection_for_session(mysql_conn, session_id, user_id=None):
             return None, None, None
 
         hana_conn, tunnel, effective_schema = get_hana_connection_from_credential(external_db)
-        schema = effective_schema or external_db.get("schema") or external_db.get("database") or TARGET_SCHEMA or "SAP_S4"
+        # Determine actual schema: SAP S/4HANA CDS views live in 'SAP_S4'.
+        # If user/credential has 'SAP_S4#AI_BI_EXT', strip the '#...' suffix or default to 'SAP_S4'.
+        schema = "SAP_S4"
+        raw_schema = effective_schema or external_db.get("schema") or external_db.get("database")
+        if raw_schema:
+            clean_s = str(raw_schema).split("#")[0].strip()
+            schema = clean_s if clean_s else "SAP_S4"
+        else:
+            schema = TARGET_SCHEMA or "SAP_S4"
         return hana_conn, tunnel, schema
 
     except Exception as e:
