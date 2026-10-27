@@ -48,7 +48,7 @@ GOLDEN_VERTICES = [
         "name": "CoveragePlan (TCP / TCR)",
         "type": "Coverage Plan",
         "group": "route",
-        "keywords": ["coverage_plan", "beat_plan", "journey_plan", "pjp", "visit_plan", "tcr", "tcp", "roster"],
+        "keywords": ["coverage_plan", "beat_plan", "journey_plan", "pjp", "visit_plan", "tcr", "tcp", "roster", "target", "sales_plan", "plan_target", "target_plan"],
         "def": "Decides who visits which outlet how often. Consolidated workload and demand review.",
         "attributes": ["plan_id", "outlet_universe", "call_frequency", "workload_minutes_per_visit"]
     },
@@ -75,7 +75,7 @@ GOLDEN_VERTICES = [
         "name": "Product / SKU",
         "type": "Product / SKU",
         "group": "product",
-        "keywords": ["product", "sku", "item", "material", "brand", "variant", "pack_size", "item_master"],
+        "keywords": ["product", "sku", "item", "material", "brand", "variant", "pack_size", "item_master", "category"],
         "def": "The sellable item and roll-ups: Category -> Brand Family -> Variant -> Product -> Trade SKU.",
         "attributes": ["sku_id", "gtin", "brand_family", "pack_type", "is_sellable", "abc_classification"]
     },
@@ -120,7 +120,7 @@ GOLDEN_VERTICES = [
         "name": "SupplyOrders",
         "type": "Fulfillment Order",
         "group": "order",
-        "keywords": ["sales_order", "invoice", "order_header", "order_line", "shipment", "delivery_note", "billing_doc", "orders"],
+        "keywords": ["sales_order", "invoice", "order_header", "order_line", "shipment", "delivery_note", "billing_doc", "orders", "sales_history", "current_sales", "cancelled_sales", "sd_sales", "sales"],
         "def": "Transactional movement objects: sales orders, shipments with carrier OTIF, and invoices.",
         "attributes": ["sales_order_no", "movement_type", "delivery_status", "otif_target_met", "invoice_matched"]
     },

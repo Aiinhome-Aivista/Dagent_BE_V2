@@ -251,15 +251,26 @@ def _assert_metadata_only(payload):
 
 
 def _load_prompt():
-    try:
-        from database.prompt_loader import get_prompt  # admin override, if configured
-        p = get_prompt(0, "hana_knowledge_graph")
-        if p and "{SCHEMA_JSON}" in p:
-            return p
-    except Exception as e:
-        print(f"[HANA-KGRAPH] prompt loader unavailable: {e}")
-    with open(_PROMPT_FILE, "r", encoding="utf-8") as f:
-        return f.read()
+    if os.path.exists(_PROMPT_FILE):
+        try:
+            with open(_PROMPT_FILE, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception as e:
+            print(f"[HANA-KGRAPH] Failed to read prompt file {_PROMPT_FILE}: {e}")
+    # Embedded fallback prompt if prompt file is missing
+    return """You are a Schema Intelligence engine for SAP S/4HANA. You are given ONLY the
+METADATA of a set of SAP HANA views: view names, view comments, column names,
+data types, lengths, column comments, primary keys, foreign keys / relationships,
+row counts, and a technical summary per view.
+
+HARD RULES:
+- Use ONLY view names and column names that appear verbatim in the METADATA.
+- Build the knowledge graph strictly from the metadata. No raw data rows are available.
+- Return ONLY valid JSON with keys: fact_tables, nodes, edges, hierarchies, synonyms, metrics.
+
+METADATA:
+{SCHEMA_JSON}
+"""
 
 
 def _parse_json(text):
@@ -626,6 +637,16 @@ def build_hana_kgraph_from_metadata(connection_id, session_id, user_id=None):
                   "metrics": len(graph["metrics"])}
         print(f"[HANA-KGRAPH] validated graph {counts}; dropped {report}")
 
+        # ── Compare with Golden Sales Ontology Graph ────────
+        ontology_analysis = None
+        try:
+            from database.kgraph_ontology_comparator import compare_kgraph_with_ontology
+            ontology_analysis = compare_kgraph_with_ontology(graph, schema)
+            graph["ontology_analysis"] = ontology_analysis
+            print(f"[HANA-KGRAPH] Golden Ontology comparison complete: completeness={ontology_analysis.get('completeness_score')}%")
+        except Exception as on_e:
+            print(f"[HANA-KGRAPH] Ontology comparison failed: {on_e}")
+
         _sync_hana_kgraph_to_arango(session_id, connection_id, graph, schema)
 
         elapsed = round(time.time() - t0, 1)
@@ -633,7 +654,8 @@ def build_hana_kgraph_from_metadata(connection_id, session_id, user_id=None):
                                graph=graph, llm_status=llm_status, report=report)
         print(f"[HANA-KGRAPH] ready in {elapsed}s for connection {connection_id}.")
         return {"status": "ok", "tables": len(schema), **counts, "llm_status": llm_status,
-                "validation_report": report, "elapsed_s": elapsed, "graph": graph}
+                "validation_report": report, "ontology_analysis": ontology_analysis,
+                "elapsed_s": elapsed, "graph": graph}
 
     except Exception as e:
         print(f"[HANA-KGRAPH] build failed: {e}")

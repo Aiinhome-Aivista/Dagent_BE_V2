@@ -66,3 +66,8 @@ MAIL_USE_TLS = os.getenv("MAIL_USE_TLS", "True").lower() == "true"
 
 MAIL_USERNAME = os.getenv("MAIL_USERNAME")
 MAIL_PASSWORD = os.getenv("MAIL_PASSWORD")
+
+# ============ ChromaDB Configuration ============
+CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_store"))
+CHROMA_COLLECTION_NAME = os.getenv("CHROMA_COLLECTION_NAME", "dagent_knowledge")
+
