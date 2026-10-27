@@ -16,7 +16,8 @@ SAP_ALLOWED_DATASPEC_OBJECTS = [
     "ZPVF_SD_CurrentSales_01_TR",
     "ZIVF_ZoneMaster_01_TR",
     "ZIVF_RegionMaster_MD_01",
-    "ZPVF_SD_CancelledSalesInvoice_01_TR"
+    "ZPVF_SD_CancelledSalesInvoice_01_TR",
+    "ZIVF_SD_Sales_Plan_Target_01_TR"
 ]
 SAP_ALLOWED_OBJECTS_SET = {name.upper() for name in SAP_ALLOWED_DATASPEC_OBJECTS}
 
