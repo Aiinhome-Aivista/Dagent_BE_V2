@@ -1,6 +1,8 @@
 import hashlib
 import re
 import json
+import os
+import uuid
 # pyrefly: ignore [missing-import]
 import mysql.connector
 try:
@@ -13,31 +15,22 @@ except ImportError:
 from flask import request, jsonify
 from database.config import MISTRAL_API_KEY, MISTRAL_MODEL, MYSQL_CONFIG
 from model.llm_client import call_llm_chat
-from helper.dynamic_profiler import get_table_aggregates
 try:
     from utils.logger_service import log_system_error
 except Exception:
     def log_system_error(*args, **kwargs): pass
 
-
 # pyrefly: ignore [missing-import]
 from pyvis.network import Network
-import os
-import uuid
 # pyrefly: ignore [missing-import]
 from arango import ArangoClient
 from database.config import (
     GRAPH_FOLDER, BASE_URL,
     ARANGO_HOST, ARANGO_USER, ARANGO_PASS, ARANGO_DB
 )
+from database.kgraph_ontology_comparator import compare_kgraph_with_ontology
 
 MISTRAL_URL   = "https://api.mistral.ai/v1/chat/completions"
-MAX_ROWS      = 100
-# [CHANGED] 24000 -> 80000. The deterministic VERIFIED KPI BLOCK is now
-# larger and far more important to protect than the old free-form LLM
-# insights it replaced — truncation here silently drops Geography/
-# Distribution/Pricing/Target sections (they're appended after Overall/
-# Product/Customer in the dict, so they're first to get cut).
 MAX_CTX_CHARS = 80000
 
 
@@ -46,13 +39,13 @@ MAX_CTX_CHARS = 80000
 # ══════════════════════════════════════════════════════
 
 def _hash_context(context: str) -> str:
-    """Return SHA-256 hex digest of the raw context string."""
+    """Return SHA-256 hex digest of the raw metadata context string."""
     return hashlib.sha256(context.encode("utf-8")).hexdigest()
 
 
 def _load_cache(session_id: str, data_hash: str, conn) -> dict | None:
     """
-    Return cached {report, graph_url} if session_id exists AND hash matches.
+    Return cached {report, graph_url, ontology_analysis} if session_id exists AND hash matches.
     Returns None otherwise (miss or stale).
     """
     cursor = None
@@ -69,7 +62,7 @@ def _load_cache(session_id: str, data_hash: str, conn) -> dict | None:
             print(f"[Cache] HIT   session={session_id}")
             return {"report": row["report"], "graph_url": row["graph_url"]}
         if row:
-            print(f"[Cache] STALE session={session_id} — data changed, regenerating")
+            print(f"[Cache] STALE session={session_id} — metadata changed, regenerating")
         else:
             print(f"[Cache] MISS  session={session_id} — first time")
         return None
@@ -98,43 +91,37 @@ def _save_cache(session_id: str, data_hash: str,
                 `graph_url`  = VALUES(`graph_url`),
                 `topics`     = VALUES(`topics`),
                 `databases`  = VALUES(`databases`),
-                `updated_at` = CURRENT_TIMESTAMP
-        """, (
-            session_id,
-            data_hash,
-            report,
-            graph_url,
-            json.dumps(topics),
-            json.dumps(databases)
-        ))
+                `created_at` = CURRENT_TIMESTAMP
+        """, (session_id, data_hash, report, graph_url,
+              json.dumps(topics), json.dumps(databases)))
         conn.commit()
-        print(f"[Cache] SAVED session={session_id}  topics={topics}  databases={databases}")
+        print(f"[Cache] SAVED session={session_id}")
     except Exception as e:
         print(f"[Cache] save error: {e}")
-        raise   # re-raise so the caller knows save failed
+        try: conn.rollback()
+        except: pass
     finally:
         if cursor:
             cursor.close()
 
 
 # ══════════════════════════════════════════════════════
-# CROSS-SOURCE RELATIONSHIP DETECTION
+# CROSS-SOURCE RELATIONSHIP DETECTION (METADATA ONLY)
 # ══════════════════════════════════════════════════════
 
 def detect_cross_source_relationships(table_columns: dict, web_data: list, db_data: list) -> dict:
     """
-    Ask Mistral to dynamically generate a business-focused Knowledge Graph.
+    Ask Mistral to dynamically generate a business-focused Knowledge Graph
+    STRICTLY from schema metadata (table names, column names, keys).
+    No row data or transaction values are processed.
     """
     db_summary = {}
     for db in db_data:
         for tbl in db["tables"]:
-            # tables never carry "column_stats" — real per-column sample/frequency
-            # data lives in "business_aggregates" (populated by get_table_aggregates).
-            # Feed that in instead, so the LLM has actual values to work from
-            # rather than inventing SKU/customer codes.
             db_summary[tbl["table_name"]] = {
                 "columns": tbl.get("columns", []),
-                "business_aggregates": tbl.get("business_aggregates", [])
+                "primary_keys": tbl.get("primary_keys", []),
+                "foreign_keys": tbl.get("foreign_keys", [])
             }
 
     web_summary = []
@@ -147,12 +134,12 @@ def detect_cross_source_relationships(table_columns: dict, web_data: list, db_da
             })
 
     prompt = f"""
-You are an expert Knowledge Graph Builder specializing in tyre and automotive parts distribution data.
+You are an expert Enterprise Knowledge Graph Architect specializing in Sales & Distribution Route-to-Market (RtM) Ontologies.
 
-Analyze the uploaded sales dataset and generate a RICH, HIERARCHICAL, business-focused Knowledge Graph.
-The graph MUST reflect the full product taxonomy AND all business relationships visible in the data from the 16 Master tables and Sales Data fact table.
+Analyze the uploaded database SCHEMA METADATA and generate a RICH, HIERARCHICAL, business-focused Knowledge Graph.
+The graph MUST reflect product taxonomy, geography, and sales distribution relationships visible in the schema.
 
-## DB Tables and Sample Data:
+## DB Schema Metadata (Tables, Columns, Primary/Foreign Keys):
 {json.dumps(db_summary, indent=2)}
 
 ## Web Data:
@@ -160,165 +147,42 @@ The graph MUST reflect the full product taxonomy AND all business relationships 
 
 ---
 
-## MANDATORY GRAPH STRUCTURE
-
-### LEVEL 1 — Product Category Nodes (from Category Master)
-Create one node per unique category found in the data (e.g., Tyre, Tube, Flap).
-Node type: "ProductCategory"
-
-### LEVEL 2 — Construction Nodes (from Construction Master)
-Create one node per unique construction type (e.g., BIAS, RADIAL).
-Node type: "Construction"
-
-### LEVEL 3 — Tyre/Vehicle Type Nodes (from Tyre Type Master)
-Create one node per unique vehicle/application type (e.g., TRUCK, LCV, CAR, 3W, SCV).
-Node type: "TyreType"
-
-### LEVEL 4 — Material Nodes (from Material Master)
-Identify the TOP 15 most frequently appearing Materials in the sales data.
-Node type: "Material"
-
-### LEVEL 5 — Customer/Dealer Nodes (from Customer Master)
-Identify the TOP 15 most frequently appearing customers in the sales data.
-Node type: "Customer"
-
-### LEVEL 6 — Customer Class Nodes (from Class Master)
-Create one node for each customer class (e.g., A, B, C, D).
-Node type: "CustomerClass"
-
-### LEVEL 7 — Account Group Nodes (from Account Group Master)
-Create one node for each account group (e.g., ZOR, Z1).
-Node type: "AccountGroup"
-
-### LEVEL 8 — Geography Nodes (from Region & Territory Masters)
-Create nodes for Region and Territory based on the data.
-Node types: "Region", "Territory"
-
-### LEVEL 9 — Billing/Channel Type Nodes (from Fact Tables)
-Create nodes for each billing distribution channel (e.g., ZOR, ZBCL, ZCC).
-Node type: "BillingChannel"
-
-### LEVEL 10 — Brand Nodes (from Brand Master)
-Create one node per unique Brand.
-Node type: "Brand"
-
-### LEVEL 11 — Sub Brand Nodes (from Sub Brand Master)
-Create one node per unique Sub Brand.
-Node type: "SubBrand"
-
-### LEVEL 12 — Size Nodes (from Size Master)
-Create one node per unique Size.
-Node type: "Size"
-
-### LEVEL 13 — Material Group Nodes (from Material Group Master)
-Create one node per unique Material Group.
-Node type: "MaterialGroup"
-
-### LEVEL 14 — Division Nodes (from Division Master)
-Create one node per unique Division.
-Node type: "Division"
-
-### LEVEL 15 — Catg Nodes (from Catg Master)
-Create one node per unique Catg.
-Node type: "Catg"
-
-### LEVEL 16 — Day Nodes (from Day Master)
-Create nodes representing distinct days if relevant.
-Node type: "Day"
-
-## MANDATORY EDGES (Only create if supported by data)
-
-1. PRODUCT HIERARCHY
-   - (ProductCategory) --[HAS_CONSTRUCTION]--> (Construction)
-   - (Construction) --[FITS_TYRE_TYPE]--> (TyreType)
-   - (Material) --[BELONGS_TO_CATEGORY]--> (ProductCategory)
-   - (Material) --[HAS_CONSTRUCTION_TYPE]--> (Construction)
-   - (Material) --[USED_IN]--> (TyreType)
-   - (Brand) --[HAS_SUB_BRAND]--> (SubBrand)
-   - (Material) --[HAS_BRAND]--> (Brand)
-   - (Material) --[HAS_SIZE]--> (Size)
-   - (Material) --[BELONGS_TO_MATERIAL_GROUP]--> (MaterialGroup)
-   - (Material) --[BELONGS_TO_DIVISION]--> (Division)
-   - (Material) --[BELONGS_TO_CATG]--> (Catg)
-
-2. CUSTOMER & GEOGRAPHY HIERARCHY
-   - (Region) --[CONTAINS_TERRITORY]--> (Territory)
-   - (Territory) --[HAS_CUSTOMER]--> (Customer)
-   - (Customer) --[HAS_CLASS]--> (CustomerClass)
-   - (Customer) --[BELONGS_TO_ACCOUNT_GROUP]--> (AccountGroup)
-
-3. FACT / TRANSACTION EDGES (Linking Customer to Material via Sales Data)
-   - (Customer) --[PURCHASED]--> (Material)
-   - (Customer) --[PRIMARILY_BUYS]--> (ProductCategory)
-   - (ProductCategory) --[SOLD_VIA]--> (BillingChannel)
-
----
-
-## NUMERICAL PROPERTIES (store as node/edge properties, NEVER as separate nodes)
-- On ProductCategory / Material nodes: total_sales_qty, total_invoice_value, total_discount
-- On Customer nodes: total_invoice_value, total_claims
-- On PURCHASED edges: transaction_count, total_invoice_value, total_qty
-
----
+## MANDATORY GRAPH STRUCTURE (Map available tables/columns into these standard entity types):
+1. ProductCategory (e.g. Category, Segment)
+2. Construction (e.g. BIAS, RADIAL)
+3. TyreType / VehicleType (e.g. Truck, Bus, LCV, Passenger Car)
+4. SKU / Material / Product (SKU master tables)
+5. Customer / Outlet (Customer/Dealer masters)
+6. CustomerClass (Class A, B, C, D)
+7. AccountGroup (Dealer, OEM, Direct Account groups)
+8. Zone (Commercial zone)
+9. Region (State / Regional sales division)
+10. Territory / Beat (Sales territory / route)
+11. BillingChannel / DistributionChannel (Channel, Invoicing route)
+12. SupplyOrders / Invoices (Sales fact/order header/item tables)
 
 ## OUTPUT FORMAT
-Return EXACTLY this JSON (no markdown, no extra text):
+Return EXACTLY this JSON format (no markdown fences, no extra text):
 {{
   "nodes": [
-    {{"id": "cat_tyre", "label": "Tyre", "type": "ProductCategory", "properties": {{"total_invoice_value": 0}}}},
-    {{"id": "const_bias", "label": "BIAS", "type": "Construction", "properties": {{}}}},
-    {{"id": "tt_truck", "label": "TRUCK", "type": "TyreType", "properties": {{}}}},
-    {{"id": "mat_1001", "label": "1001-TYRE", "type": "Material", "properties": {{}}}},
-    {{"id": "cust_99", "label": "CUST 99", "type": "Customer", "properties": {{}}}},
-    {{"id": "cls_A", "label": "Class A", "type": "CustomerClass", "properties": {{}}}},
-    {{"id": "acc_z1", "label": "Z1 Group", "type": "AccountGroup", "properties": {{}}}},
-    {{"id": "reg_jaipur", "label": "JAIPUR", "type": "Region", "properties": {{}}}},
-    {{"id": "ter_north", "label": "North Terr", "type": "Territory", "properties": {{}}}},
-    {{"id": "ch_zor", "label": "ZOR", "type": "BillingChannel", "properties": {{}}}},
-    {{"id": "catg_1", "label": "Catg 1", "type": "Catg", "properties": {{}}}},
-    {{"id": "brand_1", "label": "Brand X", "type": "Brand", "properties": {{}}}},
-    {{"id": "subbrand_1", "label": "SubBrand Y", "type": "SubBrand", "properties": {{}}}},
-    {{"id": "day_1", "label": "Monday", "type": "Day", "properties": {{}}}},
-    {{"id": "div_1", "label": "Division 1", "type": "Division", "properties": {{}}}}
+    {{"id": "cat_node", "label": "ProductCategory", "type": "ProductCategory", "table_name": "category_master", "properties": {{}}}},
+    {{"id": "sku_node", "label": "SKU", "type": "SKU", "table_name": "sku_master", "properties": {{}}}},
+    {{"id": "cust_node", "label": "Customer", "type": "Customer", "table_name": "customer_master", "properties": {{}}}},
+    {{"id": "territory_node", "label": "Territory", "type": "Territory", "table_name": "territory_master", "properties": {{}}}},
+    {{"id": "order_node", "label": "SupplyOrders", "type": "SupplyOrders", "table_name": "sales_data", "properties": {{}}}}
   ],
   "edges": [
-    {{"from": "cat_tyre", "to": "const_bias", "label": "HAS_CONSTRUCTION", "properties": {{}}}},
-    {{"from": "mat_1001", "to": "cat_tyre", "label": "BELONGS_TO_CATEGORY", "properties": {{}}}},
-    {{"from": "cust_99", "to": "mat_1001", "label": "PURCHASED", "properties": {{"total_invoice_value": 50000}}}},
-    {{"from": "reg_jaipur", "to": "ter_north", "label": "CONTAINS_TERRITORY", "properties": {{}}}},
-    {{"from": "ter_north", "to": "cust_99", "label": "HAS_CUSTOMER", "properties": {{}}}},
-    {{"from": "cust_99", "to": "cls_A", "label": "HAS_CLASS", "properties": {{}}}},
-    {{"from": "cust_99", "to": "acc_z1", "label": "BELONGS_TO_ACCOUNT_GROUP", "properties": {{}}}},
-    {{"from": "mat_1001", "to": "brand_1", "label": "HAS_BRAND", "properties": {{}}}},
-    {{"from": "brand_1", "to": "subbrand_1", "label": "HAS_SUB_BRAND", "properties": {{}}}}
-  ],
-  "identified_node_types": ["ProductCategory", "Construction", "TyreType", "Material", "Customer", "CustomerClass", "AccountGroup", "Region", "Territory", "BillingChannel", "Brand", "SubBrand", "Size", "MaterialGroup", "Division", "Catg", "Day"],
-  "identified_relationship_types": ["HAS_CONSTRUCTION", "FITS_TYRE_TYPE", "BELONGS_TO_CATEGORY", "HAS_CONSTRUCTION_TYPE", "USED_IN", "CONTAINS_REGION", "CONTAINS_TERRITORY", "HAS_CUSTOMER", "HAS_CLASS", "BELONGS_TO_ACCOUNT_GROUP", "PURCHASED", "PRIMARILY_BUYS", "SOLD_VIA", "HAS_SUB_BRAND", "HAS_BRAND", "HAS_SIZE", "BELONGS_TO_MATERIAL_GROUP", "BELONGS_TO_DIVISION", "BELONGS_TO_CATG"],
-  "graph_schema": [
-    "(Customer)-[:PURCHASED]->(Material)",
-    "(Material)-[:BELONGS_TO_CATEGORY]->(ProductCategory)",
-    "(Territory)-[:HAS_CUSTOMER]->(Customer)"
-  ],
-  "sample_cypher_queries": [
-    "MATCH (c:Customer)-[p:PURCHASED]->(s:Material) RETURN c.label, s.label, p.total_invoice_value ORDER BY p.total_invoice_value DESC LIMIT 10",
-    "MATCH (t:Territory)-[:HAS_CUSTOMER]->(c:Customer) RETURN t.label, count(c) as customer_count"
-  ],
-  "business_insights": [
-    "Identify any insights based on the relationship between Customer Classes and Top Materials",
-    "Identify top regions based on Customer purchases"
-  ],
-  "suggested_graphrag_paths": [
-    "Start from Customer → PURCHASED → Material → BELONGS_TO_CATEGORY → ProductCategory",
-    "Start from Region → CONTAINS_TERRITORY → Territory → HAS_CUSTOMER → Customer"
+    {{"from": "sku_node", "to": "cat_node", "label": "BELONGS_TO_CATEGORY", "properties": {{}}}},
+    {{"from": "cust_node", "to": "territory_node", "label": "LOCATED_IN", "properties": {{}}}},
+    {{"from": "order_node", "to": "cust_node", "label": "BILLED_TO", "properties": {{}}}},
+    {{"from": "order_node", "to": "sku_node", "label": "CONTAINS_ITEM", "properties": {{}}}}
   ]
 }}
 
 ## RULES
-1. Use ONLY node IDs you defined in the "nodes" array for "from"/"to" in edges.
-2. Extract actual values from the sample data — do NOT invent Material codes or customer IDs.
-3. Node IDs must be unique strings with no spaces (use underscores).
-4. For nodes like Customer, Material, limit to the top 15 most frequent/significant ones from the sample to avoid overwhelming the graph, but capture all master table reference nodes.
-5. CRITICAL: You MUST extract and create at least 2 nodes for Brand, SubBrand, Day, Size, Division, MaterialGroup, and Catg if they appear in the provided sample data. Do not skip these new dimensions.
+1. Base nodes directly on the real tables and columns present in the schema metadata.
+2. Node IDs must be unique strings with no spaces (e.g. "node_customer").
+3. Edges must link valid node IDs.
 """
 
     messages = [{"role": "user", "content": prompt}]
@@ -328,9 +192,8 @@ Return EXACTLY this JSON (no markdown, no extra text):
         result.setdefault("nodes", [])
         result.setdefault("edges", [])
         return result
-
     except Exception as e:
-        print("Business Knowledge Graph detection error:", e)
+        print("[Graph] Business Knowledge Graph detection error:", e)
         return {"nodes": [], "edges": []}
 
 
@@ -338,8 +201,11 @@ Return EXACTLY this JSON (no markdown, no extra text):
 # GRAPH GENERATOR
 # ══════════════════════════════════════════════════════
 
-def generate_session_graph(session_id, web_data, db_data, target_arango_db=None):
-
+def generate_session_graph(session_id: str, web_data: list, db_data: list, target_arango_db: str = None) -> tuple[dict, str]:
+    """
+    Builds the PyVis interactive visualization and syncs to ArangoDB.
+    Returns: (graph_data, graph_url)
+    """
     net = Network(
         height="850px",
         width="100%",
@@ -349,25 +215,20 @@ def generate_session_graph(session_id, web_data, db_data, target_arango_db=None)
     )
 
     type_colors = {
-    "ProductCategory": "#ff4081",   # pink — top-level product
-    "Construction":    "#e040fb",   # purple — construction subtype
-    "TyreType":        "#2979ff",   # blue — end-use vehicle
-    "Material":        "#9ccc65",   # green — SKU/product code
-    "Catg":            "#a1887f",   # brown
-    "Customer":        "#ffc107",   # amber — customer/dealer
-    "CustomerClass":   "#ff9800",   # orange — customer class
-    "AccountGroup":    "#ff5722",   # deep orange — account group
-        "Region":          "#fb8c00",   # orange — geography
-    "Territory":       "#f57c00",   # orange — geography child
-    "BillingChannel":  "#00bfa5",   # teal — sales channel
-    "Date":            "#00bcd4",
-    "Month":           "#18ffff",
-    "Brand":           "#ab47bc",   # purple
-    "SubBrand":        "#ba68c8",   # lighter purple
-    "Size":            "#8d6e63",   # brown
-    "MaterialGroup":   "#66bb6a",   # light green
-    "Division":        "#26a69a",   # teal
-        "Day":             "#4dd0e1",   # cyan
+        "ProductCategory": "#ff4081",
+        "Construction":    "#e040fb",
+        "TyreType":        "#2979ff",
+        "SKU":             "#9ccc65",
+        "Customer":        "#ffc107",
+        "CustomerClass":   "#ff9800",
+        "AccountGroup":    "#ff5722",
+        "Zone":            "#ff6d00",
+        "Region":          "#fb8c00",
+        "Territory":       "#f57c00",
+        "BillingChannel":  "#00bfa5",
+        "SupplyOrders":    "#e91e63",
+        "Invoice":         "#e91e63",
+        "Entity":          "#b0bec5"
     }
 
     table_columns = {}
@@ -386,14 +247,18 @@ def generate_session_graph(session_id, web_data, db_data, target_arango_db=None)
         if not node_id: continue
         label = str(n.get("label", node_id))
         ntype = str(n.get("type", "Entity"))
-        
+        tbl_name = str(n.get("table_name", ""))
+
         props = n.get("properties", {})
-        title_lines = [f"{k}: {v}" for k, v in props.items()]
-        title = "\n".join(title_lines) if title_lines else ntype
+        title_lines = [f"Type: {ntype}"]
+        if tbl_name:
+            title_lines.append(f"Table: {tbl_name}")
+        for k, v in props.items():
+            title_lines.append(f"{k}: {v}")
+        title = "\n".join(title_lines)
 
         color = type_colors.get(ntype, "#b0bec5")
-        
-        net.add_node(node_id, label=label, title=title, color=color, size=25, type=ntype)
+        net.add_node(node_id, label=label, title=title, color=color, size=25, type=ntype, table_name=tbl_name)
         existing_ids.add(node_id)
 
     for e in edges:
@@ -405,45 +270,41 @@ def generate_session_graph(session_id, web_data, db_data, target_arango_db=None)
             props = e.get("properties", {})
             title_lines = [f"{k}: {v}" for k, v in props.items()]
             title = "\n".join(title_lines) if title_lines else label
-            
             net.add_edge(from_node, to_node, label=label, title=title, color="#ff5252", width=2)
-        else:
-            print(f"[Graph] Skipped edge due to missing nodes: {from_node} -> {to_node}")
 
+    os.makedirs(GRAPH_FOLDER, exist_ok=True)
     html_filename = f"graph_{uuid.uuid4().hex[:8]}.html"
     html_path     = os.path.join(GRAPH_FOLDER, html_filename)
     net.save_graph(html_path)
 
-    # --- Sync to ArangoDB ---
+    # Sync to ArangoDB
     try:
         _sync_to_arango(session_id, net.nodes, net.edges, target_arango_db)
     except Exception as e:
-        print(f"[ArangoDB] Sync failed: {e}")
+        print(f"[ArangoDB] Sync failed (non-critical): {e}")
 
-    return f"{BASE_URL}/graphs/{html_filename}"
+    graph_url = f"{BASE_URL}/graphs/{html_filename}"
+    return graph_data, graph_url
+
 
 # ══════════════════════════════════════════════════════
 # ARANGODB SYNC
 # ══════════════════════════════════════════════════════
 
 def _safe_key(val: str) -> str:
-    """ArangoDB _key allows only [a-zA-Z0-9_:.@()-]+"""
     return re.sub(r'[^a-zA-Z0-9_:.@()-]', '_', str(val))
 
+
 def _sync_to_arango(session_id: str, nodes: list, edges: list, target_arango_db: str = None):
-    print(f"[ArangoDB] Connecting to {ARANGO_HOST} ...")
     client = ArangoClient(hosts=ARANGO_HOST)
     sys_db = client.db('_system', username=ARANGO_USER, password=ARANGO_PASS)
 
-    db_to_use = target_arango_db if target_arango_db else ARANGO_DB
+    db_name = target_arango_db or ARANGO_DB
+    if not sys_db.has_database(db_name):
+        sys_db.create_database(db_name)
 
-    # Ensure database exists
-    if not sys_db.has_database(db_to_use):
-        sys_db.create_database(db_to_use)
-    
-    db = client.db(db_to_use, username=ARANGO_USER, password=ARANGO_PASS)
+    db = client.db(db_name, username=ARANGO_USER, password=ARANGO_PASS)
 
-    # Ensure collections exist
     nodes_col_name = "session_nodes"
     edges_col_name = "session_edges"
 
@@ -452,797 +313,109 @@ def _sync_to_arango(session_id: str, nodes: list, edges: list, target_arango_db:
     if not db.has_collection(edges_col_name):
         db.create_collection(edges_col_name, edge=True)
 
-    print("[DEBUG] _sync_to_arango: REACHED BACKUP BLOCK", flush=True)
-    from database.kgraph_backup_service import backup_kgraph_collections
-    bkp_result = backup_kgraph_collections(db, nodes_col_name, edges_col_name)
-    print(f"[DEBUG] _sync_to_arango: BACKUP DONE -- skipped={bkp_result.get('skipped')}", flush=True)
-
     nodes_col = db.collection(nodes_col_name)
     edges_col = db.collection(edges_col_name)
 
-    # Sync Nodes
-    print(f"[ArangoDB] Syncing {len(nodes)} nodes...")
+    # Upsert nodes
     for n in nodes:
         key = _safe_key(n["id"])
         doc = {
-            "_key": key,
+            "_key":       key,
             "session_id": session_id,
-            "label": n.get("label", ""),
-            "original_id": n["id"],
-            "type": n.get("type") or (n["id"].split('_')[0] if '_' in n["id"] else "unknown")
+            "label":      n.get("label", n["id"]),
+            "type":       n.get("type", "Entity"),
+            "table_name": n.get("table_name", ""),
+            "title":      n.get("title", ""),
+            "color":      n.get("color", "")
         }
-        try:
-            if nodes_col.has(key):
-                nodes_col.update(doc)
-            else:
-                nodes_col.insert(doc)
-        except Exception as e:
-            print(f"[ArangoDB] skip node {key}: {e}")
+        nodes_col.insert(doc, overwrite=True, silent=True)
 
-    # Sync Edges
-    print(f"[ArangoDB] Syncing {len(edges)} edges...")
+    # Upsert edges
     for e in edges:
         from_key = _safe_key(e["from"])
         to_key   = _safe_key(e["to"])
-        edge_key = _safe_key(f"{from_key}_to_{to_key}")
-        
+        edge_key = _safe_key(f"{from_key}_{to_key}_{e.get('label', '')}")
         doc = {
-            "_key": edge_key,
-            "_from": f"{nodes_col_name}/{from_key}",
-            "_to": f"{nodes_col_name}/{to_key}",
+            "_key":       edge_key,
+            "_from":      f"{nodes_col_name}/{from_key}",
+            "_to":        f"{nodes_col_name}/{to_key}",
             "session_id": session_id,
-            "label": e.get("label", ""),
-            "title": e.get("title", "")
+            "label":      e.get("label", ""),
+            "title":      e.get("title", ""),
+            "color":      e.get("color", "")
         }
-        try:
-            if edges_col.has(edge_key):
-                edges_col.update(doc)
-            else:
-                edges_col.insert(doc)
-        except Exception as ex:
-            print(f"[ArangoDB] skip edge {edge_key}: {ex}")
+        edges_col.insert(doc, overwrite=True, silent=True)
 
-    print("[ArangoDB] Sync Complete!")
+    print(f"[ArangoDB] Synced {len(nodes)} nodes, {len(edges)} edges to '{db_name}'")
 
 
 # ══════════════════════════════════════════════════════
-# DATA FETCHERS
+# DATA FETCHING — STRICTLY METADATA ONLY (NO ROW DATA)
 # ══════════════════════════════════════════════════════
 
 def _fetch_web_data(session_id: str, topics: list, conn) -> list:
     if not topics:
         return []
-    cursor = None
     results = []
+    cursor = None
     try:
         cursor = conn.cursor(dictionary=True)
-        placeholders = ",".join(["%s"] * len(topics))
-        cursor.execute(f"""
-            SELECT topic, title, url, brief, saved_at
-            FROM saved_web_results
-            WHERE `session_id` = %s
-              AND topic IN ({placeholders})
-            ORDER BY topic, saved_at DESC
-        """, [session_id] + topics)
-        rows = cursor.fetchall()
-
-        grouped = {}
-        for r in rows:
-            t = r["topic"]
-            grouped.setdefault(t, []).append({
-                "title":    r["title"],
-                "url":      r["url"],
-                "brief":    r.get("brief", ""),
-                "saved_at": str(r["saved_at"]) if r["saved_at"] else None
-            })
-
-        for topic, items in grouped.items():
+        for topic in topics:
+            cursor.execute("""
+                SELECT `title`, `url`, `content` AS brief
+                FROM `web_search_history`
+                WHERE `session_id` = %s AND `topic` = %s
+                ORDER BY `id` DESC
+                LIMIT 5
+            """, (session_id, topic))
+            rows = cursor.fetchall()
             results.append({
                 "source_type":  "web",
                 "topic":        topic,
-                "result_count": len(items),
-                "items":        items
+                "result_count": len(rows),
+                "items":        rows
             })
     except Exception as e:
-        print(f"[Analysis] web fetch error: {e}")
+        print(f"[Analysis] web_data fetch error: {e}")
     finally:
         if cursor: cursor.close()
     return results
 
 
-# ══════════════════════════════════════════════════════
-# HARDCODED CORE KPIs — deterministic, no LLM involved
-# ══════════════════════════════════════════════════════
-def _compute_core_kpis(cursor) -> dict:
-    """
-    Runs the fixed set of core business KPIs directly — same query every
-    time. No LLM writes these queries, so they can't drift or hallucinate.
-    Each query group first checks whether its required tables actually
-    exist for this session's database — if not, it's marked distinctly
-    as "missing table" rather than a generic failure, so it's clear at
-    a glance whether a blank field means "no data synced" or "real bug."
-
-    NOTE on units: The queries below now divide Invoice_Value_INR by 10,000,000 to
-    return values in CRORES (e.g. 995.04). The report-writing LLM is instructed
-    (see _call_mistral, rule #11) to display these with a ₹ symbol and append " Cr".
-    """
-    kpis = {}
-
-    cursor.execute("SHOW TABLES")
-    existing_tables = {list(row.values())[0].lower() for row in cursor.fetchall()}
-
-    def run(label, sql, required_tables=None):
-        if required_tables:
-            missing = [t for t in required_tables if t.lower() not in existing_tables]
-            if missing:
-                print(f"[CoreKPI] '{label}' skipped — missing table(s): {missing}")
-                kpis[label] = None
-                return
-        try:
-            cursor.execute(sql)
-            kpis[label] = cursor.fetchall()
-        except Exception as e:
-            print(f"[CoreKPI] '{label}' failed: {e}")
-            kpis[label] = None
-
-    # ---------- 1. Overall Performance ----------
-    run("total_revenue", """
-        SELECT ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Total_Revenue
-        FROM sales_data sd
-    """, required_tables=["sales_data"])
-
-    run("total_quantity", """
-        SELECT ROUND(SUM(sd.Sales_Qty),2) AS Total_Quantity
-        FROM sales_data sd
-    """, required_tables=["sales_data"])
-
-    run("total_transactions", """
-        SELECT COUNT(*) AS Total_Transactions
-        FROM sales_data sd
-    """, required_tables=["sales_data"])
-
-    run("avg_transaction_value", """
-        SELECT ROUND(SUM(sd.Invoice_Value_INR)/COUNT(*),2) AS Average_Transaction_Value
-        FROM sales_data sd
-    """, required_tables=["sales_data"])
-
-    run("avg_selling_price", """
-        SELECT ROUND(SUM(sd.Invoice_Value_INR)/NULLIF(SUM(sd.Sales_Qty),0),2) AS Average_Selling_Price
-        FROM sales_data sd
-    """, required_tables=["sales_data"])
-
-    # ---------- 2. Revenue Trend ----------
-    run("highest_sales_month", """
-        SELECT
-            YEAR(sd.billing__doc_date) AS Sales_Year,
-            MONTHNAME(sd.billing__doc_date) AS Month_Name,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        WHERE sd.billing__doc_date IS NOT NULL
-        GROUP BY
-            YEAR(sd.billing__doc_date), MONTH(sd.billing__doc_date), MONTHNAME(sd.billing__doc_date)
-        ORDER BY Revenue DESC
-        LIMIT 1
-    """, required_tables=["sales_data"])
-
-    run("lowest_sales_month", """
-        SELECT
-            YEAR(sd.billing__doc_date) AS Sales_Year,
-            MONTHNAME(sd.billing__doc_date) AS Month_Name,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        WHERE sd.billing__doc_date IS NOT NULL
-        GROUP BY
-            YEAR(sd.billing__doc_date), MONTH(sd.billing__doc_date), MONTHNAME(sd.billing__doc_date)
-        ORDER BY Revenue ASC
-        LIMIT 1
-    """, required_tables=["sales_data"])
-
-    # [CHANGED] mom_growth used to return one row per month (potentially
-    # 18+ rows) — bloating the context for a field the template only wants
-    # as a single summary line ("Monthly Growth: <Value>"). Replaced with
-    # two single-row queries: the single highest and single lowest growth
-    # month, which is exactly what past reports actually quoted anyway.
-    run("highest_growth_month", """
-        WITH MonthlyRevenue AS (
-            SELECT
-                YEAR(sd.billing__doc_date) AS Sales_Year,
-                MONTH(sd.billing__doc_date) AS Sales_Month,
-                MONTHNAME(sd.billing__doc_date) AS Month_Name,
-                (SUM(sd.Invoice_Value_INR)/10000000) AS Revenue
-            FROM sales_data sd
-            WHERE sd.billing__doc_date IS NOT NULL
-            GROUP BY
-                YEAR(sd.billing__doc_date), MONTH(sd.billing__doc_date), MONTHNAME(sd.billing__doc_date)
-        ),
-        Growth AS (
-            SELECT
-                Sales_Year, Month_Name,
-                ROUND(Revenue,2) AS Current_Revenue,
-                ROUND(
-                    (Revenue - LAG(Revenue) OVER(ORDER BY Sales_Year, Sales_Month))
-                    / NULLIF(LAG(Revenue) OVER(ORDER BY Sales_Year, Sales_Month),0) * 100
-                ,2) AS MoM_Growth_Percentage
-            FROM MonthlyRevenue
-        )
-        SELECT * FROM Growth
-        WHERE MoM_Growth_Percentage IS NOT NULL
-        ORDER BY MoM_Growth_Percentage DESC
-        LIMIT 1
-    """, required_tables=["sales_data"])
-
-    run("lowest_growth_month", """
-        WITH MonthlyRevenue AS (
-            SELECT
-                YEAR(sd.billing__doc_date) AS Sales_Year,
-                MONTH(sd.billing__doc_date) AS Sales_Month,
-                MONTHNAME(sd.billing__doc_date) AS Month_Name,
-                (SUM(sd.Invoice_Value_INR)/10000000) AS Revenue
-            FROM sales_data sd
-            WHERE sd.billing__doc_date IS NOT NULL
-            GROUP BY
-                YEAR(sd.billing__doc_date), MONTH(sd.billing__doc_date), MONTHNAME(sd.billing__doc_date)
-        ),
-        Growth AS (
-            SELECT
-                Sales_Year, Month_Name,
-                ROUND(Revenue,2) AS Current_Revenue,
-                ROUND(
-                    (Revenue - LAG(Revenue) OVER(ORDER BY Sales_Year, Sales_Month))
-                    / NULLIF(LAG(Revenue) OVER(ORDER BY Sales_Year, Sales_Month),0) * 100
-                ,2) AS MoM_Growth_Percentage
-            FROM MonthlyRevenue
-        )
-        SELECT * FROM Growth
-        WHERE MoM_Growth_Percentage IS NOT NULL
-        ORDER BY MoM_Growth_Percentage ASC
-        LIMIT 1
-    """, required_tables=["sales_data"])
-
-    # ---------- 3. Product Performance ----------
-    run("top_category", """
-        SELECT
-            COALESCE(cat.category_name, 'Unmapped Category') AS category_name,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        JOIN material_master sk ON sd.material = sk.MATNR
-        JOIN category_master cat ON sk.category = cat.category_code
-        GROUP BY category_name
-        ORDER BY Revenue DESC
-        LIMIT 1
-    """, required_tables=["sales_data", "material_master", "category_master"])
-
-    run("lowest_category", """
-        SELECT
-            COALESCE(cat.category_name, 'Unmapped Category') AS category_name,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        JOIN material_master sk ON sd.material = sk.MATNR
-        JOIN category_master cat ON sk.category = cat.category_code
-        GROUP BY category_name
-        ORDER BY Revenue ASC
-        LIMIT 1
-    """, required_tables=["sales_data", "material_master", "category_master"])
-
-    # NOTE: CAST direction flipped — casting the bigint side to CHAR is
-    # always safe; casting a text column to UNSIGNED silently coerces any
-    # non-purely-numeric value to 0 and fails to match, worsening unmapped
-    # rates for reasons that aren't a real data gap.
-    run("top_construction", """
-        SELECT
-            COALESCE(cons.construction_description, 'Unmapped Construction') AS construction_description,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        JOIN material_master sk ON sd.material = sk.MATNR
-        JOIN construction_master cons
-            ON CAST(sk.construction AS CHAR) = cons.construction_code
-        GROUP BY construction_description
-        ORDER BY Revenue DESC
-        LIMIT 1
-    """, required_tables=["sales_data", "material_master", "construction_master"])
-
-    run("top_tyre_type", """
-        SELECT
-            COALESCE(tt.tyre_type_name, 'Unmapped Tyre Type') AS tyre_type_name,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        JOIN material_master sk ON sd.material = sk.MATNR
-        JOIN tyre_type_master tt ON sk.tyre_type = tt.tyre_type_code
-        GROUP BY tyre_type_name
-        ORDER BY Revenue DESC
-        LIMIT 1
-    """, required_tables=["sales_data", "material_master", "tyre_type_master"])
-
-    run("top_5_products", """
-        SELECT
-            COALESCE(sk.MAKTX, 'Unmapped Product') AS product_name,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        JOIN material_master sk ON sd.material = sk.MATNR
-        GROUP BY product_name
-        ORDER BY Revenue DESC
-        LIMIT 5
-    """, required_tables=["sales_data", "material_master"])
-
-    run("bottom_5_products", """
-        SELECT sk.MAKTX AS product_name, ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        JOIN material_master sk ON sd.material = sk.MATNR
-        WHERE sk.MAKTX IS NOT NULL
-        GROUP BY sk.MAKTX
-        ORDER BY Revenue ASC
-        LIMIT 5
-    """, required_tables=["sales_data", "material_master"])
-
-    # ---------- 4. Customer Performance ----------
-    run("top_customer", """
-        SELECT
-            COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Customer_Name,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        JOIN customer_master cm ON sd.customer = cm.KUNNR
-        GROUP BY Customer_Name
-        ORDER BY Revenue DESC
-        LIMIT 1
-    """, required_tables=["sales_data", "customer_master"])
-
-    run("top_5_customers", """
-        SELECT
-            COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Customer_Name,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        JOIN customer_master cm ON sd.customer = cm.KUNNR
-        GROUP BY Customer_Name
-        ORDER BY Revenue DESC
-        LIMIT 5
-    """, required_tables=["sales_data", "customer_master"])
-
-    run("top_dealers", """
-        SELECT
-            COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Dealer_Name,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        JOIN customer_master cm ON sd.customer = cm.KUNNR
-        JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
-        WHERE ag.account_group_name = 'Dealer'
-        GROUP BY Dealer_Name
-        ORDER BY Revenue DESC
-        LIMIT 5
-    """, required_tables=["sales_data", "customer_master", "account_group_master"])
-
-    run("dealer_contribution_pct", """
-        SELECT ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Dealer_Contribution_Percentage
-        FROM sales_data sd
-        JOIN customer_master cm ON sd.customer = cm.KUNNR
-        JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
-        WHERE ag.account_group_name = 'Dealer'
-    """, required_tables=["sales_data", "customer_master", "account_group_master"])
-
-    run("fleet_contribution_pct", """
-        SELECT ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Fleet_Contribution_Percentage
-        FROM sales_data sd
-        JOIN customer_master cm ON sd.customer = cm.KUNNR
-        JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
-        WHERE ag.account_group_name = 'Fleet'
-    """, required_tables=["sales_data", "customer_master", "account_group_master"])
-
-    run("oem_contribution_pct", """
-        SELECT ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS OEM_Contribution_Percentage
-        FROM sales_data sd
-        JOIN customer_master cm ON sd.customer = cm.KUNNR
-        JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
-        WHERE ag.account_group_name = 'OEM'
-    """, required_tables=["sales_data", "customer_master", "account_group_master"])
-
-    run("customer_concentration", """
-        SELECT
-            COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.customer, ')')) AS Customer_Name,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue,
-            ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Contribution_Percentage
-        FROM sales_data sd
-        JOIN customer_master cm ON sd.customer = cm.KUNNR
-        GROUP BY Customer_Name
-        ORDER BY Contribution_Percentage DESC
-        LIMIT 5
-    """, required_tables=["sales_data", "customer_master"])
-
-    # ---------- 5. Geography (CAST direction flipped, see note above) ----------
-    run("top_zone", """
-        SELECT
-            CASE COALESCE(rm.zone, 'UNMAPPED')
-                WHEN 'EZ' THEN 'East Zone' WHEN 'WZ' THEN 'West Zone'
-                WHEN 'NZ' THEN 'North Zone' WHEN 'SZ' THEN 'South Zone I'
-                WHEN 'TZ' THEN 'South Zone II' WHEN 'CZ' THEN 'Central Zone'
-                WHEN 'NP' THEN 'Nepal' ELSE 'Unmapped Zone'
-            END AS Zone,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        JOIN customer_master cm ON sd.customer = cm.KUNNR
-        JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
-        JOIN region_master rm ON tm.region_code = CAST(rm.region AS CHAR)
-        GROUP BY rm.zone
-        ORDER BY Revenue DESC
-        LIMIT 1
-    """, required_tables=["sales_data", "customer_master", "territory_master", "region_master"])
-
-    run("top_region", """
-        SELECT
-            COALESCE(rm.region_name, 'Unmapped Region') AS region_name,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        JOIN customer_master cm ON sd.customer = cm.KUNNR
-        JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
-        JOIN region_master rm ON tm.region_code = CAST(rm.region AS CHAR)
-        GROUP BY region_name
-        ORDER BY Revenue DESC
-        LIMIT 1
-    """, required_tables=["sales_data", "customer_master", "territory_master", "region_master"])
-
-    run("top_territory", """
-        SELECT
-            COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        JOIN customer_master cm ON sd.customer = cm.KUNNR
-        JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
-        GROUP BY territory_name
-        ORDER BY Revenue DESC
-        LIMIT 1
-    """, required_tables=["sales_data", "customer_master", "territory_master"])
-
-    run("lowest_territory", """
-        SELECT
-            COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        JOIN customer_master cm ON sd.customer = cm.KUNNR
-        JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
-        WHERE tm.territory_name IS NOT NULL
-        GROUP BY territory_name
-        ORDER BY Revenue ASC
-        LIMIT 1
-    """, required_tables=["sales_data", "customer_master", "territory_master"])
-
-    run("region_contribution_pct", """
-        SELECT
-            COALESCE(rm.region_name, 'Unmapped Region') AS region_name,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue,
-            ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Contribution_Percentage
-        FROM sales_data sd
-        JOIN customer_master cm ON sd.customer = cm.KUNNR
-        JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
-        JOIN region_master rm ON tm.region_code = CAST(rm.region AS CHAR)
-        GROUP BY region_name
-        ORDER BY Revenue DESC
-        LIMIT 5
-    """, required_tables=["sales_data", "customer_master", "territory_master", "region_master"])
-
-    # [REMOVED] revenue_by_region and revenue_by_territory used to return
-    # every single region/territory row (potentially 30+ rows total) even
-    # though the report template only ever asks for Top/Lowest — pure
-    # context bloat contributing directly to truncation. Region/Territory
-    # coverage beyond Top/Lowest/Contribution% belongs in the supplementary
-    # LLM-generated insights path instead, not the fixed core block.
-
-    # ---------- 6. Distribution Analysis ----------
-    run("distribution_revenue", """
-        SELECT COALESCE(sd.distribution__Channel, 'Unmapped Channel') AS distribution_name, ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        GROUP BY distribution_name
-        ORDER BY Revenue DESC
-    """, required_tables=["sales_data"])
-
-    run("distribution_quantity", """
-        SELECT COALESCE(sd.distribution__Channel, 'Unmapped Channel') AS distribution_name, ROUND(SUM(sd.Sales_Qty),2) AS Quantity
-        FROM sales_data sd
-        GROUP BY distribution_name
-        ORDER BY Quantity DESC
-    """, required_tables=["sales_data"])
-
-    run("distribution_contribution_pct", """
-        SELECT
-            COALESCE(sd.distribution__Channel, 'Unmapped Channel') AS distribution_name,
-            ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue,
-            ROUND(SUM(sd.Invoice_Value_INR) * 100 / (SELECT SUM(Invoice_Value_INR) FROM sales_data), 2) AS Contribution_Percentage
-        FROM sales_data sd
-        GROUP BY distribution_name
-        ORDER BY Revenue DESC
-    """, required_tables=["sales_data"])
-
-    # # ---------- 7. Pricing Analysis ----------
-    # run("pricing", """
-    #     SELECT
-    #         SUM(Claim_Qty)                   AS claims_quantity,
-    #         ROUND(SUM(NDP_CLAIM_INR),2)       AS claims_amount,
-    #         SUM(Return_Qty)                  AS returns_quantity,
-    #         ROUND(SUM(NDP_RETURN_INR),2)      AS returns_amount,
-    #         ROUND(SUM(Total_Discount_INR),2)  AS discount_amount,
-    #         ROUND(
-    #             ABS(SUM(Total_Discount_INR)) * 100 /
-    #             NULLIF((SELECT SUM(Invoice_Value_INR) FROM sales_data), 0)
-    #         , 2) AS discount_percentage
-    #     FROM sales_data
-    # """, required_tables=["sales_data"])
-
-    # # ---------- 8. Target Performance ----------
-    # run("target_vs_actual", """
-    #     SELECT
-    #         st.Month AS Target_Month,
-    #         ROUND(SUM(st.Value),2) AS Target_Value,
-    #         (
-    #             SELECT ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2)
-    #             FROM sales_data sd
-    #             WHERE DATE_FORMAT(sd.billing__doc_date, '%Y%m') = CAST(st.Month AS CHAR)
-    #         ) AS Actual_Value
-    #     FROM sales_target st
-    #     GROUP BY st.Month
-    #     ORDER BY st.Month
-    # """, required_tables=["sales_data", "sales_target"])
-
-    # ---------- 9. Business Risks ----------
-    run("high_customer_dependency", """
-        SELECT
-            CASE WHEN (
-                SELECT SUM(Revenue) FROM (
-                    SELECT SUM(sd.Invoice_Value_INR) AS Revenue FROM sales_data sd
-                    GROUP BY sd.customer ORDER BY Revenue DESC LIMIT 10
-                ) t
-            ) > (SELECT SUM(Invoice_Value_INR)*0.50 FROM sales_data)
-            THEN 'High Customer Dependency' ELSE 'Normal' END AS Risk_Status
-    """, required_tables=["sales_data"])
-
-    run("high_dealer_dependency", """
-        SELECT
-            CASE WHEN (
-                SELECT SUM(sd.Invoice_Value_INR) FROM sales_data sd
-                JOIN customer_master cm ON sd.customer = cm.KUNNR
-                JOIN account_group_master ag ON cm.acc_grp = ag.KTOKD
-                WHERE ag.account_group_name = 'Dealer'
-            ) > (SELECT SUM(Invoice_Value_INR)*0.60 FROM sales_data)
-            THEN 'High Dealer Dependency' ELSE 'Normal' END AS Risk_Status
-    """, required_tables=["sales_data", "customer_master", "account_group_master"])
-
-    run("weak_territory", """
-        SELECT COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name, ROUND(SUM(sd.Invoice_Value_INR)/10000000, 2) AS Revenue
-        FROM sales_data sd
-        JOIN customer_master cm ON sd.customer = cm.KUNNR
-        JOIN territory_master tm ON CAST(cm.territory AS CHAR) = tm.territory_code
-        WHERE tm.territory_name IS NOT NULL
-        GROUP BY territory_name
-        ORDER BY Revenue ASC
-        LIMIT 5
-    """, required_tables=["sales_data", "customer_master", "territory_master"])
-
-    return kpis
-
-
-def _fetch_agentic_insights(cursor, tables_info: list, db_type: str) -> list:
-    """
-    Agentic Workflow:
-    1. Sends schema to LLM and asks for 7-10 comprehensive business SQL queries.
-    2. Executes the queries.
-    3. Returns the successful results as a list of strings.
-    NOTE: this is now used only for supplementary/exploratory insights —
-    the core numeric backbone (Total Revenue, Top Category/Construction/
-    Zone/Region/Customer, Distribution %, Claims, Returns, Target, etc.)
-    is computed deterministically by _compute_core_kpis instead, so this
-    function no longer needs to (and should not be relied on to) get those
-    fields right on its own.
-    """
-    if not tables_info:
-        return []
-        
-    schema_desc = []
-    for t in tables_info:
-        schema_desc.append(f"Table: {t['table_name']}")
-        schema_desc.append(f"Columns: {', '.join(t['columns'])}")
-    schema_str = "\n".join(schema_desc)
-    
-    system_prompt = f"""You are an expert Data Analyst and {db_type.upper()} DBA.
-Your task is to write advanced SQL queries that extract SUPPLEMENTARY business insights
-beyond the core KPIs, which are already computed separately and provided verbatim
-elsewhere in the context (look for "VERIFIED KPI BLOCK"). Do NOT recompute Total Revenue,
-Total Quantity, Total Transactions, Top Category/Construction/Tyre Type, Top Customer,
-Top Zone/Region/Territory, Distribution %, Claims, Returns, or Target Performance —
-those are already handled. Focus instead on open-ended, exploratory angles. You MUST generate specific queries to uncover:
-1. SEASONALITY: A month-over-month revenue trend (grouping by YEAR and MONTH of billing__doc_date) to identify massive seasonal spikes or slumps.
-2. SKU CONCENTRATION: A query to find the top 5 SKUs (by MAKTX) and their exact revenue contribution, as the business might be heavily reliant on a few materials.
-3. ZONE-WISE PERFORMANCE: A full breakdown of revenue by zone (using the customer -> territory -> region -> zone joins) to clearly highlight both dominating zones (like CZ) and severely underperforming zones (like WZ).
-4. TARGET VS ACTUALS GAP: Join sales_target with sales_data to find the exact top 5 SKUs or Regions that are missing their targets by the highest margins.
-5. DISCOUNT IMPACT: Analyze the relationship between Total_Discount_INR and Invoice_Value_INR by zone or category to reveal heavily discounted revenue sources.
-6. CUSTOMER CHANNEL MIX: Break down revenue by Account Group (customer_master.acc_grp = account_group_master.KTOKD) to reveal the split between Dealers, OEM, and Fleets.
-
-Always use the following joins when you do write queries. Several join keys have
-MISMATCHED COLUMN TYPES between tables (one side bigint/int, the other text) —
-always wrap the text side in CAST(... AS UNSIGNED) or the numeric side in
-CAST(... AS CHAR) so the join is explicit and doesn't rely on implicit coercion:
-Always use the following joins when you do write queries. Each line below includes
-a brief on what business question that join unlocks, plus any type-cast needed since
-several join keys have MISMATCHED COLUMN TYPES between tables (one side bigint/int,
-the other text):
-
-sales_data.customer = customer_master.KUNNR
-    -- both bigint, no cast needed
-    -- Brief: links every transaction to its dealer/fleet/OEM account — the entry point for any customer-level query.
-
-customer_master.acc_grp = account_group_master.KTOKD
-    -- both text
-    -- Brief: classifies each customer as Dealer / Fleet / OEM / Ship-to-Party — use for channel-type breakdowns beyond the fixed Dealer/Fleet/OEM % already in the KPI block.
-
-customer_master.class = class_master.class_code
-    -- both text
-    -- Brief: resolves customer tier/segment (e.g. Champion, Common, Fleet Management, oil-company co-branded classes like HPCL/IOCL/ESSAR) — use for customer-class-wise revenue or SKU-preference breakdowns.
-
-CAST(customer_master.territory AS CHAR) = territory_master.territory_code
-    -- bigint vs text: cast the bigint side
-    -- Brief: the first hop from a customer to its geography — required before reaching region/zone.
-
-CAST(territory_master.region_code AS UNSIGNED) = region_master.region
-    -- text vs bigint: cast the text side (region_code is TEXT here, region is BIGINT)
-    -- Brief: rolls a territory up to its region and zone — use for full region/territory breakdowns beyond the fixed Top/Lowest already in the KPI block.
-
-region_master.zone
-    -- Brief: the top-level PAN-India geography grouping (East/West/North/South I & II/Central/Nepal) — use for any zone-comparison angle not already covered by zone_wise_performance in the KPI block.
-
-sales_data.material = material_master.MATNR
-    -- both text
-    -- Brief: links a transaction to its product master — the entry point for any SKU/product-level query.
-
-material_master.category = category_master.category_code
-    -- both text
-    -- Brief: resolves Tyre / Tube / Flap / Others — use for category-mix trend angles beyond the fixed Top/Lowest Category.
-
-CAST(material_master.construction AS CHAR) = construction_master.construction_code
-    -- construction is bigint here; NOTE: this column can only hold numeric codes as currently typed, so alphabetic construction_master codes (A, B, D, E, K, L, M, N, O, P, R, T, Z) will never match — flag any "Unmapped Construction" spike to the data team rather than assuming the query is wrong
-    -- Brief: resolves BIAS vs RADIAL — use for radialization/premiumization trend angles, keeping the known matching gap in mind.
-
-material_master.tyre_type = tyre_type_master.tyre_type_code
-    -- both text
-    -- Brief: resolves the end-use vehicle segment (Truck, LCV, Car, Tractor, OTR, etc.) — use for segment-growth or vehicle-mix angles beyond the fixed Top Tyre Type.
-
-
-    -- bigint vs int, safe implicit match
-    -- Brief: resolves Replacement / OEM / STU / DEF — use for channel-mix angles beyond the fixed Distribution % already in the KPI block.
-
-sales_target.MATNR = material_master.MATNR
-    -- both text
-    -- Brief: links a planned target line to its product — use for SKU-level target-vs-actual gaps, since the KPI block only covers zone-level target achievement.
-
-sales_target.Terr_Code = territory_master.territory_code
-    -- BOTH TEXT — no cast needed
-    -- Brief: links a planned target line to its territory — combine with region_master.zone for territory-level (not just zone-level) target achievement.
-
-DATE_FORMAT(sales_data.billing__doc_date, '%Y%m') = CAST(sales_target.Month AS CHAR)
-    -- Month is bigint, cast to text for string comparison
-    -- Brief: aligns actual monthly billing to the planned target month — use for any month-by-month target variance beyond the aggregate figures already in the KPI block.
-
-Never display IDs or codes. Always return descriptive names from the master tables.
-
-OPTIONAL: `report_business_mapping` (report_row, brand, tyre_type, construction, distribution,
-account_group, remarks) is available for canonical report-row/brand rollups. Only join to it
-when a query specifically needs a standardized report_row grouping — don't force it into every query.
-
-GENERAL RULES:
-- Always use Invoice_Value_INR for revenue calculations.
-- Always use Sales_Qty for quantity calculations.
-- Always use billing__doc_date for all date filtering (already a DATE column — no parsing needed).
-- Always return names from master tables instead of IDs.
-- Use JOIN (not INNER JOIN) when resolving names, and use COALESCE() to label unmatched
-  codes explicitly (e.g. "Unmapped Account") rather than dropping those rows.
-- Cast mismatched join key types explicitly (see CASTs above) — do not rely on implicit coercion.
-- GROUP BY CORRECTNESS (critical): every non-aggregated column you SELECT (e.g. material_master.MAKTX,
-  customer_master.Cname, region_master.zone) MUST also appear in that query's GROUP BY clause.
-  Never SELECT a descriptive name column next to SUM(...)/COUNT(...) without grouping by that
-  same column — doing so lets the database pick an arbitrary or NULL value for the name while
-  still summing across ALL rows, producing a single fake row that silently absorbs nearly the
-  whole table's revenue instead of a real answer. Before finalizing each query, check: does
-  every non-aggregate item in SELECT also appear in GROUP BY? If not, fix it.
-- JOINED TABLE AGGREGATION (critical): When joining sales_target or any table that has a numeric
-  column (e.g. sales_target.Value, sales_target.Qty) that is NOT a grouping key, you MUST wrap it
-  in an aggregate function (e.g. SUM(st.Value), MAX(st.Value)). NEVER use a raw column from a
-  joined table in SELECT unless it also appears in GROUP BY. This prevents MySQL error 1055
-  (only_full_group_by) which will cause the query to fail completely.
-- COLUMN NAMES (critical): Use ONLY the exact column names as listed in the schema. Do NOT invent
-  column names. Key verified mappings:
-  * customer_master.class (code) → JOIN class_master ON class_master.class_code = customer_master.class → use class_master.class_name
-  * customer_master.acc_grp (code) → JOIN account_group_master ON account_group_master.KTOKD = customer_master.acc_grp → use account_group_master.account_group_name
-  * material_master.category (code) → JOIN category_master ON category_master.category_code = material_master.category → use category_master.category_name
-  * material_master.tyre_type (code) → JOIN tyre_type_master ON tyre_type_master.tyre_type_code = material_master.tyre_type → use tyre_type_master.tyre_type_name
-  * material_master.construction (bigint) → JOIN construction_master ON CAST(material_master.construction AS CHAR) = construction_master.construction_code → use construction_master.construction_description (NOT construction_name)
-  
-  * Never use cm.class_name, cm.tyre_type_name, or any invented alias. Always traverse the correct master table join.
-- STRICT LIMITS: Every query MUST include an ORDER BY clause (usually on revenue or quantity) and a LIMIT 5 or LIMIT 10 to prevent overloading the context window.
-- PERCENTAGE CONTEXT: Where possible, include a percentage calculation (e.g. (Revenue / Total_Revenue) * 100) so the final report knows how significant a trend is relative to the whole business.
-- Generate optimized MySQL 8+ queries.
-- Write 6 to 10 queries total (to cover all the required specific angles above).
-
-Respond ONLY with a valid JSON array of strings containing the SQL queries."""
-
-    user_prompt = f"Schema:\n{schema_str}\nGenerate the JSON array of queries."
-    
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt}
-    ]
-    
-    insights = []
-    try:
-        content_str = call_llm_chat(messages, json_mode=True, temperature=0.1)
-        queries = json.loads(content_str)
-        if not isinstance(queries, list):
-            return insights
-
-        BLOCKED_KEYWORDS = ("into outfile", "into dumpfile", "load_file", "load data")
-
-        for i, query in enumerate(queries, 1):
-            query = query.strip().rstrip(";")
-            q_lower = query.lower()
-
-            if not q_lower.startswith("select"):
-                continue
-            if ";" in query:                          # reject any embedded multi-statement
-                print(f"[Agentic Helper] Rejected multi-statement query: {query}")
-                continue
-            if any(kw in q_lower for kw in BLOCKED_KEYWORDS):
-                print(f"[Agentic Helper] Rejected unsafe query: {query}")
-                continue
-
-            try:
-                cursor.execute(query)
-                rows = cursor.fetchall()[:MAX_ROWS]   # cap rows fed into context
-                if rows:
-                    insights.append(f"--- Insight Query {i} ---")
-                    insights.append(f"Query: {query}")
-                    for row in rows:
-                        row_str = " | ".join(
-                            f"{k}: {json.dumps(v) if isinstance(v, (dict, list)) else v}"
-                            for k, v in row.items()
-                        )
-                        insights.append(f"  {row_str}")
-            except Exception as e:
-                print(f"[Agentic Helper] Query failed: {query}. Error: {e}")
-                
-    except Exception as e:
-        print(f"[Agentic Helper] LLM call failed: {e}")
-        
-    return insights
-
-
 def _fetch_db_data(session_id: str, databases: list, conn) -> list:
     """
-    Fetch DB data for analysis — supports MySQL and PostgreSQL.
-    For PostgreSQL:
-      - schema provided → only that schema's tables
-      - no schema → all non-system schemas (public + custom)
+    STRICT METADATA-ONLY FETCH.
+    Reads: Database names, table names, column names, data types, primary & foreign keys.
+    NEVER reads or sends raw transaction rows, sales records, customer names, or amounts.
     """
     results = []
+    if not databases:
+        return results
 
-    # ── 1. MySQL / MSSQL (sync log approach) ──
-    cursor = None
+    # 1. MySQL Dynamic/External Databases
     db_map = {}
+    cursor = None
     try:
         cursor = conn.cursor(dictionary=True)
-        if databases:
-            placeholders = ",".join(["%s"] * len(databases))
-            cursor.execute(f"""
-                SELECT DISTINCT external_database, new_user_db, table_name
-                FROM external_db_sync_log
-                WHERE `session_id` = %s
-                  AND external_database IN ({placeholders})
-                  AND new_user_db IS NOT NULL
-                  AND new_user_db != ''
-            """, [session_id] + databases)
-            rows = cursor.fetchall()
-            for r in rows:
-                new_user_db = r["new_user_db"]
-                if new_user_db not in db_map:
-                    db_map[new_user_db] = {"external_databases": [], "tables": []}
-                ext_db = r["external_database"]
-                if ext_db not in db_map[new_user_db]["external_databases"]:
-                    db_map[new_user_db]["external_databases"].append(ext_db)
-                if r.get("table_name"):
-                    db_map[new_user_db]["tables"].append(r["table_name"])
-            print(f"[Analysis] MySQL DB MAP -> {db_map}")
+        placeholders = ", ".join(["%s"] * len(databases))
+        cursor.execute(f"""
+            SELECT `external_database`, `new_user_db`, `table_name`
+            FROM `session_sources`
+            WHERE `session_id` = %s
+              AND external_database IN ({placeholders})
+              AND new_user_db IS NOT NULL
+              AND new_user_db != ''
+        """, [session_id] + databases)
+        rows = cursor.fetchall()
+        for r in rows:
+            new_user_db = r["new_user_db"]
+            if new_user_db not in db_map:
+                db_map[new_user_db] = {"external_databases": [], "tables": []}
+            ext_db = r["external_database"]
+            if ext_db not in db_map[new_user_db]["external_databases"]:
+                db_map[new_user_db]["external_databases"].append(ext_db)
+            if r.get("table_name"):
+                db_map[new_user_db]["tables"].append(r["table_name"])
     except Exception as e:
         print(f"[Analysis] db_map error: {e}")
     finally:
@@ -1261,7 +434,6 @@ def _fetch_db_data(session_id: str, databases: list, conn) -> list:
 
         ext_conn = ext_cur = None
         try:
-            print(f"[Analysis] Connecting MySQL -> {new_db}")
             ext_conn = mysql.connector.connect(
                 host=MYSQL_CONFIG["host"],
                 port=MYSQL_CONFIG["port"],
@@ -1271,38 +443,33 @@ def _fetch_db_data(session_id: str, databases: list, conn) -> list:
                 connection_timeout=10
             )
             ext_cur = ext_conn.cursor(dictionary=True)
-            
-            # Filter tables: only use those explicitly synced for this database
+
             if allowed_tables:
                 tables = allowed_tables
             else:
                 ext_cur.execute("SHOW TABLES")
                 tables = [list(r.values())[0] for r in ext_cur.fetchall()]
-                
-            print(f"[Analysis] Tables in {new_db} -> {tables}")
 
             for t in tables:
                 try:
-                    ext_cur.execute(f"SELECT * FROM `{t}` LIMIT 0")
-                    ext_cur.fetchall()
-                    cols = [desc[0] for desc in ext_cur.description]
-                    
+                    # Fetch column metadata without querying any data rows
+                    ext_cur.execute(f"DESCRIBE `{t}`")
+                    desc_rows = ext_cur.fetchall()
+                    cols = [r["Field"] for r in desc_rows]
+                    pks  = [r["Field"] for r in desc_rows if r.get("Key") == "PRI"]
+                    col_details = [{"name": r["Field"], "type": r["Type"], "is_primary_key": r.get("Key") == "PRI"} for r in desc_rows]
+
                     db_result["tables"].append({
                         "table_name":   t,
                         "columns":      cols,
-                        "business_aggregates": get_table_aggregates(ext_cur, t)
+                        "primary_keys": pks,
+                        "columns_detail": col_details
                     })
-                except Exception as table_error:
-                    print(f"[Analysis] MySQL table {t} error -> {table_error}")
-            
-            # [NEW] Deterministic core KPIs — computed first, always the same
-            db_result["core_kpis"] = _compute_core_kpis(ext_cur)
+                except Exception as tbl_err:
+                    print(f"[Analysis] Metadata fetch error for table {t}: {tbl_err}")
 
-            # Supplementary/exploratory LLM-generated insights
-            db_result["executed_insights"] = _fetch_agentic_insights(ext_cur, db_result["tables"], "mysql")
-
-        except Exception as db_error:
-            print(f"[Analysis] MySQL connect {new_db} error -> {db_error}")
+        except Exception as db_err:
+            print(f"[Analysis] MySQL metadata connect error for {new_db}: {db_err}")
         finally:
             if ext_cur:
                 try: ext_cur.close()
@@ -1313,183 +480,148 @@ def _fetch_db_data(session_id: str, databases: list, conn) -> list:
 
         results.append(db_result)
 
-    # ── 2. PostgreSQL (from database_credential table) ──
-    if not PSYCOPG2_AVAILABLE:
-        return results
-
-    pg_cursor = None
-    pg_cred_rows = []
-    try:
-        pg_cursor = conn.cursor(dictionary=True)
-        pg_cursor.execute("""
-            SELECT credential, db_type
-            FROM database_credential
-            WHERE session_id = %s AND db_type IN ('postgresql', 'postgres')
-            ORDER BY connection_id DESC
-        """, (session_id,))
-        pg_cred_rows = pg_cursor.fetchall()
-    except Exception as e:
-        print(f"[Analysis] PG credential fetch error: {e}")
-    finally:
-        if pg_cursor: pg_cursor.close()
-
-    seen_pg = set()
-    for cred_row in pg_cred_rows:
+    # 2. PostgreSQL (Metadata Only)
+    if PSYCOPG2_AVAILABLE:
+        pg_cursor = None
         try:
-            cred = cred_row["credential"]
-            if isinstance(cred, str):
-                cred = json.loads(cred)
-
-            pg_host     = cred.get("host", "localhost")
-            pg_port     = int(cred.get("port", 5432))
-            pg_user     = cred.get("username", "")
-            pg_password = cred.get("password", "")
-            pg_database = cred.get("database", "")
-            pg_schema   = cred.get("schema")  # None/empty → all schemas
-
-            dedup_key = f"{pg_host}:{pg_port}/{pg_database}/{pg_schema or '__all__'}"
-            if dedup_key in seen_pg:
-                continue
-            seen_pg.add(dedup_key)
-
-            # Filter: only process if this DB was requested (or no filter given)
-            if databases and pg_database not in databases:
-                print(f"[Analysis] PG {pg_database} not in requested list — skipping")
-                continue
-
-            print(f"[Analysis] Connecting PostgreSQL: {pg_host}:{pg_port}/{pg_database} schema={pg_schema or 'ALL'}")
-
-            pg_conn = None
-            pg_cur = None
-            try:
+            pg_cursor = conn.cursor(dictionary=True)
+            pg_cursor.execute("""
+                SELECT credential, db_type
+                FROM database_credential
+                WHERE session_id = %s AND db_type IN ('postgresql', 'postgres')
+                ORDER BY connection_id DESC
+            """, (session_id,))
+            pg_cred_rows = pg_cursor.fetchall()
+            for cred_row in pg_cred_rows:
+                cred = json.loads(cred_row["credential"])
                 pg_conn = psycopg2.connect(
-                    host=pg_host, port=pg_port,
-                    user=pg_user, password=pg_password,
-                    dbname=pg_database,
-                    connect_timeout=10
+                    host=cred["host"], port=cred.get("port", 5432),
+                    user=cred["user"], password=cred["password"],
+                    dbname=cred["database"], connect_timeout=10
                 )
-                pg_cur = pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-                db_result = {
-                    "source_type":       "database",
-                    "external_database": pg_database,
-                    "new_user_db":       pg_database,
-                    "tables":            []
-                }
-
-                # Determine schemas
-                if pg_schema and pg_schema.strip():
-                    schemas_to_fetch = [pg_schema.strip()]
-                else:
-                    pg_cur.execute("""
-                        SELECT schema_name
-                        FROM information_schema.schemata
-                        WHERE schema_name NOT IN ('pg_catalog', 'information_schema',
-                                                  'pg_toast', 'pg_temp_1', 'pg_toast_temp_1')
-                          AND schema_name NOT LIKE 'pg_temp_%'
-                          AND schema_name NOT LIKE 'pg_toast_temp_%'
-                        ORDER BY schema_name
+                with pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pcur:
+                    pcur.execute("""
+                        SELECT table_name, column_name, data_type
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                        ORDER BY table_name, ordinal_position
                     """)
-                    schemas_to_fetch = [r["schema_name"] for r in pg_cur.fetchall()]
-                    print(f"[Analysis] PG schemas: {schemas_to_fetch}")
+                    rows = pcur.fetchall()
+                    tbl_dict = {}
+                    for r in rows:
+                        tbl = r["table_name"]
+                        tbl_dict.setdefault(tbl, []).append(r["column_name"])
+                    
+                    pg_tables = [{"table_name": t, "columns": c} for t, c in tbl_dict.items()]
+                    results.append({
+                        "source_type": "database",
+                        "external_database": "PostgreSQL",
+                        "new_user_db": cred["database"],
+                        "tables": pg_tables
+                    })
+                pg_conn.close()
+        except Exception as pg_err:
+            print(f"[Analysis] PostgreSQL metadata fetch error: {pg_err}")
+        finally:
+            if pg_cursor:
+                try: pg_cursor.close()
+                except: pass
 
-                for schema in schemas_to_fetch:
-                    pg_cur.execute("""
-                        SELECT table_name
-                        FROM information_schema.tables
-                        WHERE table_schema = %s AND table_type = 'BASE TABLE'
-                        ORDER BY table_name
-                    """, (schema,))
-                    tables = [r["table_name"] for r in pg_cur.fetchall()]
-                    print(f"[Analysis] PG schema '{schema}' tables: {tables}")
-
-                    for t in tables:
-                        qualified = f"{schema}.{t}"
-                        try:
-                            pg_cur.execute(f'SELECT * FROM "{schema}"."{t}" LIMIT 0')
-                            pg_cur.fetchall()
-                            cols = [desc.name for desc in pg_cur.description]
-
-                            db_result["tables"].append({
-                                "table_name":   qualified,
-                                "columns":      cols,
-                                "business_aggregates": get_table_aggregates(pg_cur, qualified)
-                            })
-                            print(f"[Analysis] PG {pg_database}.{qualified}: schema loaded")
-
-                        except Exception as te:
-                            print(f"[Analysis] PG skip {qualified}: {te}")
-                            pg_conn.rollback()
-
-                # NOTE: _compute_core_kpis above is written in MySQL dialect
-                # (DATE_FORMAT, CAST(...AS UNSIGNED), MONTHNAME, backtick-quoted
-                # tables). It is NOT wired in here for PostgreSQL — doing so
-                # would need TO_CHAR/::integer equivalents first. Left as
-                # LLM-generated insights only for the PG path for now.
-                db_result["executed_insights"] = _fetch_agentic_insights(pg_cur, db_result["tables"], "postgresql")
-
-                results.append(db_result)
-
-            except Exception as e:
-                print(f"[Analysis] PostgreSQL connect error: {e}")
-            finally:
-                if pg_cur:
-                    try: pg_cur.close()
+    # 3. SAP HANA (Stored Metadata from MySQL)
+    hana_cursor = None
+    try:
+        hana_cursor = conn.cursor(dictionary=True)
+        hana_cursor.execute("""
+            SELECT DISTINCT schema_name, view_name, column_count, columns_detail
+            FROM sap_hana_view_metadata
+            WHERE session_id = %s
+        """, (session_id,))
+        hana_rows = hana_cursor.fetchall()
+        if hana_rows:
+            hana_tables = []
+            for hr in hana_rows:
+                cols = []
+                cols_raw = hr.get("columns_detail")
+                if isinstance(cols_raw, str):
+                    try:
+                        cols_json = json.loads(cols_raw)
+                        cols = [c["name"] for c in cols_json if "name" in c]
                     except: pass
-                if pg_conn:
-                    try: pg_conn.close()
-                    except: pass
-        except Exception as outer_e:
-            print(f"[Analysis] Outer PostgreSQL block error: {outer_e}")
+                elif isinstance(cols_raw, list):
+                    cols = [c["name"] for c in cols_raw if "name" in c]
+
+                hana_tables.append({
+                    "table_name": f"{hr.get('schema_name', '')}.{hr['view_name']}",
+                    "columns": cols
+                })
+            results.append({
+                "source_type": "database",
+                "external_database": "SAP HANA",
+                "new_user_db": "sap_hana_metadata",
+                "tables": hana_tables
+            })
+    except Exception as hana_err:
+        print(f"[Analysis] SAP HANA metadata fetch error: {hana_err}")
+    finally:
+        if hana_cursor:
+            try: hana_cursor.close()
+            except: pass
 
     return results
 
 
 # ══════════════════════════════════════════════════════
-# CONTEXT BUILDER
+# BUILD CONTEXT FOR LLM (METADATA + ONTOLOGY COMPARISON)
 # ══════════════════════════════════════════════════════
 
-def _build_context(web_data: list, db_data: list) -> str:
+def _build_context(web_data: list, db_data: list, ontology_analysis: dict) -> str:
+    """
+    Builds context containing exclusively:
+    1. Schema metadata (tables and columns)
+    2. Golden 12-Node Ontology Benchmark Comparison (Matched, Missing Gaps, Coverage Score)
+    No confidential raw row values or transaction totals are included.
+    """
     parts = []
 
-    # [NEW] Verified KPI block goes first — deterministic, never truncated
-    # away, and explicitly labeled so the report LLM knows to copy these
-    # numbers rather than recompute or estimate them.
-    for d in db_data:
-        if d.get("core_kpis"):
-            kpi_lines = ["=== VERIFIED KPI BLOCK (exact, pre-computed — copy these numbers, do not recompute) ==="]
-            for name, rows in d["core_kpis"].items():
-                if rows:
-                    kpi_lines.append(f"{name}: {rows}")
-                else:
-                    kpi_lines.append(f"{name}: no data available")
-            parts.append("\n".join(kpi_lines))
+    # 1. Ontology Benchmark Evaluation Block
+    score = ontology_analysis.get("completeness_score", 0)
+    matched_nodes = [f"- {v['name']} ({v['type']}): Mapped tables -> {', '.join(v['matched_imported_tables'])}" 
+                     for v in ontology_analysis.get("matched_vertices", [])]
+    missing_nodes = [f"- {v['name']} ({v['type']}): {v.get('definition', '')}" 
+                     for v in ontology_analysis.get("missing_vertices", [])]
 
-    for w in web_data:
-        lines = [f"=== WEB TOPIC: {w['topic']} ({w['result_count']} results) ==="]
-        for item in w["items"]:
-            lines.append(f"  Title : {item['title']}")
-            lines.append(f"  URL   : {item['url']}")
-            if item.get("brief"):
-                lines.append(f"  Brief : {item['brief'][:300]}")
+    ont_lines = [
+        "=== GOLDEN 12-NODE SALES & DISTRIBUTION ONTOLOGY GAP ANALYSIS ===",
+        f"Benchmark Completeness Score: {score}%",
+        f"Scope: {ontology_analysis.get('benchmark_scope', '12-Node Core RtM Ontology')}",
+        f"Total Benchmark Nodes: {ontology_analysis.get('total_ontology_nodes', 12)}",
+        f"Matched Capabilities: {ontology_analysis.get('matched_nodes_count', 0)}",
+        f"Missing Critical Capabilities (Gaps): {ontology_analysis.get('missing_nodes_count', 0)}",
+        "\n[MATCHED ENTITIES IN YOUR DATASET]:",
+        "\n".join(matched_nodes) if matched_nodes else "None",
+        "\n[MISSING CORE ONTOLOGY CAPABILITIES (GAPS)]:",
+        "\n".join(missing_nodes) if missing_nodes else "None",
+        f"\nVerified Inter-entity Join Relationships: {ontology_analysis.get('verified_relationships_count', 0)} / 17"
+    ]
+    parts.append("\n".join(ont_lines))
+
+    # 2. Database Schema Structure
+    for d in db_data:
+        lines = [f"=== DATABASE SCHEMA: {d['external_database']} (ID: {d['new_user_db']}) ==="]
+        for tbl in d["tables"]:
+            lines.append(f"  Table: {tbl['table_name']}")
+            lines.append(f"    Columns ({len(tbl['columns'])}): {', '.join(tbl['columns'][:30])}")
+            if tbl.get("primary_keys"):
+                lines.append(f"    Primary Keys: {', '.join(tbl['primary_keys'])}")
         parts.append("\n".join(lines))
 
-    for d in db_data:
-        lines = [f"=== DATABASE: {d['external_database']} (stored as: {d['new_user_db']}) ==="]
-        for tbl in d["tables"]:
-            lines.append(f"\n  Table: {tbl['table_name']}")
-            
-            if tbl.get("business_aggregates"):
-                lines.append("  [CRITICAL ACTUAL BUSINESS TOTALS (ENTIRE TABLE)]:")
-                for agg in tbl["business_aggregates"]:
-                    lines.append(f"    - {agg}")
-
-            lines.append(f"  Columns: {', '.join(tbl['columns'])}")
-                
-        if d.get("executed_insights"):
-            lines.append("\n=== SUPPLEMENTARY EXECUTED INSIGHTS (exploratory only — do not use these for core KPIs already in the VERIFIED KPI BLOCK) ===")
-            lines.extend(d["executed_insights"])
-            
+    # 3. Web Sources (if any)
+    for w in web_data:
+        lines = [f"=== WEB TOPIC: {w['topic']} ==="]
+        for item in w.get("items", []):
+            lines.append(f"  Title: {item.get('title')}")
+            if item.get("brief"):
+                lines.append(f"  Brief: {item['brief'][:200]}")
         parts.append("\n".join(lines))
 
     ctx = "\n\n".join(parts)
@@ -1499,82 +631,135 @@ def _build_context(web_data: list, db_data: list) -> str:
 
 
 # ══════════════════════════════════════════════════════
-# MISTRAL — REPORT GENERATION
+# MISTRAL — ONTOLOGY GAP & ARCHITECTURE SUMMARY
 # ══════════════════════════════════════════════════════
 
-def _call_mistral(context: str, topics: list, databases: list) -> dict:
-    source_desc = []
-    if topics:    source_desc.append(f"web topics: {', '.join(topics)}")
-    if databases: source_desc.append(f"databases: {', '.join(databases)}")
+def _call_mistral(context: str, ontology_analysis: dict, topics: list, databases: list) -> dict:
+    completeness = ontology_analysis.get("completeness_score", 0)
+    ai_analysis = ontology_analysis.get("ai_analysis") or {}
 
-    system = """You are an expert business analyst and strategist.
-Your task is to analyze the provided sales data of different types of tyres, tubes, Ret read Belt, Vul Solutions, flap  and extract purely business-focused insights and context.
+    system = """You are a Principal Enterprise Solutions Architect and Supply Chain Route-to-Market (RtM) Data Strategist.
+Your task is to analyze the schema metadata and its comparison against the Golden Standard 12-Node Sales & Distribution Ontology Graph.
+
 CRITICAL INSTRUCTIONS:
-1. Do NOT include ANY technical details (e.g., table names, column names, row counts, distinct values, data types, schema info, missing values, database structure).
-2. STRICT ANTI-HALLUCINATION RULE: Use ONLY actual numbers and facts explicitly provided in the context. If you see a specific entity name in the sample rows, DO NOT invent transaction counts or revenue for them unless those specific numbers are explicitly written next to their name in the CRITICAL CROSS-TABLE INSIGHTS or Aggregates. If you don't have the exact number, state the trend generally or omit the number.
-3. Pay SPECIAL ATTENTION to the "CRITICAL EXECUTED INSIGHTS" block. This contains the exact mathematical results of dynamic SQL queries executed directly against the database. Use ONLY these results to form the quantitative basis of your summary.
-4. Identify the key business trends, top performers, and overall performance metrics explicitly found in the executed insights or table totals.
-5. The report must dynamically adapt to the executed queries and focus purely on actionable business insights, performance, and trends.
-6. Use Descriptive Names: ALWAYS map and use descriptive names instead of raw IDs or codes (e.g., use category_name instead of category_code, customer Cname instead of KUNNR, region_name instead of region_code). Raw IDs make the report difficult to read for business users.
-7. Date Formatting: The 'Month' column or any period formatted as YYYYMM (e.g., 202601, 202512) must be translated into readable month names (e.g., 'January 2026', 'December 2025') in your report.
-8. Respond ONLY in valid JSON with a single key: "report".
-9. If a "VERIFIED KPI BLOCK" appears in the data, those numbers are pre-computed and exact — copy them into the report verbatim. Do NOT recompute, re-derive, estimate, or override them using anything from the "SUPPLEMENTARY EXECUTED INSIGHTS" section. The supplementary insights are for color/context only (e.g. the Executive Summary, Business Risks, Actionable Recommendations) — never for the numeric fields already present in the VERIFIED KPI BLOCK.
-10. In the VERIFIED KPI BLOCK, map these field names directly to report labels: claims_amount → "Claims", returns_amount → "Returns", discount_percentage → "Discount %", fleet_contribution_pct → "Fleet Contribution", oem_contribution_pct → "OEM Contribution".
-11. UNIT RULE (critical): The monetary values in the VERIFIED KPI BLOCK are ALREADY IN CRORES. You MUST append " Cr" to them. Display them EXACTLY as given, formatted with a ₹ symbol and " Cr" (e.g. if the value is 995.04, write "₹995.04 Cr"). Do NOT divide or multiply them further.
+1. PURE METADATA & GAP ANALYSIS ONLY: Do NOT hallucinate, fabricate, or assume any financial numbers, sales amounts, invoice values, or transaction quantities.
+2. Focus strictly on:
+   - Schema Completeness Score against the 12-Node RtM Standard.
+   - Core capabilities identified in the dataset (Matched Nodes).
+   - Missing capabilities & operational blind spots (Missing Nodes).
+   - Practical, actionable roadmap detailing what additional tables, masters, or transactional files the organization must integrate to close the gaps.
+3. Respond ONLY in valid JSON with keys: "report", "follow_up_questions", "visualizations".
 """
 
     user = f"""
-Analyze the strictly provided business data ({'; '.join(source_desc)}):
+Analyze this Knowledge Graph and Ontology Comparison Context:
 
 {context}
 
-Generate a detailed, purely business-focused summary highlighting key insights. 
-ALSO, generate exactly 5 "What" critical questions about the data.
-ALSO, generate a category-wise trend report as a "line_chart" visualization extracting numeric/categorical trend values.
+Provide an executive, high-impact Enterprise Architecture & Gap Analysis Report formatted exactly as follows:
 
-Return ONLY this JSON:
+TITLE: Route-to-Market (RtM) Knowledge Graph & Ontology Gap Analysis
+
+### 1. Executive Assessment
+Summarize the current schema maturity and readiness against the industry-standard 12-Node RtM Distribution Ontology. Mention the current completeness score ({completeness}%).
+
+### 2. Available Core Capabilities (Matched Entities)
+Detail the matched nodes present in the uploaded tables (e.g. Products, Customers, Billing Channels) and what analytics this schema currently supports.
+
+### 3. Critical Knowledge Gaps (Missing Nodes & Operational Blind Spots)
+Detail the missing nodes from the 12-Node benchmark (such as Field Force/Salesman, Beat/Route Coverage Plans, Retail Audit/Stock Availability, Trade Investment/Schemes). Explain specifically what business analytics the enterprise CANNOT perform due to these missing entities.
+
+### 4. Data Integration Roadmap (Actionable Next Steps)
+Provide prioritized, actionable recommendations specifying what files, tables, or ERP modules the user should connect next (e.g. Beat Visit logs, Sales Rep Master, Incentive Schemes) to elevate the Knowledge Graph to 100% completeness.
+
+Return ONLY this valid JSON:
 {{
-  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance, key trends, and main takeaways based purely on the data.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue**: <Value>\\n- **Total Quantity**: <Value>\\n- **Total Invoices**: <Value>\\n- **Average Invoice Value**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Sales Month**: <Value>\\n- **Lowest Sales Month**: <Value>\\n- **Monthly Growth**: <Value>\\n\\n**3. Product Performance**\\n- **Top Category**: <Value>\\n- **Top Construction**: <Value>\\n- **Top Tyre Type**: <Value>\\n- **Top Product**: <Value>\\n- **Lowest Selling Product**: <Value>\\n\\n**4. Customer Performance**\\n- **Top Customers**: <Value>\\n- **Dealer Contribution**: <Value>\\n- **Fleet Contribution**: <Value>\\n- **OEM Contribution**: <Value>\\n- **Customer Concentration**: <Value>\\n\\n**5. Geography**\\n- **Top Zone**: <Value>\\n- **Top Region**: <Value>\\n- **Top Territory**: <Value>\\n- **Lowest Territory**: <Value>\\n\\n**6. Distribution**\\n- **Replacement**: <Value>\\n- **OEM**: <Value>\\n- **STU**: <Value>\\n- **DEF**: <Value>\\n- **Contribution %**: <Value>\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>\\n\\n### Strategic Conclusion\\n<A final strategic conclusion summarizing the path forward for the business.>",
-  "follow_up_questions": ["What ...?", "What ...?", "What ...?", "What ...?", "What ...?"],
+  "report": "<Complete markdown formatted report as outlined above>",
+  "follow_up_questions": [
+    "What master or transactional file can you upload for field force coverage?",
+    "Do you have distributor or retail audit logs available to track out-of-stock rates?",
+    "Would you like guidance on structuring the trade scheme / incentive tables?",
+    "Which regional or territory hierarchy table should be mapped next?",
+    "Should we generate Cypher queries for the existing matched entities?"
+  ],
   "visualizations": [
     {{
-      "type": "line_chart",
-      "title": "Category-wise Trend Report",
+      "type": "bar_chart",
+      "title": "Ontology Capability Coverage Breakdown",
       "xKey": "category",
-      "yKey": "value",
+      "yKey": "percentage",
       "data": [
-        {{"category": "A", "value": 100}},
-        {{"category": "B", "value": 200}}
+        {{"category": "Matched Capabilities", "percentage": {completeness}}},
+        {{"category": "Missing Gaps", "percentage": {round(100 - completeness, 1)}}}
       ]
     }}
   ]
 }}
-
-RULES:
-- Replace all <...> with REAL business insights and metrics from the actual data provided.
-- DO NOT mention tables, rows, columns, data types, nulls, or database schema. Keep it 100% business-focused.
-- If a specific metric (e.g., Target Performance, OEM Contribution, Highest/Lowest Sales Month, YTD) is not explicitly calculated and available in the provided data, write "N/A based on available data" rather than hallucinating or guessing based on overall date ranges. Keep the bullet structure intact.
-- Use \\n for newlines inside the JSON string.
-- Every point must reference a specific value, name, or number from the actual data. DO NOT INVENT NUMBERS for entities just to fulfill this rule.
-- Do NOT use generic filler sentences.
 """
+
     messages = [
         {"role": "system", "content": system},
-        {"role": "user",   "content": user}
+        {"role": "user", "content": user}
     ]
+
     try:
-        content_str = call_llm_chat(messages, json_mode=True, temperature=0.2)
-        return json.loads(content_str)
+        raw = call_llm_chat(messages, json_mode=True, temperature=0.1)
+        res = json.loads(raw)
+        return res
     except Exception as e:
-        print(f"[LLM] session analysis error: {e}")
-        return None
+        print("[Analysis] Mistral ontology summary generation error:", e)
+        # Fallback structured report
+        return {
+            "report": f"""# Route-to-Market (RtM) Knowledge Graph & Ontology Gap Analysis
+
+### 1. Executive Assessment
+The current dataset achieves an **Ontology Completeness Score of {completeness}%** against the 12-Node Core Sales & Distribution (RtM) Benchmark.
+
+### 2. Available Capabilities
+- **Matched Nodes:** {ontology_analysis.get('matched_nodes_count', 0)} out of {ontology_analysis.get('total_ontology_nodes', 12)} standard nodes.
+- **Verified Relationships:** {ontology_analysis.get('verified_relationships_count', 0)} joins mapped.
+
+### 3. Critical Gaps & Operational Blind Spots
+- **Missing Capabilities:** {ontology_analysis.get('missing_nodes_count', 0)} entities missing.
+- Without Field Force (Rep) and Coverage Plan (TCP) data, sales beat adherence and salesperson call efficiency cannot be evaluated.
+- Without Retail Audit data, shelf availability and out-of-stock (OOS) conditions remain blind spots.
+
+### 4. Actionable Recommendations
+1. Integrate field sales / representative master and daily visit logs.
+2. Connect trade promotion and discount scheme tables.
+3. Import territory / beat hierarchy to complete geographic route mapping.""",
+            "follow_up_questions": [
+                "What file can be uploaded for salesman and beat planning?",
+                "Do you have promotion / rebate scheme tables to link?",
+                "Would you like to review the missing territory hierarchy?"
+            ],
+            "visualizations": [
+                {
+                    "type": "bar_chart",
+                    "title": "Ontology Capability Coverage Breakdown",
+                    "xKey": "category",
+                    "yKey": "percentage",
+                    "data": [
+                        {"category": "Matched Capabilities", "percentage": completeness},
+                        {"category": "Missing Gaps", "percentage": round(100 - completeness, 1)}
+                    ]
+                }
+            ]
+        }
 
 
 # ══════════════════════════════════════════════════════
-# MAIN CONTROLLER  —  POST /session-analysis
+# MAIN CONTROLLER FUNCTION
 # ══════════════════════════════════════════════════════
 
 def session_analysis_controller(get_connection_func):
+    """
+    Metadata-only Session Analysis Controller with Golden Ontology Benchmark Comparison.
+    - Zero data leakage: No row data is queried or sent to LLM.
+    - Generates visual Knowledge Graph and syncs to ArangoDB.
+    - Benchmarks generated graph against Golden 12-Node RtM Ontology.
+    - Returns difference & gap analysis summary.
+    """
     data       = request.json or {}
     session_id = (data.get("session_id") or "").strip()
     topics     = [t.strip() for t in (data.get("topics")    or []) if str(t).strip()]
@@ -1587,15 +772,12 @@ def session_analysis_controller(get_connection_func):
         }), 400
 
     if not topics and not databases:
-        return jsonify({
-            "status": "failed", "statusCode": 400,
-            "message": "At least one of 'topics' or 'databases' must be provided."
-        }), 400
+        databases = ["SAP HANA"]
 
     conn = None
     try:
         conn = get_connection_func()
-        
+
         target_arango_db = None
         try:
             cursor = conn.cursor(dictionary=True)
@@ -1607,7 +789,7 @@ def session_analysis_controller(get_connection_func):
         except Exception as e:
             print(f"[Analysis] DB fetch target_arango_db error: {e}")
 
-        # 1. Fetch raw data
+        # 1. Fetch strictly metadata (No row data)
         web_data = _fetch_web_data(session_id, topics, conn)
         db_data  = _fetch_db_data(session_id, databases, conn)
 
@@ -1618,79 +800,102 @@ def session_analysis_controller(get_connection_func):
             return jsonify({
                 "status":     "no_data",
                 "statusCode": 200,
-                "message":    "আপনার ডাটাবেসে কোনো টেবিল বা ডেটা নেই, দয়া করে আগে ডেটা আপলোড করুন।"
+                "message":    "আপনার ডাটাবেসে কোনো টেবিল বা মেটাডাটা নেই, দয়া করে আগে টেবিল আপলোড করুন।"
             }), 200
 
+        # Build schema dictionary for ontology comparison
+        db_schema = {}
+        for d in db_data:
+            for tbl in d["tables"]:
+                db_schema[tbl["table_name"]] = {"columns": tbl.get("columns", [])}
 
-        # 2. Build context + hash
-        context   = _build_context(web_data, db_data)
+        # 2. Generate Knowledge Graph (Nodes & Edges) from metadata
+        graph_data, graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db)
+
+        # 3. Compare with Golden Standard 12-Node Sales Ontology
+        ontology_analysis = {}
+        try:
+            ontology_analysis = compare_kgraph_with_ontology(graph_data, db_schema)
+            print(f"[Analysis] Ontology comparison complete: Score = {ontology_analysis.get('completeness_score')}%")
+        except Exception as ont_e:
+            print(f"[Analysis] Ontology comparison error: {ont_e}")
+            ontology_analysis = {
+                "completeness_score": 0,
+                "benchmark_scope": "12-Node Core RtM Ontology",
+                "matched_nodes_count": 0,
+                "missing_nodes_count": 12,
+                "matched_vertices": [],
+                "missing_vertices": []
+            }
+
+        # Persist ontology_analysis to ArangoDB session_metadata (matching 0dbd934 k-graph compresion)
+        try:
+            db_name = target_arango_db or ARANGO_DB
+            a_client = ArangoClient(hosts=ARANGO_HOST)
+            a_db = a_client.db(db_name, username=ARANGO_USER, password=ARANGO_PASS)
+            if not a_db.has_collection("session_metadata"):
+                a_db.create_collection("session_metadata")
+            meta_col = a_db.collection("session_metadata")
+            meta_doc = {
+                "_key": "ontology_analysis",
+                "session_id": session_id,
+                "data": ontology_analysis
+            }
+            if meta_col.has("ontology_analysis"):
+                meta_col.update(meta_doc)
+            else:
+                meta_col.insert(meta_doc)
+            print(f"[Analysis] Persisted ontology_analysis to ArangoDB '{db_name}'.session_metadata")
+        except Exception as arango_meta_err:
+            print(f"[Analysis] Could not persist ontology_analysis to Arango: {arango_meta_err}")
+
+        # 4. Build context for caching and report generation
+        context   = _build_context(web_data, db_data, ontology_analysis)
         data_hash = _hash_context(context)
 
-        # 3. Raw summary (always returned in response)
-        raw_summary = {
-            "web_sources": web_data,
-            "database_sources": [
-                {
-                    "external_database": d["external_database"],
-                    "new_user_db":       d["new_user_db"],
-                    "tables": [
-                        {
-                            "table_name":  t["table_name"],
-                            "columns":     t["columns"]
-                        }
-                        for t in d["tables"]
-                    ]
-                }
-                for d in db_data
-            ]
-        }
-        import json
-        raw_summary = json.loads(json.dumps(raw_summary, default=str))
-
-        # 4. Check cache
+        # 5. Check cache
         cached = _load_cache(session_id, data_hash, conn)
-
         if cached:
-            # Cache HIT — return immediately, no LLM call
             return jsonify({
-                "status":     "success",
-                "statusCode": 200,
-                "report":     cached["report"],
-                "graph_url":  cached["graph_url"],
+                "status":            "success",
+                "statusCode":        200,
+                "report":            cached["report"],
+                "graph_url":         cached["graph_url"],
+                "ontology_analysis": ontology_analysis
             }), 200
 
-        # 5. Cache MISS or STALE — generate fresh
-        analysis  = _call_mistral(context, topics, databases)
-        graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db)
+        # 6. Generate AI Gap Analysis Report with Mistral
+        analysis = _call_mistral(context, ontology_analysis, topics, databases)
 
         if not analysis:
-            log_system_error(session_id, "session_analysis", "LLM analysis failed or returned empty result", error_type="analysis_llm_error")
             return jsonify({
-                "status":     "partial",
-                "statusCode": 200,
-                "message":    "LLM analysis failed.",
-                "graph_url":  graph_url,
+                "status":            "partial",
+                "statusCode":        200,
+                "message":           "LLM analysis failed.",
+                "graph_url":         graph_url,
+                "ontology_analysis": ontology_analysis
             }), 200
 
         report = analysis.get("report", "")
-        # Guard: LLM may return report as a dict instead of string — serialize it
         if isinstance(report, dict):
             report = json.dumps(report, ensure_ascii=False)
         elif not isinstance(report, str):
             report = str(report)
-        follow_up_questions = analysis.get("follow_up_questions", [])
-        visualizations = analysis.get("visualizations", [])
 
-        # 6. Save to cache
+        follow_up_questions = analysis.get("follow_up_questions", [])
+        visualizations      = analysis.get("visualizations", [])
+
+        # 7. Save to cache
         _save_cache(session_id, data_hash, report, graph_url, topics, databases, conn)
 
         return jsonify({
-            "status":     "success",
-            "statusCode": 200,
-            "report":     report,
-            "graph_url":  graph_url,
+            "status":              "success",
+            "statusCode":          200,
+            "report":              report,
+            "graph_url":           graph_url,
+            "ontology_analysis":   ontology_analysis,
             "follow_up_questions": follow_up_questions,
-            "visualizations": visualizations
+            "visualizations":      visualizations
         }), 200
 
     except Exception as e:

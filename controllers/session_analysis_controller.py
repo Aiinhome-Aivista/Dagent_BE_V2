@@ -1546,10 +1546,7 @@ def _build_context(web_data: list, db_data: list) -> str:
 # MISTRAL — REPORT GENERATION
 # ══════════════════════════════════════════════════════
 
-def _call_mistral(context: str, topics: list, databases: list, system_prompt: str) -> dict:
-    if "JSON" not in system_prompt.upper():
-        system_prompt += "\n\nCRITICAL: Respond ONLY in valid JSON with a single key: \"report\"."
-        
+def _call_mistral(context: str, topics: list, databases: list, system_prompt: str = "") -> dict:
     source_desc = []
     if topics:    source_desc.append(f"web topics: {', '.join(topics)}")
     if databases: source_desc.append(f"databases: {', '.join(databases)}")
@@ -1569,6 +1566,10 @@ CRITICAL INSTRUCTIONS:
 10. In the VERIFIED KPI BLOCK, map these field names directly to report labels: claims_amount → "Claims", returns_amount → "Returns", discount_percentage → "Discount %", fleet_contribution_pct → "Fleet Contribution", oem_contribution_pct → "OEM Contribution".
 11. UNIT RULE (critical): The monetary values in the VERIFIED KPI BLOCK are ALREADY IN CRORES. You MUST append " Cr" to them. Display them EXACTLY as given, formatted with a ₹ symbol and " Cr" (e.g. if the value is 995.04, write "₹995.04 Cr"). Do NOT divide or multiply them further.
 """
+
+    active_system_prompt = (system_prompt or "").strip() or system
+    if "JSON" not in active_system_prompt.upper():
+        active_system_prompt += "\n\nCRITICAL: Respond ONLY in valid JSON with a single key: \"report\"."
 
     user = f"""
 Analyze the strictly provided business data ({'; '.join(source_desc)}):
@@ -1604,7 +1605,7 @@ RULES:
 
     # system prompt passed from controller now
     messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": active_system_prompt},
         {"role": "user",   "content": user}
     ]
     try:
@@ -1751,14 +1752,7 @@ def session_analysis_controller(get_connection_func):
             print(f"[Analysis] Session workspace_id fetch error: {e}")
 
         system_prompt = get_prompt(workspace_id, 'session_analysis_controller_code') or ""
-
-        # Fallback to default if no custom prompt
-        if not system_prompt.strip():
-            return jsonify({
-                "status": "error", 
-                "statusCode": 500,
-                "message": "Analysis prompt not configured in database. Please set a global or workspace-specific prompt."
-            }), 500
+        # If DB prompt is not found or bypassed, _call_mistral will automatically fall back to the built-in local hardcoded prompt
 
         analysis  = _call_mistral(context, topics, databases, system_prompt)
         graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db, workspace_id)

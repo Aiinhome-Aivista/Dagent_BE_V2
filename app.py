@@ -612,9 +612,10 @@ from controllers.session_history_controller import get_session_analysis_history
 
 @app.route("/session-analysis", methods=["POST"])
 def session_analysis():
-    workspace_id = get_workspace_id_from_req(get_db_connection)
-    if workspace_id is not None:
-        return execute_dynamic_controller(workspace_id, "session_analysis_controller_code", session_analysis_controller, get_db_connection)
+    # Dynamic DB controller execution is bypassed to always run local controller code
+    # workspace_id = get_workspace_id_from_req(get_db_connection)
+    # if workspace_id is not None:
+    #     return execute_dynamic_controller(workspace_id, "session_analysis_controller_code", session_analysis_controller, get_db_connection)
     return session_analysis_controller(get_db_connection)
 
 @app.route("/session-analysis-history", methods=["GET"])
