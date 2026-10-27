@@ -601,7 +601,9 @@ def _build_context(web_data: list, db_data: list, ontology_analysis: dict) -> st
         "\n".join(matched_nodes) if matched_nodes else "None",
         "\n[MISSING CORE ONTOLOGY CAPABILITIES (GAPS)]:",
         "\n".join(missing_nodes) if missing_nodes else "None",
-        f"\nVerified Inter-entity Join Relationships: {ontology_analysis.get('verified_relationships_count', 0)} / 17"
+        f"\nVerified Inter-entity Join Relationships: {ontology_analysis.get('verified_relationships_count', 0)} / 17",
+        f"\nMissing Join Relationships: {ontology_analysis.get('missing_relationships_count', len(ontology_analysis.get('missing_relationships', [])))}",
+        "\n".join([f"- {r.get('from')} -> {r.get('label')} -> {r.get('to')} ({r.get('reason', '')})" for r in ontology_analysis.get("missing_relationships", [])]) if ontology_analysis.get("missing_relationships") else ""
     ]
     parts.append("\n".join(ont_lines))
 
