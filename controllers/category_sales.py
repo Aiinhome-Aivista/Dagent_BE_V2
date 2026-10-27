@@ -2,58 +2,18 @@ import sys
 import os
 sys.path.append(os.path.abspath('e:\\D-API-UI\\api'))
 from flask import request, jsonify
+from helper.sap_analytics_service import execute_category_sales
 
 def get_category_sales_controller(get_db_connection):
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Database connection failed"}), 500
+
     try:
         session_id = request.args.get("session_id")
-        conn = get_db_connection()
-        if not conn:
-            return jsonify({"status": "error", "message": "Database connection failed"}), 500
-            
-        cursor = conn.cursor(dictionary=True)
-        
-        # Determine database to use
-        db_name = None
-        if session_id:
-            cursor.execute("""
-                SELECT workspace_db
-                FROM workspaces
-                WHERE session_id=%s
-                  AND workspace_db IS NOT NULL
-                  AND workspace_db != ''
-                ORDER BY id DESC LIMIT 1
-            """, (session_id,))
-            row = cursor.fetchone()
-            
-            if row:
-                db_name = row["workspace_db"]
-            else:
-                cursor.execute("""
-                    SELECT new_user_db 
-                    FROM external_db_sync_log 
-                    WHERE session_id=%s 
-                      AND new_user_db IS NOT NULL 
-                      AND new_user_db != ''
-                    ORDER BY id DESC LIMIT 1
-                """, (session_id,))
-                row = cursor.fetchone()
-                if row:
-                    db_name = row["new_user_db"]
-                
-        if db_name:
-            cursor.execute(f"USE `{db_name}`;")
-            
         zone = request.args.get("zone")
-        if zone:
-            cursor.execute("CALL sp_get_category_sales(%s)", (zone,))
-        else:
-            cursor.execute("CALL sp_get_category_sales(NULL)")
-        
-        results = cursor.fetchall()
-        
-        cursor.close()
-        conn.close()
-        
+        results = execute_category_sales(conn, session_id, zone=zone)
+
         return jsonify({
             "status": "success",
             "data": results
@@ -64,3 +24,7 @@ def get_category_sales_controller(get_db_connection):
             "status": "error",
             "message": str(e)
         }), 500
+    finally:
+        if conn and conn.is_connected():
+            conn.close()
+

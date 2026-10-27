@@ -1,4 +1,11 @@
 from flask import jsonify, request
+from helper.sap_analytics_service import (
+    execute_sales_revenue_by_zone,
+    execute_sales_by_account_category,
+    execute_non_billed_accounts_pct,
+    execute_overdue_pct,
+    execute_exposure_pct,
+)
 
 def get_sales_revenue_data_controller(get_db_connection):
     conn = get_db_connection()
@@ -7,38 +14,8 @@ def get_sales_revenue_data_controller(get_db_connection):
 
     try:
         session_id = request.args.get("session_id")
-        cursor = conn.cursor(dictionary=True)
-        
-        if session_id:
-            cursor.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s AND workspace_db IS NOT NULL AND workspace_db != '' ORDER BY id DESC LIMIT 1", (session_id,))
-            row = cursor.fetchone()
-            if row:
-                cursor.execute(f"USE `{row['workspace_db']}`")
-            else:
-                cursor.execute("""
-                    SELECT new_user_db 
-                    FROM external_db_sync_log 
-                    WHERE session_id=%s 
-                      AND new_user_db IS NOT NULL 
-                      AND new_user_db != ''
-                    ORDER BY id DESC LIMIT 1
-                """, (session_id,))
-                sync_row = cursor.fetchone()
-                if sync_row:
-                    cursor.execute(f"USE `{sync_row['new_user_db']}`")
-        
         zone = request.args.get("zone")
-        
-        # Calling the Stored Procedure
-        args = (zone,) if zone else (None,)
-        cursor.callproc('sp_get_sales_revenue_by_zone', args)
-        
-        chart_data = []
-        # Fetching the result set from the stored procedure
-        for result in cursor.stored_results():
-            chart_data = result.fetchall()
-            break  # We only need the first result set
-
+        chart_data = execute_sales_revenue_by_zone(conn, session_id, zone=zone)
         return jsonify({
             "status": "success",
             "data": chart_data
@@ -49,7 +26,6 @@ def get_sales_revenue_data_controller(get_db_connection):
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if conn and conn.is_connected():
-            cursor.close()
             conn.close()
 
 def get_sales_by_account_category_controller(get_db_connection):
@@ -59,40 +35,14 @@ def get_sales_by_account_category_controller(get_db_connection):
 
     try:
         session_id = request.args.get("session_id")
-        cursor = conn.cursor(dictionary=True)
-        
-        if session_id:
-            cursor.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s AND workspace_db IS NOT NULL AND workspace_db != '' ORDER BY id DESC LIMIT 1", (session_id,))
-            row = cursor.fetchone()
-            if row:
-                cursor.execute(f"USE `{row['workspace_db']}`")
-            else:
-                cursor.execute("""
-                    SELECT new_user_db 
-                    FROM external_db_sync_log 
-                    WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
-                    ORDER BY id DESC LIMIT 1
-                """, (session_id,))
-                sync_row = cursor.fetchone()
-                if sync_row:
-                    cursor.execute(f"USE `{sync_row['new_user_db']}`")
-        
         zone = request.args.get("zone")
-        args = (zone,) if zone else (None,)
-        cursor.callproc('sp_get_sales_by_account_category', args)
-        
-        chart_data = []
-        for result in cursor.stored_results():
-            chart_data = result.fetchall()
-            break 
-            
+        chart_data = execute_sales_by_account_category(conn, session_id, zone=zone)
         return jsonify({"status": "success", "data": chart_data}), 200
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if conn and conn.is_connected():
-            cursor.close()
             conn.close()
 
 def get_non_billed_accounts_controller(get_db_connection):
@@ -102,40 +52,14 @@ def get_non_billed_accounts_controller(get_db_connection):
 
     try:
         session_id = request.args.get("session_id")
-        cursor = conn.cursor(dictionary=True)
-        
-        if session_id:
-            cursor.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s AND workspace_db IS NOT NULL AND workspace_db != '' ORDER BY id DESC LIMIT 1", (session_id,))
-            row = cursor.fetchone()
-            if row:
-                cursor.execute(f"USE `{row['workspace_db']}`")
-            else:
-                cursor.execute("""
-                    SELECT new_user_db 
-                    FROM external_db_sync_log 
-                    WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
-                    ORDER BY id DESC LIMIT 1
-                """, (session_id,))
-                sync_row = cursor.fetchone()
-                if sync_row:
-                    cursor.execute(f"USE `{sync_row['new_user_db']}`")
-        
         zone = request.args.get("zone")
-        args = (zone,) if zone else (None,)
-        cursor.callproc('sp_get_non_billed_accounts_pct', args)
-        
-        chart_data = []
-        for result in cursor.stored_results():
-            chart_data = result.fetchall()
-            break 
-            
+        chart_data = execute_non_billed_accounts_pct(conn, session_id, zone=zone)
         return jsonify({"status": "success", "data": chart_data}), 200
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if conn and conn.is_connected():
-            cursor.close()
             conn.close()
 
 def get_overdue_pct_controller(get_db_connection):
@@ -145,40 +69,14 @@ def get_overdue_pct_controller(get_db_connection):
 
     try:
         session_id = request.args.get("session_id")
-        cursor = conn.cursor(dictionary=True)
-        
-        if session_id:
-            cursor.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s AND workspace_db IS NOT NULL AND workspace_db != '' ORDER BY id DESC LIMIT 1", (session_id,))
-            row = cursor.fetchone()
-            if row:
-                cursor.execute(f"USE `{row['workspace_db']}`")
-            else:
-                cursor.execute("""
-                    SELECT new_user_db 
-                    FROM external_db_sync_log 
-                    WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
-                    ORDER BY id DESC LIMIT 1
-                """, (session_id,))
-                sync_row = cursor.fetchone()
-                if sync_row:
-                    cursor.execute(f"USE `{sync_row['new_user_db']}`")
-        
         zone = request.args.get("zone")
-        args = (zone,) if zone else (None,)
-        cursor.callproc('sp_get_overdue_pct', args)
-        
-        chart_data = []
-        for result in cursor.stored_results():
-            chart_data = result.fetchall()
-            break 
-            
+        chart_data = execute_overdue_pct(conn, session_id, zone=zone)
         return jsonify({"status": "success", "data": chart_data}), 200
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if conn and conn.is_connected():
-            cursor.close()
             conn.close()
 
 def get_exposure_pct_controller(get_db_connection):
@@ -188,38 +86,13 @@ def get_exposure_pct_controller(get_db_connection):
 
     try:
         session_id = request.args.get("session_id")
-        cursor = conn.cursor(dictionary=True)
-        
-        if session_id:
-            cursor.execute("SELECT workspace_db FROM workspaces WHERE session_id=%s AND workspace_db IS NOT NULL AND workspace_db != '' ORDER BY id DESC LIMIT 1", (session_id,))
-            row = cursor.fetchone()
-            if row:
-                cursor.execute(f"USE `{row['workspace_db']}`")
-            else:
-                cursor.execute("""
-                    SELECT new_user_db 
-                    FROM external_db_sync_log 
-                    WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
-                    ORDER BY id DESC LIMIT 1
-                """, (session_id,))
-                sync_row = cursor.fetchone()
-                if sync_row:
-                    cursor.execute(f"USE `{sync_row['new_user_db']}`")
-        
         zone = request.args.get("zone")
-        args = (zone,) if zone else (None,)
-        cursor.callproc('sp_get_exposure_pct', args)
-        
-        chart_data = []
-        for result in cursor.stored_results():
-            chart_data = result.fetchall()
-            break 
-            
+        chart_data = execute_exposure_pct(conn, session_id, zone=zone)
         return jsonify({"status": "success", "data": chart_data}), 200
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if conn and conn.is_connected():
-            cursor.close()
             conn.close()
+

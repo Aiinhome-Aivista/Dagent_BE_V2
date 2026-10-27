@@ -17,89 +17,123 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
             is_mysql_connector = False
         print(f"[Excel Export] Starting SP calls for {year}-{month}-{day}", flush=True)
         
+        rows = []
+        rows_ws1 = []
+        rows_ws2 = []
+        rows_ws3 = []
+
+        # Check if session is connected to SAP HANA
+        from helper.sap_analytics_service import (
+            get_sap_connection_for_session,
+            query_domestic_sales_value_achievements_hana,
+            query_sales_numbers_hana,
+            query_sales_report_by_values_hana,
+            query_sales_summary_in_no_and_values_hana,
+            detect_sales_dates,
+        )
+
+        hana_conn, tunnel, schema = get_sap_connection_for_session(conn, session_id)
+        if hana_conn:
+            print(f"[Excel Export] Detected SAP HANA connection for session {session_id}. Querying SAP views in schema '{schema}'...", flush=True)
+            try:
+                h_cur = hana_conn.cursor()
+                year, month, day = detect_sales_dates(h_cur, schema, year, month, day)
+                rows = query_domestic_sales_value_achievements_hana(h_cur, schema, year, month, day)
+                rows_ws1 = query_sales_numbers_hana(h_cur, schema, year, month, day)
+                rows_ws2 = query_sales_report_by_values_hana(h_cur, schema, year, month, day)
+                rows_ws3 = query_sales_summary_in_no_and_values_hana(h_cur, schema, year, month, day)
+                h_cur.close()
+            except Exception as e:
+                print(f"[Excel Export] Error executing SAP HANA queries: {e}", flush=True)
+            finally:
+                hana_conn.close()
+                if tunnel:
+                    tunnel.stop()
+
         sync_row = None
-        print(f"[Excel Export] Received session_id: {session_id}, year: {year}, month: {month}, day: {day}", flush=True)
-        # Handle dynamic database based on session_id and where SP exists
-        if session_id:
-            cursor.execute("""
-                SELECT new_user_db, external_database
-                FROM external_db_sync_log 
-                WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
-                ORDER BY id DESC LIMIT 1
-            """, (session_id,))
-            sync_rows = cursor.fetchall()
-            print(f"[Excel Export] DB Sync Log returned {len(sync_rows)} rows for session {session_id}.", flush=True)
-            if sync_rows:
-                sync_row = sync_rows[0]
-                new_user_db = sync_row['new_user_db']
-                external_database = sync_row['external_database']
-                
-                # Helper to check if SP exists
-                def sp_exists(db_name, sp_name):
-                    if not db_name: return False
-                    cursor.execute("""
-                        SELECT ROUTINE_NAME 
-                        FROM information_schema.routines 
-                        WHERE ROUTINE_TYPE='PROCEDURE' 
-                          AND ROUTINE_SCHEMA=%s 
-                          AND ROUTINE_NAME=%s
-                    """, (db_name, sp_name))
-                    return bool(cursor.fetchall())
-                
-                db_to_use = None
-                if sp_exists(new_user_db, 'sp_domestic_sales_value_achivements'):
-                    db_to_use = new_user_db
-                elif sp_exists(external_database, 'sp_domestic_sales_value_achivements'):
-                    db_to_use = external_database
+        db_to_use = None
+        if not rows:
+            print(f"[Excel Export] Received session_id: {session_id}, year: {year}, month: {month}, day: {day}", flush=True)
+            # Handle dynamic database based on session_id and where SP exists
+            if session_id:
+                cursor.execute("""
+                    SELECT new_user_db, external_database
+                    FROM external_db_sync_log 
+                    WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db != ''
+                    ORDER BY id DESC LIMIT 1
+                """, (session_id,))
+                sync_rows = cursor.fetchall()
+                print(f"[Excel Export] DB Sync Log returned {len(sync_rows)} rows for session {session_id}.", flush=True)
+                if sync_rows:
+                    sync_row = sync_rows[0]
+                    new_user_db = sync_row['new_user_db']
+                    external_database = sync_row['external_database']
                     
-                print(f"[Excel Export] Selected DB: {db_to_use} (Fallback: {external_database})", flush=True)
-                
-                if db_to_use:
-                    print(f"[Excel Export] Executing {db_to_use}.sp_domestic_sales_value_achivements...", flush=True)
-                    try:
-                        cursor.execute(f"CALL `{db_to_use}`.sp_domestic_sales_value_achivements(%s, %s, %s)", (year, month, day))
-                    except Exception as e:
-                        print(f"[Excel Export] SP execution failed: {e}", flush=True)
+                    # Helper to check if SP exists
+                    def sp_exists(db_name, sp_name):
+                        if not db_name: return False
+                        cursor.execute("""
+                            SELECT ROUTINE_NAME 
+                            FROM information_schema.routines 
+                            WHERE ROUTINE_TYPE='PROCEDURE' 
+                              AND ROUTINE_SCHEMA=%s 
+                              AND ROUTINE_NAME=%s
+                        """, (db_name, sp_name))
+                        return bool(cursor.fetchall())
+                    
+                    if sp_exists(new_user_db, 'sp_domestic_sales_value_achivements'):
+                        db_to_use = new_user_db
+                    elif sp_exists(external_database, 'sp_domestic_sales_value_achivements'):
+                        db_to_use = external_database
+                        
+                    print(f"[Excel Export] Selected DB: {db_to_use} (Fallback: {external_database})", flush=True)
+                    
+                    if db_to_use:
+                        print(f"[Excel Export] Executing {db_to_use}.sp_domestic_sales_value_achivements...", flush=True)
+                        try:
+                            cursor.execute(f"CALL `{db_to_use}`.sp_domestic_sales_value_achivements(%s, %s, %s)", (year, month, day))
+                        except Exception as e:
+                            print(f"[Excel Export] SP execution failed: {e}", flush=True)
+                    else:
+                        print(f"[Excel Export] SP not found in assigned DBs. Skipping...", flush=True)
                 else:
-                    print(f"[Excel Export] SP not found in assigned DBs. Skipping...", flush=True)
+                    try:
+                        cursor.execute("CALL sp_domestic_sales_value_achivements(%s, %s, %s)", (year, month, day))
+                    except Exception as e:
+                        print(f"[Excel Export] SP fallback execution failed: {e}", flush=True)
             else:
                 try:
                     cursor.execute("CALL sp_domestic_sales_value_achivements(%s, %s, %s)", (year, month, day))
                 except Exception as e:
                     print(f"[Excel Export] SP fallback execution failed: {e}", flush=True)
-        else:
-            try:
-                cursor.execute("CALL sp_domestic_sales_value_achivements(%s, %s, %s)", (year, month, day))
-            except Exception as e:
-                print(f"[Excel Export] SP fallback execution failed: {e}", flush=True)
-        
-        print(f"[Excel Export] Fetching results...", flush=True)
-        rows = []
-        if is_mysql_connector:
-            try:
-                # Try regular fetchall first
+            
+            print(f"[Excel Export] Fetching results...", flush=True)
+            if is_mysql_connector:
+                try:
+                    # Try regular fetchall first
+                    if cursor.description is not None:
+                        rows = cursor.fetchall()
+                except Exception: pass
+                
+                for result in cursor.stored_results():
+                    fetched = result.fetchall()
+                    if not rows and fetched:
+                        rows = fetched
+                
+                while True:
+                    try:
+                        if not cursor.nextset(): break
+                        if cursor.description is not None: cursor.fetchall()
+                    except Exception: break
+            else:
                 if cursor.description is not None:
                     rows = cursor.fetchall()
-            except Exception: pass
-            
-            for result in cursor.stored_results():
-                fetched = result.fetchall()
-                if not rows and fetched:
-                    rows = fetched
-            
-            while True:
-                try:
-                    if not cursor.nextset(): break
-                    if cursor.description is not None: cursor.fetchall()
-                except Exception: break
-        else:
-            if cursor.description is not None:
-                rows = cursor.fetchall()
-            while True:
-                try:
-                    if not cursor.nextset(): break
-                    if cursor.description is not None: cursor.fetchall()
-                except Exception: break
+                while True:
+                    try:
+                        if not cursor.nextset(): break
+                        if cursor.description is not None: cursor.fetchall()
+                    except Exception: break
+
         
         print(f"[Excel Export] sp_domestic_sales_value_achivements returned {len(rows)} rows.", flush=True)
         if len(rows) == 0:
@@ -246,43 +280,43 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         # POPULATE WS1 (Sales Summary)
         # ==========================================
         try:
-            # Update SP call for WS1
-            print(f"[Excel Export] Executing sp_sales_numbers for WS1...", flush=True)
-            try:
-                if session_id and sync_row and db_to_use:
-                    cursor.execute(f"CALL `{db_to_use}`.sp_sales_numbers(%s, %s, %s)", (year, month, day))
-                else:
-                    cursor.execute("CALL sp_sales_numbers(%s, %s, %s)", (year, month, day))
-            except Exception as e:
-                print(f"[Excel Export] WS1 SP failed: {e}", flush=True)
-            print(f"[Excel Export] sp_sales_numbers finished.", flush=True)
-                
-            rows_ws1 = []
-            if is_mysql_connector:
+            if not rows_ws1:
+                # Update SP call for WS1
+                print(f"[Excel Export] Executing sp_sales_numbers for WS1...", flush=True)
                 try:
+                    if session_id and sync_row and db_to_use:
+                        cursor.execute(f"CALL `{db_to_use}`.sp_sales_numbers(%s, %s, %s)", (year, month, day))
+                    else:
+                        cursor.execute("CALL sp_sales_numbers(%s, %s, %s)", (year, month, day))
+                except Exception as e:
+                    print(f"[Excel Export] WS1 SP failed: {e}", flush=True)
+                print(f"[Excel Export] sp_sales_numbers finished.", flush=True)
+                    
+                if is_mysql_connector:
+                    try:
+                        if cursor.description is not None:
+                            rows_ws1 = cursor.fetchall()
+                    except Exception: pass
+                    
+                    for result in cursor.stored_results():
+                        fetched = result.fetchall()
+                        if not rows_ws1 and fetched:
+                            rows_ws1 = fetched
+                            
+                    while True:
+                        try:
+                            if not cursor.nextset(): break
+                            if cursor.description is not None: cursor.fetchall()
+                        except Exception: break
+                else:
                     if cursor.description is not None:
                         rows_ws1 = cursor.fetchall()
-                except Exception: pass
-                
-                for result in cursor.stored_results():
-                    fetched = result.fetchall()
-                    if not rows_ws1 and fetched:
-                        rows_ws1 = fetched
-                        
-                while True:
-                    try:
-                        if not cursor.nextset(): break
-                        if cursor.description is not None: cursor.fetchall()
-                    except Exception: break
-            else:
-                if cursor.description is not None:
-                    rows_ws1 = cursor.fetchall()
-                while True:
-                    try:
-                        if not cursor.nextset(): break
-                        if cursor.description is not None: cursor.fetchall()
-                    except Exception: break
-                        
+                    while True:
+                        try:
+                            if not cursor.nextset(): break
+                            if cursor.description is not None: cursor.fetchall()
+                        except Exception: break
+                            
             print(f"[Excel Export] sp_sales_numbers returned {len(rows_ws1)} rows.", flush=True)
             if len(rows_ws1) > 0:
                 print(f"[Excel Export] First row sample: {rows_ws1[0]}", flush=True)
@@ -454,42 +488,42 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         # POPULATE WS2 (Sales Report by Values)
         # ==========================================
         try:
-            print(f"[Excel Export] Executing sp_sales_report_by_values for WS2...", flush=True)
-            try:
-                if session_id and sync_row and db_to_use:
-                    cursor.execute(f"CALL `{db_to_use}`.sp_sales_report_by_values(%s, %s, %s)", (year, month, day))
-                else:
-                    cursor.execute("CALL sp_sales_report_by_values(%s, %s, %s)", (year, month, day))
-            except Exception as e:
-                print(f"[Excel Export] WS2 SP failed: {e}", flush=True)
-            print(f"[Excel Export] sp_sales_report_by_values finished.", flush=True)
-                
-            rows_ws2 = []
-            if is_mysql_connector:
+            if not rows_ws2:
+                print(f"[Excel Export] Executing sp_sales_report_by_values for WS2...", flush=True)
                 try:
+                    if session_id and sync_row and db_to_use:
+                        cursor.execute(f"CALL `{db_to_use}`.sp_sales_report_by_values(%s, %s, %s)", (year, month, day))
+                    else:
+                        cursor.execute("CALL sp_sales_report_by_values(%s, %s, %s)", (year, month, day))
+                except Exception as e:
+                    print(f"[Excel Export] WS2 SP failed: {e}", flush=True)
+                print(f"[Excel Export] sp_sales_report_by_values finished.", flush=True)
+                    
+                if is_mysql_connector:
+                    try:
+                        if cursor.description is not None:
+                            rows_ws2 = cursor.fetchall()
+                    except Exception: pass
+                    
+                    for result in cursor.stored_results():
+                        fetched = result.fetchall()
+                        if not rows_ws2 and fetched:
+                            rows_ws2 = fetched
+                            
+                    while True:
+                        try:
+                            if not cursor.nextset(): break
+                            if cursor.description is not None: cursor.fetchall()
+                        except Exception: break
+                else:
                     if cursor.description is not None:
                         rows_ws2 = cursor.fetchall()
-                except Exception: pass
-                
-                for result in cursor.stored_results():
-                    fetched = result.fetchall()
-                    if not rows_ws2 and fetched:
-                        rows_ws2 = fetched
-                        
-                while True:
-                    try:
-                        if not cursor.nextset(): break
-                        if cursor.description is not None: cursor.fetchall()
-                    except Exception: break
-            else:
-                if cursor.description is not None:
-                    rows_ws2 = cursor.fetchall()
-                while True:
-                    try:
-                        if not cursor.nextset(): break
-                        if cursor.description is not None: cursor.fetchall()
-                    except Exception: break
-                        
+                    while True:
+                        try:
+                            if not cursor.nextset(): break
+                            if cursor.description is not None: cursor.fetchall()
+                        except Exception: break
+                            
             print(f"[Excel Export] sp_sales_report_by_values returned {len(rows_ws2)} rows.", flush=True)
 
             fill_greyish = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
@@ -663,41 +697,41 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         # POPULATE WS3 (Sales Numbers)
         # ==========================================
         try:
-            print(f"[Excel Export] Executing sp_sales_summary_in_no_and_values_for_month for WS3...", flush=True)
-            try:
-                if session_id and sync_row and db_to_use:
-                    cursor.execute(f"CALL `{db_to_use}`.sp_sales_summary_in_no_and_values_for_month(%s, %s, %s)", (year, month, day))
-                else:
-                    cursor.execute("CALL sp_sales_summary_in_no_and_values_for_month(%s, %s, %s)", (year, month, day))
-            except Exception as e:
-                print(f"[Excel Export] WS3 SP failed: {e}", flush=True)
-            print(f"[Excel Export] sp_sales_summary_in_no_and_values_for_month finished.", flush=True)
-                
-            rows_ws3 = []
-            if is_mysql_connector:
+            if not rows_ws3:
+                print(f"[Excel Export] Executing sp_sales_summary_in_no_and_values_for_month for WS3...", flush=True)
                 try:
+                    if session_id and sync_row and db_to_use:
+                        cursor.execute(f"CALL `{db_to_use}`.sp_sales_summary_in_no_and_values_for_month(%s, %s, %s)", (year, month, day))
+                    else:
+                        cursor.execute("CALL sp_sales_summary_in_no_and_values_for_month(%s, %s, %s)", (year, month, day))
+                except Exception as e:
+                    print(f"[Excel Export] WS3 SP failed: {e}", flush=True)
+                print(f"[Excel Export] sp_sales_summary_in_no_and_values_for_month finished.", flush=True)
+                    
+                if is_mysql_connector:
+                    try:
+                        if cursor.description is not None:
+                            rows_ws3 = cursor.fetchall()
+                    except Exception: pass
+                    
+                    for result in cursor.stored_results():
+                        fetched = result.fetchall()
+                        if not rows_ws3 and fetched:
+                            rows_ws3 = fetched
+                            
+                    while True:
+                        try:
+                            if not cursor.nextset(): break
+                            if cursor.description is not None: cursor.fetchall()
+                        except Exception: break
+                else:
                     if cursor.description is not None:
                         rows_ws3 = cursor.fetchall()
-                except Exception: pass
-                
-                for result in cursor.stored_results():
-                    fetched = result.fetchall()
-                    if not rows_ws3 and fetched:
-                        rows_ws3 = fetched
-                        
-                while True:
-                    try:
-                        if not cursor.nextset(): break
-                        if cursor.description is not None: cursor.fetchall()
-                    except Exception: break
-            else:
-                if cursor.description is not None:
-                    rows_ws3 = cursor.fetchall()
-                while True:
-                    try:
-                        if not cursor.nextset(): break
-                        if cursor.description is not None: cursor.fetchall()
-                    except Exception: break
+                    while True:
+                        try:
+                            if not cursor.nextset(): break
+                            if cursor.description is not None: cursor.fetchall()
+                        except Exception: break
 
             print(f"[Excel Export] sp_sales_summary_in_no_and_values_for_month returned {len(rows_ws3)} rows.", flush=True)
 
@@ -1010,6 +1044,22 @@ def export_domestic_sales_preview_controller(get_db_connection):
         month = data.get("month") or request.args.get("month")
         day = data.get("day") or request.args.get("day")
         
+        if not year or not month or not day:
+            try:
+                from helper.sap_analytics_service import get_sap_connection_for_session, detect_sales_dates
+                hana_conn, tunnel, schema = get_sap_connection_for_session(conn, session_id)
+                if hana_conn:
+                    try:
+                        h_cur = hana_conn.cursor()
+                        year, month, day = detect_sales_dates(h_cur, schema, year, month, day)
+                        h_cur.close()
+                    finally:
+                        hana_conn.close()
+                        if tunnel:
+                            tunnel.stop()
+            except Exception as e:
+                print(f"[Excel Export Preview] SAP date auto-detection failed: {e}")
+
         if not year or not month or not day:
             cursor = None
             try:
