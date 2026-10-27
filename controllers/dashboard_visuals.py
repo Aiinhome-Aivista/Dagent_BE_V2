@@ -6,7 +6,7 @@ from model.llm_client import call_llm_chat
 from database import config
 from database.hana_metadata_service import HANA_DB_TYPES, TARGET_SCHEMA, get_hana_connection_from_credential
 
-
+#
 # ─────────────────────────────────────────────────────────────────────────────
 # DB / Cursor Helpers for Cross-DB Compatibility (MySQL & SAP HANA)
 # ─────────────────────────────────────────────────────────────────────────────
