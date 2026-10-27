@@ -219,6 +219,16 @@ def _local_conn(fn):
     return c
 
 
+def _dict_cursor(conn):
+    """Safely returns a dictionary cursor for both pymysql and mysql.connector."""
+    if conn is None:
+        return None
+    try:
+        return conn.cursor(dictionary=True)
+    except TypeError:
+        return conn.cursor()
+
+
 def _load_all(session_id, get_fn):
     chunks = []
     chunks += _load_db(session_id, get_fn)
@@ -234,7 +244,7 @@ def _load_hana(session_id, get_fn):
     local = cur = None
     try:
         local = _local_conn(get_fn)
-        cur   = local.cursor(dictionary=True)
+        cur   = _dict_cursor(local)
         cur.execute("""
             SELECT schema_name, view_name, row_count, column_count, columns_detail
             FROM sap_hana_view_metadata
@@ -311,7 +321,7 @@ def _load_analysis_report(session_id, get_fn):
     local = cur = None
     try:
         local = _local_conn(get_fn)
-        cur   = local.cursor(dictionary=True)
+        cur   = _dict_cursor(local)
         cur.execute(
             """SELECT topic, title, url, brief FROM saved_web_results
                WHERE session_id=%s ORDER BY topic""",
@@ -368,7 +378,7 @@ def _load_db(session_id, get_fn):
     local = cur = None
     try:
         local = _local_conn(get_fn)
-        cur   = local.cursor(dictionary=True)
+        cur   = _dict_cursor(local)
         cur.execute("""SELECT DISTINCT new_user_db FROM external_db_sync_log
                        WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db!=''""",
                     (session_id,))
@@ -385,7 +395,7 @@ def _load_db(session_id, get_fn):
                 host=MYSQL_CONFIG["host"], port=MYSQL_CONFIG["port"],
                 user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"],
                 database=db, connection_timeout=10)
-            c2 = conn.cursor(dictionary=True)
+            c2 = _dict_cursor(conn)
             c2.execute("SHOW TABLES")
             tables   = [list(r.values())[0] for r in c2.fetchall()]
             all_rows = {}
@@ -510,7 +520,7 @@ def _load_sheets(session_id, get_fn):
     local = cur = None
     try:
         local = _local_conn(get_fn)
-        cur   = local.cursor(dictionary=True)
+        cur   = _dict_cursor(local)
         cur.execute("SELECT table_name,sheet_url FROM sheet_scans WHERE session_id=%s", (session_id,))
         for sc in cur.fetchall():
             t = sc["table_name"]
@@ -545,7 +555,7 @@ def _load_web(session_id, get_fn):
     local = cur = None
     try:
         local = _local_conn(get_fn)
-        cur   = local.cursor(dictionary=True)
+        cur   = _dict_cursor(local)
         cur.execute("SELECT title,url,brief,topic FROM saved_web_results WHERE session_id=%s", (session_id,))
         for r in cur.fetchall():
             chunks.append(_chunk(
@@ -864,7 +874,7 @@ def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id, force_new=Fals
     conn = cur = None
     try:
         conn = get_fn()
-        cur  = conn.cursor(dictionary=True)
+        cur  = _dict_cursor(conn)
         cur.execute(_HISTORY_TABLE_SQL)
         today = date.today()
 
@@ -960,7 +970,7 @@ def _save_history(get_fn, session_id, user_id, question, answer,
     conn = cur = None
     try:
         conn = get_fn()
-        cur  = conn.cursor(dictionary=True)
+        cur  = _dict_cursor(conn)
 
         eid  = chat_id or session_id
 
@@ -1979,7 +1989,7 @@ def session_rag_chat_controller(get_connection_func):
     # --- FIX: Frontend might pass chat_id as session_id when navigating ---
     try:
         conn_fix = get_connection_func()
-        cur_fix = conn_fix.cursor(dictionary=True)
+        cur_fix = _dict_cursor(conn_fix)
         cur_fix.execute("SELECT id FROM workspaces WHERE session_id = %s", (session_id,))
         if not cur_fix.fetchone():
             cur_fix.execute("SELECT session_id FROM session_chat_history WHERE chat_id = %s LIMIT 1", (session_id,))
@@ -2009,7 +2019,7 @@ def session_rag_chat_controller(get_connection_func):
     system_prompt = SYS
     try:
         conn = get_connection_func()
-        cur = conn.cursor(dictionary=True)
+        cur = _dict_cursor(conn)
 
         # 1. Get workspace_id for this session
         cur.execute("SELECT id AS workspace_id FROM workspaces WHERE session_id = %s", (session_id,))
@@ -2606,52 +2616,46 @@ def session_rag_chat_controller(get_connection_func):
             sql_results = []
             try:
                 # 1. Check if session has SAP HANA connection
-                temp_conn = get_connection_func()
-                temp_cur = temp_conn.cursor(dictionary=True)
-                temp_cur.execute("""
-                    SELECT credential, db_type, connection_id FROM database_credential 
-                    WHERE session_id=%s AND (LOWER(db_type) LIKE '%hana%' OR LOWER(db_type) LIKE '%sap%')
-                    LIMIT 1
-                """, (session_id,))
-                hana_cred_row = temp_cur.fetchone()
-                if not hana_cred_row:
-                    temp_cur.execute("SELECT connection_id FROM sap_hana_view_metadata WHERE session_id=%s LIMIT 1", (session_id,))
-                    sh_row = temp_cur.fetchone()
-                    if sh_row and sh_row.get("connection_id"):
-                        temp_cur.execute("SELECT credential, db_type FROM database_credential WHERE connection_id=%s LIMIT 1", (sh_row["connection_id"],))
-                        hana_cred_row = temp_cur.fetchone()
-                temp_cur.close()
-                temp_conn.close()
-
-                if hana_cred_row:
+                try:
+                    from controllers.dashboard_visuals import get_sap_connection_for_session
+                    temp_conn = get_connection_func()
+                    hana_conn, tunnel, effective_schema = get_sap_connection_for_session(temp_conn, session_id, user_id)
                     try:
-                        cred = json.loads(hana_cred_row["credential"]) if isinstance(hana_cred_row["credential"], str) else hana_cred_row["credential"]
-                        from database.hana_metadata_service import get_hana_connection_from_credential
-                        conn_sql, tunnel, effective_schema = get_hana_connection_from_credential(cred)
+                        temp_conn.close()
+                    except Exception:
+                        pass
+
+                    if hana_conn:
+                        conn_sql = hana_conn
                         cur_sql = conn_sql.cursor()
                         is_hana = True
-                        print("[SQL_GEN] Successfully connected to SAP HANA database.")
-                    except Exception as he:
-                        print(f"[SQL_GEN] SAP HANA connection attempt failed: {he}")
-                        is_hana = False
+                        print(f"[SQL_GEN] Successfully connected to SAP HANA (schema={effective_schema}).")
+                        if effective_schema:
+                            try:
+                                cur_sql.execute(f'SET SCHEMA "{effective_schema}"')
+                            except Exception as se:
+                                print(f"[SQL_GEN] Error setting HANA schema {effective_schema}: {se}")
+                except Exception as he:
+                    print(f"[SQL_GEN] SAP HANA connection attempt failed: {he}")
+                    is_hana = False
 
                 if not is_hana:
                     # Determine connection
                     if not target_db:
                         conn_sql = get_connection_func()
-                        cur_sql = conn_sql.cursor(dictionary=True)
+                        cur_sql = _dict_cursor(conn_sql)
                     else:
                         try:
                             conn_sql = mysql.connector.connect(
                                 host=MYSQL_CONFIG["host"], port=MYSQL_CONFIG["port"],
                                 user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"],
                                 database=target_db, connection_timeout=10)
-                            cur_sql = conn_sql.cursor(dictionary=True)
+                            cur_sql = _dict_cursor(conn_sql)
                         except Exception as e:
                             print(f"[SQL_GEN] MySQL failed, trying Postgres: {e}")
                             if PSYCOPG2_AVAILABLE:
                                 temp_conn = get_connection_func()
-                                temp_cur = temp_conn.cursor(dictionary=True)
+                                temp_cur = _dict_cursor(temp_conn)
                                 temp_cur.execute("SELECT credential FROM database_credential WHERE session_id=%s AND db_type IN ('postgresql', 'postgres')", (session_id,))
                                 pg_rows = temp_cur.fetchall()
                                 temp_cur.close()
@@ -2671,8 +2675,10 @@ def session_rag_chat_controller(get_connection_func):
                     for _attempt in range(2):
                         try:
                             run_query = sql_query
-                            if is_hana and '`' in run_query:
-                                run_query = run_query.replace('`', '"')
+                            if is_hana:
+                                if '`' in run_query:
+                                    run_query = run_query.replace('`', '"')
+                                run_query = run_query.rstrip(';').strip()
 
                             cur_sql.execute(run_query)
                             rows = cur_sql.fetchall()
@@ -2680,7 +2686,11 @@ def session_rag_chat_controller(get_connection_func):
                                 cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
                                 sql_results = [dict(zip(cols, r)) for r in rows]
                             else:
-                                sql_results = [dict(r) for r in rows]
+                                if rows and isinstance(rows[0], (tuple, list)):
+                                    cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
+                                    sql_results = [dict(zip(cols, r)) for r in rows]
+                                else:
+                                    sql_results = [dict(r) for r in rows]
 
                             # Convert non-serializable objects to string
                             for row in sql_results:
@@ -2698,12 +2708,9 @@ def session_rag_chat_controller(get_connection_func):
                                 break
                             # Self-heal: send the error back to the model once.
                             repair_user = (
-                                f"The following MySQL query FAILED. Fix it and return the same JSON shape.\n\n"
-                                f"SQL:\n{sql_query}\n\nMySQL error:\n{ex}\n\n"
-                                f"Common fixes: a reserved word is used as an alias (rank, order, group, "
-                                f"desc, asc, count, sum, rows, range) — rename the row-number alias to `rn` "
-                                f"and backtick every identifier; verify MySQL 8.0 window syntax; keep the "
-                                f"follow the COLUMN HYGIENE rule in the system prompt for numeric columns.\n\n"
+                                f"The following {'SAP HANA' if is_hana else 'MySQL'} query FAILED. Fix it and return the same JSON shape.\n\n"
+                                f"SQL:\n{sql_query}\n\nError:\n{ex}\n\n"
+                                f"Common fixes: verify quotes (double quotes for HANA, backticks for MySQL), reserved words, and correct view names.\n\n"
                                 f"Schemas:\n{schema_context}"
                             )
                             if schema_grounding:
@@ -2743,18 +2750,17 @@ def session_rag_chat_controller(get_connection_func):
                 # Override context with SQL results for final LLM generation
                 context = f"SQL Query executed: {sql_query}\n\nSQL Results:\n" + json.dumps(sql_results, indent=2, default=str)
 
-        # AGGREGATION fail-safe: if no SQL rows were produced, do NOT let the
-        # model answer from an empty/stale context (that caused fabricated,
-        # inconsistent numbers). Constrain it to an honest "could not compute".
+        # Fallback if no SQL rows were produced
         if intent == "AGGREGATION" and not sql_results:
             _detail = f" (error: {agg_sql_error})" if agg_sql_error else ""
-            print(f"[AGGREGATION] No SQL rows — refusing to fabricate{_detail}")
+            print(f"[AGGREGATION] No SQL rows returned{_detail} — retrieving knowledge context")
+            retrieved_ctx = _retrieve(all_chunks, bm25_idx, col, question, understanding)
             context = (
-                "SQL_COMPUTATION_FAILED. The structured query returned no rows"
-                f"{_detail}. You MUST NOT fabricate, estimate, infer, or guess "
-                "any numbers, names, totals, or rankings. Reply that the result "
-                "could not be computed from the database for this question and "
-                "suggest the user rephrase or retry."
+                f"SQL Execution Note: Direct SQL computation returned no rows{_detail}.\n"
+                f"Attempted Query: {sql_query if 'sql_query' in locals() else 'N/A'}\n\n"
+                f"Available Session Knowledge Context & Views:\n{retrieved_ctx}\n\n"
+                "Instruction: Answer the user's question clearly and helpfully using the available session context, views, schema definitions, and records. "
+                "If the direct numerical computation could not be fetched from the database, explain the relevant data structure, tables, and available insights accurately."
             )
 
     # Graph
