@@ -1,13 +1,15 @@
-import pymysql
+﻿import pymysql
 from database.config import MYSQL_CONFIG
 
 # Embedded SQL queries
 # Stored procedures querying the 10 SAP S/4 HANA Views
 
 SQL_CONTENT = """
------------------ domestic sales value achivements store procedure start ----------------------------------------------------------
 DELIMITER $$
 
+-- ------------------------------------------------------------------------------
+-- 1. sp_domestic_sales_value_achivements
+-- ------------------------------------------------------------------------------
 DROP PROCEDURE IF EXISTS sp_domestic_sales_value_achivements $$
 CREATE PROCEDURE `sp_domestic_sales_value_achivements`(
     IN p_year INT,
@@ -21,64 +23,68 @@ BEGIN
     DECLARE v_prev_to DATE;
     DECLARE v_max_sales_date DATE;
 
-    /* Dates Setup: Auto-detect latest date with actual sales, or from zitr_dayattribute_01_tr */
+    /* Auto-detect latest valid sales date (Distribution Channel = 10, Not Cancelled) */
     IF p_year IS NULL OR p_year = 0 THEN
-        SELECT MAX(invoice_date) INTO v_max_sales_date FROM (
-            SELECT invoice_date FROM `zpvf_sd_currentsales_01_tr`
+        SELECT MAX(s.invoice_date) INTO v_max_sales_date FROM (
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_currentsales_01_tr`
             UNION ALL
-            SELECT invoice_date FROM `zpvf_sd_saleshistory_01_tr`
-        ) s_dt WHERE invoice_date IS NOT NULL;
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_saleshistory_01_tr`
+        ) s
+        LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+          ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+        WHERE s.invoice_date IS NOT NULL 
+          AND (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+          AND can.invoice_number IS NULL;
 
         IF v_max_sales_date IS NOT NULL THEN
             SET p_year = YEAR(v_max_sales_date);
-            IF p_month IS NULL OR p_month = 0 THEN
-                SET p_month = MONTH(v_max_sales_date);
-            END IF;
-            IF p_day IS NULL OR p_day = 0 THEN
-                SET p_day = DAY(v_max_sales_date);
-            END IF;
+            IF p_month IS NULL OR p_month = 0 THEN SET p_month = MONTH(v_max_sales_date); END IF;
+            IF p_day IS NULL OR p_day = 0 THEN SET p_day = DAY(v_max_sales_date); END IF;
         ELSE
             SELECT MAX(date_) INTO v_max_sales_date FROM `zitr_dayattribute_01_tr` WHERE date_ <= CURDATE();
             IF v_max_sales_date IS NOT NULL THEN
                 SET p_year = YEAR(v_max_sales_date);
-                IF p_month IS NULL OR p_month = 0 THEN
-                    SET p_month = MONTH(v_max_sales_date);
-                END IF;
-                IF p_day IS NULL OR p_day = 0 THEN
-                    SET p_day = DAY(v_max_sales_date);
-                END IF;
+                IF p_month IS NULL OR p_month = 0 THEN SET p_month = MONTH(v_max_sales_date); END IF;
+                IF p_day IS NULL OR p_day = 0 THEN SET p_day = DAY(v_max_sales_date); END IF;
             ELSE
                 SET p_year = YEAR(CURDATE());
-                IF p_month IS NULL OR p_month = 0 THEN
-                    SET p_month = MONTH(CURDATE());
-                END IF;
-                IF p_day IS NULL OR p_day = 0 THEN
-                    SET p_day = DAY(CURDATE());
-                END IF;
+                IF p_month IS NULL OR p_month = 0 THEN SET p_month = MONTH(CURDATE()); END IF;
+                IF p_day IS NULL OR p_day = 0 THEN SET p_day = DAY(CURDATE()); END IF;
             END IF;
         END IF;
     END IF;
 
     IF p_month IS NULL OR p_month = 0 THEN
-        SELECT MAX(MONTH(invoice_date)) INTO p_month FROM (
-            SELECT invoice_date FROM `zpvf_sd_currentsales_01_tr`
+        SELECT MAX(MONTH(s.invoice_date)) INTO p_month FROM (
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_currentsales_01_tr`
             UNION ALL
-            SELECT invoice_date FROM `zpvf_sd_saleshistory_01_tr`
-        ) s_dt WHERE YEAR(invoice_date) = p_year;
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_saleshistory_01_tr`
+        ) s
+        LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+          ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+        WHERE YEAR(s.invoice_date) = p_year 
+          AND (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+          AND can.invoice_number IS NULL;
         IF p_month IS NULL THEN
             SELECT MAX(MONTH(date_)) INTO p_month FROM `zitr_dayattribute_01_tr` WHERE YEAR(date_) = p_year;
         END IF;
-        IF p_month IS NULL THEN
-            SET p_month = MONTH(CURDATE());
-        END IF;
+        IF p_month IS NULL THEN SET p_month = MONTH(CURDATE()); END IF;
     END IF;
 
     IF p_day IS NULL OR p_day = 0 THEN
-        SELECT MAX(DAY(invoice_date)) INTO p_day FROM (
-            SELECT invoice_date FROM `zpvf_sd_currentsales_01_tr`
+        SELECT MAX(DAY(s.invoice_date)) INTO p_day FROM (
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_currentsales_01_tr`
             UNION ALL
-            SELECT invoice_date FROM `zpvf_sd_saleshistory_01_tr`
-        ) s_dt WHERE YEAR(invoice_date) = p_year AND MONTH(invoice_date) = p_month;
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_saleshistory_01_tr`
+        ) s
+        LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+          ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+        WHERE YEAR(s.invoice_date) = p_year AND MONTH(s.invoice_date) = p_month
+          AND (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+          AND can.invoice_number IS NULL;
         IF p_day IS NULL THEN
             SELECT MAX(DAY(date_)) INTO p_day FROM `zitr_dayattribute_01_tr` WHERE YEAR(date_) = p_year AND MONTH(date_) = p_month;
         END IF;
@@ -93,13 +99,11 @@ BEGIN
     SET v_prev_to   = DATE_SUB(v_curr_to, INTERVAL 1 YEAR);
 
     WITH
-    /* 1. Market Segment Target */
     target_market AS (
         SELECT '4 Wheelers' AS report_name, CAST(0 AS DECIMAL(18,2)) AS Target
         UNION ALL
         SELECT '2/3 Wheelers' AS report_name, CAST(0 AS DECIMAL(18,2)) AS Target
     ),
-    /* 2. Market Segment Actual Sales */
     actual_market AS (
         SELECT
             report_name,
@@ -111,21 +115,39 @@ BEGIN
             -- Previous History (Month & MTD)
             SELECT
                 CASE
-                    WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCOOTER', 'MOTOR CYCLE', '3W', 'BIKE', '3 WHEELER', 'MOTORCYCLE') THEN '2/3 Wheelers'
+                    WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCOOTER', 'MOTOR CYCLE', '3W', 'BIKE', '3 WHEELER', 'MOTORCYCLE')
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) IN ('MOTOR', 'SCB', 'SCR', '3WH')
+                      OR UPPER(TRIM(IFNULL(cat.cat_code, ''))) IN ('B1', 'D1', 'D2', 'H1', 'S1')
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%SCOOTER%'
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%MOTOR%'
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%3W%'
+                    THEN '2/3 Wheelers'
                     ELSE '4 Wheelers'
                 END AS report_name,
-                SUM(CASE WHEN sh.invoice_date BETWEEN v_prev_from AND LAST_DAY(v_prev_from) THEN sh.ndp_value ELSE 0 END) / 1000000 AS Month,
-                SUM(CASE WHEN sh.invoice_date BETWEEN v_prev_from AND v_prev_to THEN sh.ndp_value ELSE 0 END) / 1000000 AS MTD,
+                SUM(CASE WHEN sh.invoice_date BETWEEN v_prev_from AND LAST_DAY(v_prev_from) THEN COALESCE(NULLIF(sh.ndp_value, 0), NULLIF(sh.taxable_value, 0), sh.invoice_value, 0) ELSE 0 END) / 1000000 AS Month,
+                SUM(CASE WHEN sh.invoice_date BETWEEN v_prev_from AND v_prev_to THEN COALESCE(NULLIF(sh.ndp_value, 0), NULLIF(sh.taxable_value, 0), sh.invoice_value, 0) ELSE 0 END) / 1000000 AS MTD,
                 0 AS Actual,
                 0 AS Sale_For_Day
             FROM (
-                SELECT dealer_code, SKU, distribution_channel, invoice_date, indicator_cancel, ndp_value FROM `zpvf_sd_saleshistory_01_tr`
+                SELECT s.dealer_code, s.SKU, s.distribution_channel, s.invoice_date, s.indicator_cancel, s.ndp_value, s.taxable_value, s.invoice_value 
+                FROM `zpvf_sd_saleshistory_01_tr` s
+                LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+                  ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+                WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+                  AND can.invoice_number IS NULL
                 UNION ALL
-                SELECT dealer_code, SKU, distribution_channel, invoice_date, indicator_cancel, ndp_value FROM `zpvf_sd_currentsales_01_tr`
+                SELECT s.dealer_code, s.SKU, s.distribution_channel, s.invoice_date, s.indicator_cancel, s.ndp_value, s.taxable_value, s.invoice_value 
+                FROM `zpvf_sd_currentsales_01_tr` s
+                LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+                  ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+                WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+                  AND can.invoice_number IS NULL
             ) sh
-            LEFT JOIN `zivr_skumaster_01_tr` sm ON (sh.SKU = sm.MATNR OR TRIM(LEADING '0' FROM sh.SKU) = TRIM(LEADING '0' FROM sm.MATNR))
-            WHERE (sh.indicator_cancel IS NULL OR sh.indicator_cancel NOT IN ('X', 'Y', '1'))
-              AND (sh.distribution_channel IS NULL OR sh.distribution_channel NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF'))
+            LEFT JOIN `zivr_skumaster_01_tr` sm ON (sh.SKU = sm.MATNR)
+            LEFT JOIN `zivf_categorymaster_01_tr` cat ON (sm.CAT_CODE = cat.CAT_CODE OR sh.SKU = cat.MATNR)
+            LEFT JOIN `zivf_customermaster_01_md` cm ON (sh.dealer_code = cm.KUNNR)
+            WHERE (sh.distribution_channel = 10 OR sh.distribution_channel = '10')
+              AND (cm.klabc IS NULL OR UPPER(TRIM(cm.klabc)) <> 'X')
             GROUP BY report_name
 
             UNION ALL
@@ -133,26 +155,43 @@ BEGIN
             -- Current Month (Actual & Sale_For_Day)
             SELECT
                 CASE
-                    WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCOOTER', 'MOTOR CYCLE', '3W', 'BIKE', '3 WHEELER', 'MOTORCYCLE') THEN '2/3 Wheelers'
+                    WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCOOTER', 'MOTOR CYCLE', '3W', 'BIKE', '3 WHEELER', 'MOTORCYCLE')
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) IN ('MOTOR', 'SCB', 'SCR', '3WH')
+                      OR UPPER(TRIM(IFNULL(cat.cat_code, ''))) IN ('B1', 'D1', 'D2', 'H1', 'S1')
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%SCOOTER%'
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%MOTOR%'
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%3W%'
+                    THEN '2/3 Wheelers'
                     ELSE '4 Wheelers'
                 END AS report_name,
                 0 AS Month,
                 0 AS MTD,
-                SUM(CASE WHEN cs.invoice_date BETWEEN v_curr_from AND v_curr_to THEN cs.ndp_value ELSE 0 END) / 1000000 AS Actual,
-                SUM(CASE WHEN cs.invoice_date = v_curr_to THEN cs.ndp_value ELSE 0 END) / 1000000 AS Sale_For_Day
+                SUM(CASE WHEN cs.invoice_date BETWEEN v_curr_from AND v_curr_to THEN COALESCE(NULLIF(cs.ndp_value, 0), NULLIF(cs.taxable_value, 0), cs.invoice_value, 0) ELSE 0 END) / 1000000 AS Actual,
+                SUM(CASE WHEN cs.invoice_date = v_curr_to THEN COALESCE(NULLIF(cs.ndp_value, 0), NULLIF(cs.taxable_value, 0), cs.invoice_value, 0) ELSE 0 END) / 1000000 AS Sale_For_Day
             FROM (
-                SELECT dealer_code, SKU, distribution_channel, invoice_date, indicator_cancel, ndp_value FROM `zpvf_sd_currentsales_01_tr`
+                SELECT s.dealer_code, s.SKU, s.distribution_channel, s.invoice_date, s.indicator_cancel, s.ndp_value, s.taxable_value, s.invoice_value 
+                FROM `zpvf_sd_currentsales_01_tr` s
+                LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+                  ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+                WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+                  AND can.invoice_number IS NULL
                 UNION ALL
-                SELECT dealer_code, SKU, distribution_channel, invoice_date, indicator_cancel, ndp_value FROM `zpvf_sd_saleshistory_01_tr`
+                SELECT s.dealer_code, s.SKU, s.distribution_channel, s.invoice_date, s.indicator_cancel, s.ndp_value, s.taxable_value, s.invoice_value 
+                FROM `zpvf_sd_saleshistory_01_tr` s
+                LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+                  ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+                WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+                  AND can.invoice_number IS NULL
             ) cs
-            LEFT JOIN `zivr_skumaster_01_tr` sm ON (cs.SKU = sm.MATNR OR TRIM(LEADING '0' FROM cs.SKU) = TRIM(LEADING '0' FROM sm.MATNR))
-            WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
-              AND (cs.distribution_channel IS NULL OR cs.distribution_channel NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF'))
+            LEFT JOIN `zivr_skumaster_01_tr` sm ON (cs.SKU = sm.MATNR)
+            LEFT JOIN `zivf_categorymaster_01_tr` cat ON (sm.CAT_CODE = cat.CAT_CODE OR cs.SKU = cat.MATNR)
+            LEFT JOIN `zivf_customermaster_01_md` cm ON (cs.dealer_code = cm.KUNNR)
+            WHERE (cs.distribution_channel = 10 OR cs.distribution_channel = '10')
+              AND (cm.klabc IS NULL OR UPPER(TRIM(cm.klabc)) <> 'X')
             GROUP BY report_name
         ) comb_market
         GROUP BY report_name
     ),
-    /* Target & Actual join */
     final_market AS (
         SELECT 
             t.report_name,
@@ -164,7 +203,6 @@ BEGIN
         FROM target_market t
         LEFT JOIN actual_market a ON t.report_name = a.report_name
     ),
-    /* 3. Distribution Channel (OEM, DEF, STU) Actual Sales */
     actual_dist AS (
         SELECT
             report_name,
@@ -173,28 +211,37 @@ BEGIN
             SUM(Actual) AS Actual,
             SUM(Sale_For_Day) AS Sale_For_Day
         FROM (
-            -- Previous History
             SELECT
                 CASE
                     WHEN sh.distribution_channel IN ('20', 20, '40', 40, 'OEM', 'DEF') THEN 'OEM + DEF'
                     WHEN sh.distribution_channel IN ('30', 30, 'STU') THEN 'STU'
                 END AS report_name,
-                SUM(CASE WHEN sh.invoice_date BETWEEN v_prev_from AND LAST_DAY(v_prev_from) THEN sh.ndp_value ELSE 0 END) / 1000000 AS Month,
-                SUM(CASE WHEN sh.invoice_date BETWEEN v_prev_from AND v_prev_to THEN sh.ndp_value ELSE 0 END) / 1000000 AS MTD,
+                SUM(CASE WHEN sh.invoice_date BETWEEN v_prev_from AND LAST_DAY(v_prev_from) THEN COALESCE(NULLIF(sh.ndp_value, 0), NULLIF(sh.taxable_value, 0), sh.invoice_value, 0) ELSE 0 END) / 1000000 AS Month,
+                SUM(CASE WHEN sh.invoice_date BETWEEN v_prev_from AND v_prev_to THEN COALESCE(NULLIF(sh.ndp_value, 0), NULLIF(sh.taxable_value, 0), sh.invoice_value, 0) ELSE 0 END) / 1000000 AS MTD,
                 0 AS Actual,
                 0 AS Sale_For_Day
             FROM (
-                SELECT distribution_channel, invoice_date, indicator_cancel, ndp_value FROM `zpvf_sd_saleshistory_01_tr`
+                SELECT s.distribution_channel, s.invoice_date, s.indicator_cancel, s.ndp_value, s.taxable_value, s.invoice_value, s.dealer_code
+                FROM `zpvf_sd_saleshistory_01_tr` s
+                LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+                  ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+                WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+                  AND can.invoice_number IS NULL
                 UNION ALL
-                SELECT distribution_channel, invoice_date, indicator_cancel, ndp_value FROM `zpvf_sd_currentsales_01_tr`
+                SELECT s.distribution_channel, s.invoice_date, s.indicator_cancel, s.ndp_value, s.taxable_value, s.invoice_value, s.dealer_code
+                FROM `zpvf_sd_currentsales_01_tr` s
+                LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+                  ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+                WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+                  AND can.invoice_number IS NULL
             ) sh
-            WHERE (sh.indicator_cancel IS NULL OR sh.indicator_cancel NOT IN ('X', 'Y', '1'))
-              AND sh.distribution_channel IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF')
+            LEFT JOIN `zivf_customermaster_01_md` cm ON (sh.dealer_code = cm.KUNNR)
+            WHERE sh.distribution_channel IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF')
+              AND (cm.klabc IS NULL OR UPPER(TRIM(cm.klabc)) <> 'X')
             GROUP BY report_name
 
             UNION ALL
 
-            -- Current Month
             SELECT
                 CASE
                     WHEN cs.distribution_channel IN ('20', 20, '40', 40, 'OEM', 'DEF') THEN 'OEM + DEF'
@@ -202,15 +249,26 @@ BEGIN
                 END AS report_name,
                 0 AS Month,
                 0 AS MTD,
-                SUM(CASE WHEN cs.invoice_date BETWEEN v_curr_from AND v_curr_to THEN cs.ndp_value ELSE 0 END) / 1000000 AS Actual,
-                SUM(CASE WHEN cs.invoice_date = v_curr_to THEN cs.ndp_value ELSE 0 END) / 1000000 AS Sale_For_Day
+                SUM(CASE WHEN cs.invoice_date BETWEEN v_curr_from AND v_curr_to THEN COALESCE(NULLIF(cs.ndp_value, 0), NULLIF(cs.taxable_value, 0), cs.invoice_value, 0) ELSE 0 END) / 1000000 AS Actual,
+                SUM(CASE WHEN cs.invoice_date = v_curr_to THEN COALESCE(NULLIF(cs.ndp_value, 0), NULLIF(cs.taxable_value, 0), cs.invoice_value, 0) ELSE 0 END) / 1000000 AS Sale_For_Day
             FROM (
-                SELECT distribution_channel, invoice_date, indicator_cancel, ndp_value FROM `zpvf_sd_currentsales_01_tr`
+                SELECT s.distribution_channel, s.invoice_date, s.indicator_cancel, s.ndp_value, s.taxable_value, s.invoice_value, s.dealer_code
+                FROM `zpvf_sd_currentsales_01_tr` s
+                LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+                  ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+                WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+                  AND can.invoice_number IS NULL
                 UNION ALL
-                SELECT distribution_channel, invoice_date, indicator_cancel, ndp_value FROM `zpvf_sd_saleshistory_01_tr`
+                SELECT s.distribution_channel, s.invoice_date, s.indicator_cancel, s.ndp_value, s.taxable_value, s.invoice_value, s.dealer_code
+                FROM `zpvf_sd_saleshistory_01_tr` s
+                LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+                  ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+                WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+                  AND can.invoice_number IS NULL
             ) cs
-            WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
-              AND cs.distribution_channel IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF')
+            LEFT JOIN `zivf_customermaster_01_md` cm ON (cs.dealer_code = cm.KUNNR)
+            WHERE cs.distribution_channel IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF')
+              AND (cm.klabc IS NULL OR UPPER(TRIM(cm.klabc)) <> 'X')
             GROUP BY report_name
         ) comb_dist
         WHERE report_name IS NOT NULL
@@ -232,24 +290,18 @@ BEGIN
         FROM dist_categories d
         LEFT JOIN actual_dist a ON d.report_name = a.report_name
     ),
-    /* Market & Distribution combined */
     all_combined AS (
         SELECT * FROM final_market
         UNION ALL
         SELECT * FROM final_dist
     ),
-    /* Summary rows (Repl & Domestic) */
     totals AS (
         SELECT 'Repl (4 & 2/3 Whlrs)' AS report_name, SUM(Month) AS Month, SUM(MTD) AS MTD, SUM(Target) AS Target, SUM(Actual) AS Actual, SUM(Sale_For_Day) AS Sale_For_Day
         FROM final_market
-        
         UNION ALL
-        
         SELECT 'OEM+STU+DEF' AS report_name, SUM(Month) AS Month, SUM(MTD) AS MTD, SUM(Target) AS Target, SUM(Actual) AS Actual, SUM(Sale_For_Day) AS Sale_For_Day
         FROM final_dist
-        
         UNION ALL
-        
         SELECT 'Domestic' AS report_name, SUM(Month) AS Month, SUM(MTD) AS MTD, SUM(Target) AS Target, SUM(Actual) AS Actual, SUM(Sale_For_Day) AS Sale_For_Day
         FROM all_combined
     ),
@@ -258,8 +310,6 @@ BEGIN
         UNION ALL
         SELECT * FROM totals
     )
-    
-    /* Final output with calculations & percentage */
     SELECT 
         report_name,
         ROUND(Month, 2) AS Month,
@@ -280,14 +330,11 @@ BEGIN
             WHEN 'OEM+STU+DEF' THEN 6
             WHEN 'Domestic' THEN 7
         END;
-END$$
-DELIMITER ;
+END $$
 
------------------ domestic sales value achivements store procedure end ----------------------------------------------------------
-
------------------ sales numbers store procedure start ----------------------------------------------------------
-DELIMITER $$
-
+-- ------------------------------------------------------------------------------
+-- 2. sp_sales_numbers
+-- ------------------------------------------------------------------------------
 DROP PROCEDURE IF EXISTS sp_sales_numbers $$
 CREATE PROCEDURE `sp_sales_numbers`(
     IN p_year  INT,
@@ -303,64 +350,68 @@ BEGIN
     DECLARE v_m_prev_to    DATE;
     DECLARE v_max_sales_date DATE;
 
-    /* Dates Setup: Auto-detect latest date with actual sales, or from zitr_dayattribute_01_tr */
+    /* Auto-detect latest valid sales date */
     IF p_year IS NULL OR p_year = 0 THEN
-        SELECT MAX(invoice_date) INTO v_max_sales_date FROM (
-            SELECT invoice_date FROM `zpvf_sd_currentsales_01_tr`
+        SELECT MAX(s.invoice_date) INTO v_max_sales_date FROM (
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_currentsales_01_tr`
             UNION ALL
-            SELECT invoice_date FROM `zpvf_sd_saleshistory_01_tr`
-        ) s_dt WHERE invoice_date IS NOT NULL;
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_saleshistory_01_tr`
+        ) s
+        LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+          ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+        WHERE s.invoice_date IS NOT NULL 
+          AND (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+          AND can.invoice_number IS NULL;
 
         IF v_max_sales_date IS NOT NULL THEN
             SET p_year = YEAR(v_max_sales_date);
-            IF p_month IS NULL OR p_month = 0 THEN
-                SET p_month = MONTH(v_max_sales_date);
-            END IF;
-            IF p_day IS NULL OR p_day = 0 THEN
-                SET p_day = DAY(v_max_sales_date);
-            END IF;
+            IF p_month IS NULL OR p_month = 0 THEN SET p_month = MONTH(v_max_sales_date); END IF;
+            IF p_day IS NULL OR p_day = 0 THEN SET p_day = DAY(v_max_sales_date); END IF;
         ELSE
             SELECT MAX(date_) INTO v_max_sales_date FROM `zitr_dayattribute_01_tr` WHERE date_ <= CURDATE();
             IF v_max_sales_date IS NOT NULL THEN
                 SET p_year = YEAR(v_max_sales_date);
-                IF p_month IS NULL OR p_month = 0 THEN
-                    SET p_month = MONTH(v_max_sales_date);
-                END IF;
-                IF p_day IS NULL OR p_day = 0 THEN
-                    SET p_day = DAY(v_max_sales_date);
-                END IF;
+                IF p_month IS NULL OR p_month = 0 THEN SET p_month = MONTH(v_max_sales_date); END IF;
+                IF p_day IS NULL OR p_day = 0 THEN SET p_day = DAY(v_max_sales_date); END IF;
             ELSE
                 SET p_year = YEAR(CURDATE());
-                IF p_month IS NULL OR p_month = 0 THEN
-                    SET p_month = MONTH(CURDATE());
-                END IF;
-                IF p_day IS NULL OR p_day = 0 THEN
-                    SET p_day = DAY(CURDATE());
-                END IF;
+                IF p_month IS NULL OR p_month = 0 THEN SET p_month = MONTH(CURDATE()); END IF;
+                IF p_day IS NULL OR p_day = 0 THEN SET p_day = DAY(CURDATE()); END IF;
             END IF;
         END IF;
     END IF;
 
     IF p_month IS NULL OR p_month = 0 THEN
-        SELECT MAX(MONTH(invoice_date)) INTO p_month FROM (
-            SELECT invoice_date FROM `zpvf_sd_currentsales_01_tr`
+        SELECT MAX(MONTH(s.invoice_date)) INTO p_month FROM (
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_currentsales_01_tr`
             UNION ALL
-            SELECT invoice_date FROM `zpvf_sd_saleshistory_01_tr`
-        ) s_dt WHERE YEAR(invoice_date) = p_year;
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_saleshistory_01_tr`
+        ) s
+        LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+          ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+        WHERE YEAR(s.invoice_date) = p_year 
+          AND (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+          AND can.invoice_number IS NULL;
         IF p_month IS NULL THEN
             SELECT MAX(MONTH(date_)) INTO p_month FROM `zitr_dayattribute_01_tr` WHERE YEAR(date_) = p_year;
         END IF;
-        IF p_month IS NULL THEN
-            SET p_month = MONTH(CURDATE());
-        END IF;
+        IF p_month IS NULL THEN SET p_month = MONTH(CURDATE()); END IF;
     END IF;
 
     IF p_day IS NULL OR p_day = 0 THEN
-        SELECT MAX(DAY(invoice_date)) INTO p_day FROM (
-            SELECT invoice_date FROM `zpvf_sd_currentsales_01_tr`
+        SELECT MAX(DAY(s.invoice_date)) INTO p_day FROM (
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_currentsales_01_tr`
             UNION ALL
-            SELECT invoice_date FROM `zpvf_sd_saleshistory_01_tr`
-        ) s_dt WHERE YEAR(invoice_date) = p_year AND MONTH(invoice_date) = p_month;
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_saleshistory_01_tr`
+        ) s
+        LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+          ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+        WHERE YEAR(s.invoice_date) = p_year AND MONTH(s.invoice_date) = p_month
+          AND (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+          AND can.invoice_number IS NULL;
         IF p_day IS NULL THEN
             SELECT MAX(DAY(date_)) INTO p_day FROM `zitr_dayattribute_01_tr` WHERE YEAR(date_) = p_year AND MONTH(date_) = p_month;
         END IF;
@@ -377,81 +428,105 @@ BEGIN
     SET v_m_prev_to   = LEAST(DATE_SUB(v_curr_to, INTERVAL 1 MONTH), LAST_DAY(v_m_prev_from));
 
     WITH
-    /* Previous Year / Month sales from sales views */
     hist_fact AS (
         SELECT
-            sm.TYRE_TYPE                              AS tt,
-            sm.CONSTUCTION                            AS con,
+            COALESCE(NULLIF(TRIM(cat.cat_desc), ''), NULLIF(TRIM(sm.TYRE_TYPE), ''), 'Tyre') AS tt,
+            CASE
+                WHEN sm.constuction IN (1, '1') OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%B' OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%BIAS%' THEN 'Bias'
+                WHEN sm.constuction IN (2, 5, '2', '5') OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%R%' OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%RADIAL%' THEN 'Radial'
+                ELSE 'General'
+            END AS con,
             sh.distribution_channel                   AS dist_ch,
             sh.invoice_date                           AS ddate,
-            sh.Tyre_Quantity                          AS qty,
-            cm.CH_TYPE                                AS ch_type,
-            cm.KLABC                                  AS cls
+            COALESCE(NULLIF(sh.Tyre_Quantity, 0), NULLIF(sh.volume, 0), 0) AS qty,
+            IFNULL(cm.ktokd, '')                      AS ch_type,
+            IFNULL(cm.klabc, '')                      AS cls
         FROM (
-            SELECT dealer_code, SKU, distribution_channel, invoice_date, Tyre_Quantity, indicator_cancel FROM `zpvf_sd_saleshistory_01_tr`
+            SELECT s.dealer_code, s.SKU, s.distribution_channel, s.invoice_date, s.Tyre_Quantity, s.volume, s.indicator_cancel 
+            FROM `zpvf_sd_saleshistory_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND can.invoice_number IS NULL
             UNION ALL
-            SELECT dealer_code, SKU, distribution_channel, invoice_date, Tyre_Quantity, indicator_cancel FROM `zpvf_sd_currentsales_01_tr`
+            SELECT s.dealer_code, s.SKU, s.distribution_channel, s.invoice_date, s.Tyre_Quantity, s.volume, s.indicator_cancel 
+            FROM `zpvf_sd_currentsales_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND can.invoice_number IS NULL
         ) sh
-        LEFT JOIN `zivr_skumaster_01_tr` sm ON (sm.MATNR = sh.SKU OR TRIM(LEADING '0' FROM sm.MATNR) = TRIM(LEADING '0' FROM sh.SKU))
-        LEFT JOIN `zivf_customermaster_01_md` cm ON (cm.KUNNR = sh.dealer_code OR TRIM(LEADING '0' FROM cm.KUNNR) = TRIM(LEADING '0' FROM sh.dealer_code))
-        WHERE (sh.indicator_cancel IS NULL OR sh.indicator_cancel NOT IN ('X', 'Y', '1'))
+        LEFT JOIN `zivr_skumaster_01_tr` sm ON (sm.MATNR = sh.SKU)
+        LEFT JOIN `zivf_categorymaster_01_tr` cat ON (sm.CAT_CODE = cat.CAT_CODE OR sh.SKU = cat.MATNR)
+        LEFT JOIN `zivf_customermaster_01_md` cm ON (cm.KUNNR = sh.dealer_code)
+        WHERE (cm.klabc IS NULL OR UPPER(TRIM(cm.klabc)) <> 'X')
           AND (
             (sh.invoice_date BETWEEN v_prev_from AND v_prev_to)
             OR (sh.invoice_date BETWEEN v_m_prev_from AND v_m_prev_to)
           )
     ),
-    /* Current Month sales from sales views */
     curr_fact AS (
         SELECT
-            sm.TYRE_TYPE                              AS tt,
-            sm.CONSTUCTION                            AS con,
+            COALESCE(NULLIF(TRIM(cat.cat_desc), ''), NULLIF(TRIM(sm.TYRE_TYPE), ''), 'Tyre') AS tt,
+            CASE
+                WHEN sm.constuction IN (1, '1') OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%B' OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%BIAS%' THEN 'Bias'
+                WHEN sm.constuction IN (2, 5, '2', '5') OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%R%' OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%RADIAL%' THEN 'Radial'
+                ELSE 'General'
+            END AS con,
             cs.distribution_channel                   AS dist_ch,
             cs.invoice_date                           AS ddate,
-            cs.Tyre_Quantity                          AS qty,
-            cm.CH_TYPE                                AS ch_type,
-            cm.KLABC                                  AS cls
+            COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) AS qty,
+            IFNULL(cm.ktokd, '')                      AS ch_type,
+            IFNULL(cm.klabc, '')                      AS cls
         FROM (
-            SELECT dealer_code, SKU, distribution_channel, invoice_date, Tyre_Quantity, indicator_cancel FROM `zpvf_sd_currentsales_01_tr`
+            SELECT s.dealer_code, s.SKU, s.distribution_channel, s.invoice_date, s.Tyre_Quantity, s.volume, s.indicator_cancel 
+            FROM `zpvf_sd_currentsales_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND can.invoice_number IS NULL
             UNION ALL
-            SELECT dealer_code, SKU, distribution_channel, invoice_date, Tyre_Quantity, indicator_cancel FROM `zpvf_sd_saleshistory_01_tr`
+            SELECT s.dealer_code, s.SKU, s.distribution_channel, s.invoice_date, s.Tyre_Quantity, s.volume, s.indicator_cancel 
+            FROM `zpvf_sd_saleshistory_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND can.invoice_number IS NULL
         ) cs
-        LEFT JOIN `zivr_skumaster_01_tr` sm ON (sm.MATNR = cs.SKU OR TRIM(LEADING '0' FROM sm.MATNR) = TRIM(LEADING '0' FROM cs.SKU))
-        LEFT JOIN `zivf_customermaster_01_md` cm ON (cm.KUNNR = cs.dealer_code OR TRIM(LEADING '0' FROM cm.KUNNR) = TRIM(LEADING '0' FROM cs.dealer_code))
-        WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+        LEFT JOIN `zivr_skumaster_01_tr` sm ON (sm.MATNR = cs.SKU)
+        LEFT JOIN `zivf_categorymaster_01_tr` cat ON (sm.CAT_CODE = cat.CAT_CODE OR cs.SKU = cat.MATNR)
+        LEFT JOIN `zivf_customermaster_01_md` cm ON (cm.KUNNR = cs.dealer_code)
+        WHERE (cm.klabc IS NULL OR UPPER(TRIM(cm.klabc)) <> 'X')
           AND cs.invoice_date BETWEEN v_curr_from AND v_curr_to
     ),
-
     m_hist AS (
         SELECT 
             IFNULL(tt, 'Unknown') AS tt, 
             IFNULL(con, 'General') AS con,
-            SUM(CASE WHEN dist_ch NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF') THEN qty ELSE 0 END) AS jul_act
+            SUM(CASE WHEN dist_ch = 10 OR dist_ch = '10' OR dist_ch NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF') THEN qty ELSE 0 END) AS jul_act
         FROM hist_fact
         GROUP BY IFNULL(tt, 'Unknown'), IFNULL(con, 'General')
     ),
-
     m_curr AS (
         SELECT 
             IFNULL(tt, 'Unknown') AS tt, 
             IFNULL(con, 'General') AS con,
-            SUM(CASE WHEN dist_ch NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF') THEN qty ELSE 0 END) AS total,
-            SUM(CASE WHEN dist_ch NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF') AND ddate = v_curr_to THEN qty ELSE 0 END) AS today,
-            SUM(CASE WHEN dist_ch NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF') AND UPPER(TRIM(IFNULL(ch_type, ''))) = 'DL' THEN qty ELSE 0 END) AS dealer,
-            SUM(CASE WHEN dist_ch NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF') AND (UPPER(TRIM(IFNULL(ch_type, ''))) = 'DB' OR UPPER(TRIM(IFNULL(cls, ''))) = 'DB') THEN qty ELSE 0 END) AS distributor,
-            SUM(CASE WHEN dist_ch NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF') AND UPPER(TRIM(IFNULL(ch_type, ''))) = 'FL' THEN qty ELSE 0 END) AS fleet,
+            SUM(CASE WHEN dist_ch = 10 OR dist_ch = '10' OR dist_ch NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF') THEN qty ELSE 0 END) AS total,
+            SUM(CASE WHEN (dist_ch = 10 OR dist_ch = '10' OR dist_ch NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF')) AND ddate = v_curr_to THEN qty ELSE 0 END) AS today,
+            SUM(CASE WHEN (dist_ch = 10 OR dist_ch = '10' OR dist_ch NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF')) AND UPPER(TRIM(IFNULL(ch_type, ''))) IN ('DL', 'DEALER', '0001') THEN qty ELSE 0 END) AS dealer,
+            SUM(CASE WHEN (dist_ch = 10 OR dist_ch = '10' OR dist_ch NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF')) AND (UPPER(TRIM(IFNULL(ch_type, ''))) IN ('DB', 'DISTRIBUTOR') OR UPPER(TRIM(IFNULL(cls, ''))) = 'DB') THEN qty ELSE 0 END) AS distributor,
+            SUM(CASE WHEN (dist_ch = 10 OR dist_ch = '10' OR dist_ch NOT IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF')) AND UPPER(TRIM(IFNULL(ch_type, ''))) IN ('FL', 'FLEET') THEN qty ELSE 0 END) AS fleet,
             SUM(CASE WHEN dist_ch IN ('20', 20, 'OEM') THEN qty ELSE 0 END) AS oem_actual,
             SUM(CASE WHEN dist_ch IN ('30', 30, 'STU') THEN qty ELSE 0 END) AS stu_actual,
             SUM(CASE WHEN dist_ch IN ('40', 40, 'DEF') THEN qty ELSE 0 END) AS def_actual
         FROM curr_fact
         GROUP BY IFNULL(tt, 'Unknown'), IFNULL(con, 'General')
     ),
-
     categories AS (
         SELECT DISTINCT tt, con FROM m_hist
         UNION
         SELECT DISTINCT tt, con FROM m_curr
     ),
-
     details AS (
         SELECT
             CONCAT(IFNULL(c.tt, 'Unknown'), ' - ', IFNULL(c.con, 'General')) AS category, 
@@ -475,7 +550,6 @@ BEGIN
         LEFT JOIN m_hist h ON c.tt = h.tt AND c.con = h.con
         LEFT JOIN m_curr u ON c.tt = u.tt AND c.con = u.con
     ),
-
     totals_row AS (
         SELECT
             'Total'                                                           AS category,
@@ -497,20 +571,15 @@ BEGIN
             COALESCE(SUM(domestic_actual), 0)                                 AS domestic_actual
         FROM details
     )
-
     SELECT * FROM details
     UNION ALL
     SELECT * FROM totals_row
     ORDER BY CASE WHEN category = 'Total' THEN 2 ELSE 1 END, category;
+END $$
 
-END$$
-DELIMITER ;
-
------------------ sales numbers store procedure end ----------------------------------------------------------
-
------------------ sp_sales_report_by_values store procedure start ----------------------------------------------------------
-DELIMITER $$
-
+-- ------------------------------------------------------------------------------
+-- 3. sp_sales_report_by_values
+-- ------------------------------------------------------------------------------
 DROP PROCEDURE IF EXISTS sp_sales_report_by_values $$
 CREATE PROCEDURE `sp_sales_report_by_values`(
     IN p_year  INT,
@@ -524,64 +593,68 @@ BEGIN
     DECLARE v_remaining_days INT;
     DECLARE v_max_sales_date DATE;
 
-    /* Dates Setup: Auto-detect latest date with actual sales, or from zitr_dayattribute_01_tr */
+    /* Auto-detect latest valid sales date */
     IF p_year IS NULL OR p_year = 0 THEN
-        SELECT MAX(invoice_date) INTO v_max_sales_date FROM (
-            SELECT invoice_date FROM `zpvf_sd_currentsales_01_tr`
+        SELECT MAX(s.invoice_date) INTO v_max_sales_date FROM (
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_currentsales_01_tr`
             UNION ALL
-            SELECT invoice_date FROM `zpvf_sd_saleshistory_01_tr`
-        ) s_dt WHERE invoice_date IS NOT NULL;
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_saleshistory_01_tr`
+        ) s
+        LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+          ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+        WHERE s.invoice_date IS NOT NULL 
+          AND (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+          AND can.invoice_number IS NULL;
 
         IF v_max_sales_date IS NOT NULL THEN
             SET p_year = YEAR(v_max_sales_date);
-            IF p_month IS NULL OR p_month = 0 THEN
-                SET p_month = MONTH(v_max_sales_date);
-            END IF;
-            IF p_day IS NULL OR p_day = 0 THEN
-                SET p_day = DAY(v_max_sales_date);
-            END IF;
+            IF p_month IS NULL OR p_month = 0 THEN SET p_month = MONTH(v_max_sales_date); END IF;
+            IF p_day IS NULL OR p_day = 0 THEN SET p_day = DAY(v_max_sales_date); END IF;
         ELSE
             SELECT MAX(date_) INTO v_max_sales_date FROM `zitr_dayattribute_01_tr` WHERE date_ <= CURDATE();
             IF v_max_sales_date IS NOT NULL THEN
                 SET p_year = YEAR(v_max_sales_date);
-                IF p_month IS NULL OR p_month = 0 THEN
-                    SET p_month = MONTH(v_max_sales_date);
-                END IF;
-                IF p_day IS NULL OR p_day = 0 THEN
-                    SET p_day = DAY(v_max_sales_date);
-                END IF;
+                IF p_month IS NULL OR p_month = 0 THEN SET p_month = MONTH(v_max_sales_date); END IF;
+                IF p_day IS NULL OR p_day = 0 THEN SET p_day = DAY(v_max_sales_date); END IF;
             ELSE
                 SET p_year = YEAR(CURDATE());
-                IF p_month IS NULL OR p_month = 0 THEN
-                    SET p_month = MONTH(CURDATE());
-                END IF;
-                IF p_day IS NULL OR p_day = 0 THEN
-                    SET p_day = DAY(CURDATE());
-                END IF;
+                IF p_month IS NULL OR p_month = 0 THEN SET p_month = MONTH(CURDATE()); END IF;
+                IF p_day IS NULL OR p_day = 0 THEN SET p_day = DAY(CURDATE()); END IF;
             END IF;
         END IF;
     END IF;
 
     IF p_month IS NULL OR p_month = 0 THEN
-        SELECT MAX(MONTH(invoice_date)) INTO p_month FROM (
-            SELECT invoice_date FROM `zpvf_sd_currentsales_01_tr`
+        SELECT MAX(MONTH(s.invoice_date)) INTO p_month FROM (
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_currentsales_01_tr`
             UNION ALL
-            SELECT invoice_date FROM `zpvf_sd_saleshistory_01_tr`
-        ) s_dt WHERE YEAR(invoice_date) = p_year;
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_saleshistory_01_tr`
+        ) s
+        LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+          ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+        WHERE YEAR(s.invoice_date) = p_year 
+          AND (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+          AND can.invoice_number IS NULL;
         IF p_month IS NULL THEN
             SELECT MAX(MONTH(date_)) INTO p_month FROM `zitr_dayattribute_01_tr` WHERE YEAR(date_) = p_year;
         END IF;
-        IF p_month IS NULL THEN
-            SET p_month = MONTH(CURDATE());
-        END IF;
+        IF p_month IS NULL THEN SET p_month = MONTH(CURDATE()); END IF;
     END IF;
 
     IF p_day IS NULL OR p_day = 0 THEN
-        SELECT MAX(DAY(invoice_date)) INTO p_day FROM (
-            SELECT invoice_date FROM `zpvf_sd_currentsales_01_tr`
+        SELECT MAX(DAY(s.invoice_date)) INTO p_day FROM (
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_currentsales_01_tr`
             UNION ALL
-            SELECT invoice_date FROM `zpvf_sd_saleshistory_01_tr`
-        ) s_dt WHERE YEAR(invoice_date) = p_year AND MONTH(invoice_date) = p_month;
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_saleshistory_01_tr`
+        ) s
+        LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+          ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+        WHERE YEAR(s.invoice_date) = p_year AND MONTH(s.invoice_date) = p_month
+          AND (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+          AND can.invoice_number IS NULL;
         IF p_day IS NULL THEN
             SELECT MAX(DAY(date_)) INTO p_day FROM `zitr_dayattribute_01_tr` WHERE YEAR(date_) = p_year AND MONTH(date_) = p_month;
         END IF;
@@ -591,13 +664,9 @@ BEGIN
     END IF;
 
     SET v_curr_from      = STR_TO_DATE(CONCAT(p_year,'-',LPAD(p_month,2,'0'),'-01'), '%Y-%m-%d');
-    SET v_curr_to        = LEAST(
-                               STR_TO_DATE(CONCAT(p_year,'-',LPAD(p_month,2,'0'),'-',LPAD(p_day,2,'0')), '%Y-%m-%d'),
-                               LAST_DAY(v_curr_from)
-                           );
+    SET v_curr_to        = LEAST(STR_TO_DATE(CONCAT(p_year,'-',LPAD(p_month,2,'0'),'-',LPAD(p_day,2,'0')), '%Y-%m-%d'), LAST_DAY(v_curr_from));
     SET v_prev_from      = DATE_SUB(v_curr_from, INTERVAL 1 YEAR);
 
-    -- Calculate remaining working days from zitr_dayattribute_01_tr if available
     SELECT COUNT(*) INTO v_remaining_days 
     FROM `zitr_dayattribute_01_tr`
     WHERE `date_` > v_curr_to 
@@ -610,229 +679,135 @@ BEGIN
     END IF;
 
     WITH
-    /* 1. ACTUALS FROM SALES HISTORY (PREVIOUS YEAR) & CURRENT SALES (CURRENT MONTH) */
     fact_history AS (
         SELECT
             zm.name AS Zone_Name,
             CASE
-                WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER','MOTORCYCLE') THEN '2_3_Whlrs'
+                WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER','MOTORCYCLE')
+                  OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) IN ('MOTOR', 'SCB', 'SCR', '3WH')
+                  OR UPPER(TRIM(IFNULL(cat.cat_code, ''))) IN ('B1', 'D1', 'D2', 'H1', 'S1')
+                  OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%SCOOTER%'
+                  OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%MOTOR%'
+                  OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%3W%'
+                THEN '2_3_Whlrs'
                 ELSE '4_Whlrs'
             END AS Segment,
-            sh.ndp_value
+            COALESCE(NULLIF(sh.ndp_value, 0), NULLIF(sh.taxable_value, 0), sh.invoice_value, 0) AS ndp_value
         FROM (
-            SELECT dealer_code, plant, SKU, invoice_date, indicator_cancel, ndp_value FROM `zpvf_sd_saleshistory_01_tr`
+            SELECT s.dealer_code, s.plant, s.SKU, s.invoice_date, s.indicator_cancel, s.ndp_value, s.taxable_value, s.invoice_value, s.distribution_channel 
+            FROM `zpvf_sd_saleshistory_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+              AND can.invoice_number IS NULL
             UNION ALL
-            SELECT dealer_code, plant, SKU, invoice_date, indicator_cancel, ndp_value FROM `zpvf_sd_currentsales_01_tr`
+            SELECT s.dealer_code, s.plant, s.SKU, s.invoice_date, s.indicator_cancel, s.ndp_value, s.taxable_value, s.invoice_value, s.distribution_channel 
+            FROM `zpvf_sd_currentsales_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+              AND can.invoice_number IS NULL
         ) sh
-        LEFT JOIN `zivr_skumaster_01_tr` sm ON (sh.SKU = sm.MATNR OR TRIM(LEADING '0' FROM sh.SKU) = TRIM(LEADING '0' FROM sm.MATNR))
-        LEFT JOIN `zivf_customermaster_01_md` cm ON (sh.dealer_code = cm.KUNNR OR TRIM(LEADING '0' FROM sh.dealer_code) = TRIM(LEADING '0' FROM cm.KUNNR))
-        LEFT JOIN (
-            SELECT 
-                TRIM(bzirk) AS bzirk, 
-                MAX(NULLIF(TRIM(name), '')) AS name, 
-                MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-                MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-            FROM `zivf_territorymaster_01_tr`
-            WHERE bzirk IS NOT NULL AND TRIM(bzirk) != ''
-            GROUP BY TRIM(bzirk)
-        ) tm_bzirk ON (
-            (cm.bzirk IS NOT NULL AND TRIM(cm.bzirk) != '' AND cm.bzirk = tm_bzirk.bzirk)
-            OR (sh.plant IS NOT NULL AND (tm_bzirk.bzirk = CAST(sh.plant AS CHAR) OR tm_bzirk.bzirk = CONCAT('SE', sh.plant)))
-        )
-        LEFT JOIN (
-            SELECT 
-                werks, 
-                MAX(NULLIF(TRIM(name), '')) AS name, 
-                MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-                MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-            FROM `zivf_territorymaster_01_tr`
-            WHERE werks IS NOT NULL AND werks > 0
-            GROUP BY werks
-        ) tm_plant ON (sh.plant IS NOT NULL AND sh.plant = tm_plant.werks)
-        LEFT JOIN `zivf_regionmaster_md_01` rm ON (
-            TRIM(rm.region_code) = COALESCE(
-                NULLIF(TRIM(tm_bzirk.regio), ''), 
-                NULLIF(TRIM(tm_plant.regio), ''), 
-                NULLIF(TRIM(CAST(cm.regio AS CHAR)), '')
-            )
-        )
-        LEFT JOIN (
-            SELECT 
-                LEFT(TRIM(region_code), 2) AS prefix2,
-                MAX(NULLIF(TRIM(region_name), '')) AS region_name,
-                MAX(NULLIF(TRIM(zone_code), '')) AS zone_code
-            FROM `zivf_regionmaster_md_01`
-            WHERE region_code IS NOT NULL AND TRIM(region_code) != ''
-            GROUP BY LEFT(TRIM(region_code), 2)
-        ) rm_pfx ON (
-            LEFT(CAST(COALESCE(sh.plant, cm.vwerk) AS CHAR), 2) = rm_pfx.prefix2
-        )
-        INNER JOIN `zivf_zonemaster_01_tr` zm ON (
-            TRIM(zm.p_zone) = COALESCE(
-                NULLIF(TRIM(rm.zone_code), ''),
-                NULLIF(TRIM(tm_bzirk.p_zone), ''),
-                NULLIF(TRIM(tm_plant.p_zone), ''),
-                NULLIF(TRIM(rm_pfx.zone_code), ''),
-                CASE 
-                    WHEN LEFT(TRIM(CAST(COALESCE(sh.plant, cm.vwerk) AS CHAR)), 2) IN ('36') THEN 'CZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(sh.plant, cm.vwerk) AS CHAR)), 1) = '3' THEN 'NZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(sh.plant, cm.vwerk) AS CHAR)), 2) IN ('16') AND (CAST(COALESCE(sh.plant, cm.vwerk) AS CHAR) LIKE '%82%' OR CAST(COALESCE(sh.plant, cm.vwerk) AS CHAR) LIKE '8%') THEN 'NP'
-                    WHEN LEFT(TRIM(CAST(COALESCE(sh.plant, cm.vwerk) AS CHAR)), 1) = '1' THEN 'EZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(sh.plant, cm.vwerk) AS CHAR)), 1) = '8' THEN 'NP'
-                    WHEN LEFT(TRIM(CAST(COALESCE(sh.plant, cm.vwerk) AS CHAR)), 2) IN ('51', '52') THEN 'TZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(sh.plant, cm.vwerk) AS CHAR)), 2) IN ('53', '54', '55') THEN 'SZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(sh.plant, cm.vwerk) AS CHAR)), 1) = '5' THEN 'SZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(sh.plant, cm.vwerk) AS CHAR)), 2) IN ('71', '72') THEN 'CZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(sh.plant, cm.vwerk) AS CHAR)), 2) IN ('73', '74', '75', '76') THEN 'WZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(sh.plant, cm.vwerk) AS CHAR)), 1) = '7' THEN 'WZ'
-                    WHEN cm.regio IN (3, 6, 7, 8, 19, 22, 24) THEN 'NZ'
-                    WHEN cm.regio IN (10, 19, 20) THEN 'CZ'
-                    WHEN cm.regio IN (21, 25) THEN 'EZ'
-                    WHEN cm.regio IN (1, 27, 29) THEN 'SZ'
-                    ELSE NULL
-                END
-            )
-            OR TRIM(zm.name) = COALESCE(
-                NULLIF(TRIM(rm.zone_code), ''),
-                NULLIF(TRIM(tm_bzirk.p_zone), ''),
-                NULLIF(TRIM(tm_plant.p_zone), ''),
-                NULLIF(TRIM(rm_pfx.zone_code), '')
-            )
-        )
-        WHERE (sh.indicator_cancel IS NULL OR sh.indicator_cancel NOT IN ('X', 'Y', '1'))
+        LEFT JOIN `zivr_skumaster_01_tr` sm ON (sh.SKU = sm.MATNR)
+        LEFT JOIN `zivf_categorymaster_01_tr` cat ON (sm.CAT_CODE = cat.CAT_CODE OR sh.SKU = cat.MATNR)
+        LEFT JOIN `zivf_customermaster_01_md` cm ON (sh.dealer_code = cm.kunnr)
+        LEFT JOIN `zivf_territorymaster_01_tr` tm_plant ON (sh.plant = tm_plant.werks)
+        LEFT JOIN `zivf_territorymaster_01_tr` tm_bzirk ON (cm.bzirk = tm_bzirk.bzirk)
+        LEFT JOIN `zivf_regionmaster_md_01` rm ON (rm.region_code = COALESCE(NULLIF(TRIM(tm_plant.regio), ''), NULLIF(TRIM(tm_bzirk.regio), ''), NULLIF(TRIM(CAST(cm.regio AS CHAR)), '')))
+        LEFT JOIN `zivf_zonemaster_01_tr` zm ON (zm.p_zone = COALESCE(
+            NULLIF(TRIM(tm_plant.p_zone), ''),
+            NULLIF(TRIM(tm_bzirk.p_zone), ''),
+            NULLIF(TRIM(rm.zone_code), ''),
+            CASE 
+                WHEN LEFT(CAST(sh.plant AS CHAR), 2) IN ('36', '71', '72') THEN 'CZ'
+                WHEN LEFT(CAST(sh.plant AS CHAR), 1) = '3' THEN 'NZ'
+                WHEN LEFT(CAST(sh.plant AS CHAR), 1) = '1' THEN 'EZ'
+                WHEN LEFT(CAST(sh.plant AS CHAR), 1) = '8' THEN 'NP'
+                WHEN LEFT(CAST(sh.plant AS CHAR), 2) IN ('51', '52') THEN 'TZ'
+                WHEN LEFT(CAST(sh.plant AS CHAR), 1) = '5' THEN 'SZ'
+                WHEN LEFT(CAST(sh.plant AS CHAR), 1) = '7' THEN 'WZ'
+                ELSE 'CZ'
+            END
+        ))
+        WHERE (cm.klabc IS NULL OR UPPER(TRIM(cm.klabc)) <> 'X')
           AND sh.invoice_date BETWEEN v_prev_from AND LAST_DAY(v_prev_from)
     ),
     fact_current AS (
         SELECT
             zm.name AS Zone_Name,
             CASE
-                WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER','MOTORCYCLE') THEN '2_3_Whlrs'
+                WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER','MOTORCYCLE')
+                  OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) IN ('MOTOR', 'SCB', 'SCR', '3WH')
+                  OR UPPER(TRIM(IFNULL(cat.cat_code, ''))) IN ('B1', 'D1', 'D2', 'H1', 'S1')
+                  OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%SCOOTER%'
+                  OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%MOTOR%'
+                  OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%3W%'
+                THEN '2_3_Whlrs'
                 ELSE '4_Whlrs'
             END AS Segment,
             cs.invoice_date,
-            cs.ndp_value
+            COALESCE(NULLIF(cs.ndp_value, 0), NULLIF(cs.taxable_value, 0), cs.invoice_value, 0) AS ndp_value
         FROM (
-            SELECT dealer_code, plant, SKU, invoice_date, indicator_cancel, ndp_value FROM `zpvf_sd_currentsales_01_tr`
+            SELECT s.dealer_code, s.plant, s.SKU, s.invoice_date, s.indicator_cancel, s.ndp_value, s.taxable_value, s.invoice_value, s.distribution_channel 
+            FROM `zpvf_sd_currentsales_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+              AND can.invoice_number IS NULL
             UNION ALL
-            SELECT dealer_code, plant, SKU, invoice_date, indicator_cancel, ndp_value FROM `zpvf_sd_saleshistory_01_tr`
+            SELECT s.dealer_code, s.plant, s.SKU, s.invoice_date, s.indicator_cancel, s.ndp_value, s.taxable_value, s.invoice_value, s.distribution_channel 
+            FROM `zpvf_sd_saleshistory_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+              AND can.invoice_number IS NULL
         ) cs
-        LEFT JOIN `zivr_skumaster_01_tr` sm ON (cs.SKU = sm.MATNR OR TRIM(LEADING '0' FROM cs.SKU) = TRIM(LEADING '0' FROM sm.MATNR))
-        LEFT JOIN `zivf_customermaster_01_md` cm ON (cs.dealer_code = cm.KUNNR OR TRIM(LEADING '0' FROM cs.dealer_code) = TRIM(LEADING '0' FROM cm.KUNNR))
-        LEFT JOIN (
-            SELECT 
-                TRIM(bzirk) AS bzirk, 
-                MAX(NULLIF(TRIM(name), '')) AS name, 
-                MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-                MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-            FROM `zivf_territorymaster_01_tr`
-            WHERE bzirk IS NOT NULL AND TRIM(bzirk) != ''
-            GROUP BY TRIM(bzirk)
-        ) tm_bzirk ON (
-            (cm.bzirk IS NOT NULL AND TRIM(cm.bzirk) != '' AND cm.bzirk = tm_bzirk.bzirk)
-            OR (cs.plant IS NOT NULL AND (tm_bzirk.bzirk = CAST(cs.plant AS CHAR) OR tm_bzirk.bzirk = CONCAT('SE', cs.plant)))
-        )
-        LEFT JOIN (
-            SELECT 
-                werks, 
-                MAX(NULLIF(TRIM(name), '')) AS name, 
-                MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-                MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-            FROM `zivf_territorymaster_01_tr`
-            WHERE werks IS NOT NULL AND werks > 0
-            GROUP BY werks
-        ) tm_plant ON (cs.plant IS NOT NULL AND cs.plant = tm_plant.werks)
-        LEFT JOIN `zivf_regionmaster_md_01` rm ON (
-            TRIM(rm.region_code) = COALESCE(
-                NULLIF(TRIM(tm_bzirk.regio), ''), 
-                NULLIF(TRIM(tm_plant.regio), ''), 
-                NULLIF(TRIM(CAST(cm.regio AS CHAR)), '')
-            )
-        )
-        LEFT JOIN (
-            SELECT 
-                LEFT(TRIM(region_code), 2) AS prefix2,
-                MAX(NULLIF(TRIM(region_name), '')) AS region_name,
-                MAX(NULLIF(TRIM(zone_code), '')) AS zone_code
-            FROM `zivf_regionmaster_md_01`
-            WHERE region_code IS NOT NULL AND TRIM(region_code) != ''
-            GROUP BY LEFT(TRIM(region_code), 2)
-        ) rm_pfx ON (
-            LEFT(CAST(COALESCE(cs.plant, cm.vwerk) AS CHAR), 2) = rm_pfx.prefix2
-        )
-        INNER JOIN `zivf_zonemaster_01_tr` zm ON (
-            TRIM(zm.p_zone) = COALESCE(
-                NULLIF(TRIM(rm.zone_code), ''),
-                NULLIF(TRIM(tm_bzirk.p_zone), ''),
-                NULLIF(TRIM(tm_plant.p_zone), ''),
-                NULLIF(TRIM(rm_pfx.zone_code), ''),
-                CASE 
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cm.vwerk) AS CHAR)), 2) IN ('36') THEN 'CZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cm.vwerk) AS CHAR)), 1) = '3' THEN 'NZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cm.vwerk) AS CHAR)), 2) IN ('16') AND (CAST(COALESCE(cs.plant, cm.vwerk) AS CHAR) LIKE '%82%' OR CAST(COALESCE(cs.plant, cm.vwerk) AS CHAR) LIKE '8%') THEN 'NP'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cm.vwerk) AS CHAR)), 1) = '1' THEN 'EZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cm.vwerk) AS CHAR)), 1) = '8' THEN 'NP'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cm.vwerk) AS CHAR)), 2) IN ('51', '52') THEN 'TZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cm.vwerk) AS CHAR)), 2) IN ('53', '54', '55') THEN 'SZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cm.vwerk) AS CHAR)), 1) = '5' THEN 'SZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cm.vwerk) AS CHAR)), 2) IN ('71', '72') THEN 'CZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cm.vwerk) AS CHAR)), 2) IN ('73', '74', '75', '76') THEN 'WZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cm.vwerk) AS CHAR)), 1) = '7' THEN 'WZ'
-                    WHEN cm.regio IN (3, 6, 7, 8, 19, 22, 24) THEN 'NZ'
-                    WHEN cm.regio IN (10, 19, 20) THEN 'CZ'
-                    WHEN cm.regio IN (21, 25) THEN 'EZ'
-                    WHEN cm.regio IN (1, 27, 29) THEN 'SZ'
-                    ELSE NULL
-                END
-            )
-            OR TRIM(zm.name) = COALESCE(
-                NULLIF(TRIM(rm.zone_code), ''),
-                NULLIF(TRIM(tm_bzirk.p_zone), ''),
-                NULLIF(TRIM(tm_plant.p_zone), ''),
-                NULLIF(TRIM(rm_pfx.zone_code), '')
-            )
-        )
-        WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+        LEFT JOIN `zivr_skumaster_01_tr` sm ON (cs.SKU = sm.MATNR)
+        LEFT JOIN `zivf_categorymaster_01_tr` cat ON (sm.CAT_CODE = cat.CAT_CODE OR cs.SKU = cat.MATNR)
+        LEFT JOIN `zivf_customermaster_01_md` cm ON (cs.dealer_code = cm.kunnr)
+        LEFT JOIN `zivf_territorymaster_01_tr` tm_plant ON (cs.plant = tm_plant.werks)
+        LEFT JOIN `zivf_territorymaster_01_tr` tm_bzirk ON (cm.bzirk = tm_bzirk.bzirk)
+        LEFT JOIN `zivf_regionmaster_md_01` rm ON (rm.region_code = COALESCE(NULLIF(TRIM(tm_plant.regio), ''), NULLIF(TRIM(tm_bzirk.regio), ''), NULLIF(TRIM(CAST(cm.regio AS CHAR)), '')))
+        LEFT JOIN `zivf_zonemaster_01_tr` zm ON (zm.p_zone = COALESCE(
+            NULLIF(TRIM(tm_plant.p_zone), ''),
+            NULLIF(TRIM(tm_bzirk.p_zone), ''),
+            NULLIF(TRIM(rm.zone_code), ''),
+            CASE 
+                WHEN LEFT(CAST(cs.plant AS CHAR), 2) IN ('36', '71', '72') THEN 'CZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '3' THEN 'NZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '1' THEN 'EZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '8' THEN 'NP'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 2) IN ('51', '52') THEN 'TZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '5' THEN 'SZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '7' THEN 'WZ'
+                ELSE 'CZ'
+            END
+        ))
+        WHERE (cm.klabc IS NULL OR UPPER(TRIM(cm.klabc)) <> 'X')
           AND cs.invoice_date BETWEEN v_curr_from AND v_curr_to
     ),
-    /* 2. AGGREGATE ACTUALS BY ZONE (in Crores) */
     agg_history AS (
-        SELECT
-            Zone_Name,
-            SUM(CASE WHEN Segment = '4_Whlrs' THEN ndp_value ELSE 0 END) / 10000000 AS Prev_4W,
-            SUM(CASE WHEN Segment = '2_3_Whlrs' THEN ndp_value ELSE 0 END) / 10000000 AS Prev_23W
-        FROM fact_history
-        GROUP BY Zone_Name
+        SELECT Zone_Name, SUM(CASE WHEN Segment = '4_Whlrs' THEN ndp_value ELSE 0 END) / 10000000 AS Prev_4W, SUM(CASE WHEN Segment = '2_3_Whlrs' THEN ndp_value ELSE 0 END) / 10000000 AS Prev_23W
+        FROM fact_history GROUP BY Zone_Name
     ),
     agg_current AS (
-        SELECT
-            Zone_Name,
-            SUM(CASE WHEN Segment = '4_Whlrs' THEN ndp_value ELSE 0 END) / 10000000 AS Curr_4W,
-            SUM(CASE WHEN Segment = '2_3_Whlrs' THEN ndp_value ELSE 0 END) / 10000000 AS Curr_23W,
-            SUM(CASE WHEN invoice_date = v_curr_to THEN ndp_value ELSE 0 END) / 10000000 AS Sale_For_Day
-        FROM fact_current
-        GROUP BY Zone_Name
+        SELECT Zone_Name, SUM(CASE WHEN Segment = '4_Whlrs' THEN ndp_value ELSE 0 END) / 10000000 AS Curr_4W, SUM(CASE WHEN Segment = '2_3_Whlrs' THEN ndp_value ELSE 0 END) / 10000000 AS Curr_23W, SUM(CASE WHEN invoice_date = v_curr_to THEN ndp_value ELSE 0 END) / 10000000 AS Sale_For_Day
+        FROM fact_current GROUP BY Zone_Name
     ),
-    /* 3. DYNAMIC ZONE LIST FROM MASTER */
     all_zones AS (
         SELECT DISTINCT name AS Zone_Name,
             CASE p_zone
-                WHEN 'EZ' THEN 1
-                WHEN 'NZ' THEN 2
-                WHEN 'CZ' THEN 3
-                WHEN 'WZ' THEN 4
-                WHEN 'SZ' THEN 5
-                WHEN 'TZ' THEN 6
-                WHEN 'NP' THEN 7
-                ELSE 8
+                WHEN 'EZ' THEN 1 WHEN 'NZ' THEN 2 WHEN 'CZ' THEN 3 WHEN 'WZ' THEN 4 WHEN 'SZ' THEN 5 WHEN 'TZ' THEN 6 WHEN 'NP' THEN 7 ELSE 8
             END AS Sort_Order
-        FROM `zivf_zonemaster_01_tr`
-        WHERE name IS NOT NULL AND TRIM(name) != ''
+        FROM `zivf_zonemaster_01_tr` WHERE name IS NOT NULL AND TRIM(name) != ''
     ),
-    /* 4. COMBINE ACTUALS */
     final AS (
         SELECT
-            z.Zone_Name,
-            z.Sort_Order,
+            z.Zone_Name, z.Sort_Order,
             IFNULL(h.Prev_4W,      0) AS Prev_4W,
             IFNULL(h.Prev_23W,     0) AS Prev_23W,
             IFNULL(c.Curr_4W,      0) AS Curr_4W,
@@ -844,7 +819,6 @@ BEGIN
         LEFT JOIN agg_history h ON z.Zone_Name = h.Zone_Name
         LEFT JOIN agg_current c ON z.Zone_Name = c.Zone_Name
     )
-    /* 5. FINAL OUTPUT + TOTAL ROW */
     SELECT
         Zone_Name                                                            AS `Zone`,
         CAST(ROUND(Prev_4W,            2) AS CHAR)                           AS `Jul-25 4 Whlrs`,
@@ -864,7 +838,6 @@ BEGIN
         IF(Tgt_4W + Tgt_23W = 0, '0%', CONCAT(ROUND((Curr_4W+Curr_23W)/(Tgt_4W+Tgt_23W)*100,0),'%')) AS `% Achvt Total`
     FROM final
     UNION ALL
-    -- Total row
     SELECT
         'Total',
         CAST(ROUND(SUM(Prev_4W),  2) AS CHAR),
@@ -884,26 +857,16 @@ BEGIN
         IF(SUM(Tgt_4W+Tgt_23W) = 0, '0%', CONCAT(ROUND(SUM(Curr_4W+Curr_23W)/SUM(Tgt_4W+Tgt_23W)*100,0),'%'))
     FROM final
     UNION ALL
-    -- % Contribution row
     SELECT
         '% Contribution',
-        NULL,
-        NULL,
-        NULL,
+        NULL, NULL, NULL,
         IF(SUM(Tgt_4W+Tgt_23W) = 0, '0%', CONCAT(ROUND(SUM(Tgt_4W) / SUM(Tgt_4W+Tgt_23W)*100, 0),'%')),
         IF(SUM(Tgt_4W+Tgt_23W) = 0, '0%', CONCAT(ROUND(SUM(Tgt_23W)/ SUM(Tgt_4W+Tgt_23W)*100, 0),'%')),
         NULL,
         IF(SUM(Curr_4W+Curr_23W) = 0, '0%', CONCAT(ROUND(SUM(Curr_4W) / SUM(Curr_4W+Curr_23W)*100, 0),'%')),
         IF(SUM(Curr_4W+Curr_23W) = 0, '0%', CONCAT(ROUND(SUM(Curr_23W)/ SUM(Curr_4W+Curr_23W)*100, 0),'%')),
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        NULL
+        NULL, NULL, NULL, NULL, NULL, NULL, NULL
     FROM final
-
     ORDER BY CASE `Zone`
         WHEN 'EAST'            THEN 1
         WHEN 'East'            THEN 1
@@ -922,14 +885,11 @@ BEGIN
         WHEN '% Contribution'  THEN 10
         ELSE 99
     END;
-END$$
-DELIMITER ;
+END $$
 
------------------ sp_sales_report_by_values store procedure end ----------------------------------------------------------
-
------------------ sp_sales_summary_in_no_and_values_for_month store procedure start ----------------------------------------------------------
-DELIMITER $$
-
+-- ------------------------------------------------------------------------------
+-- 4. sp_sales_summary_in_no_and_values_for_month
+-- ------------------------------------------------------------------------------
 DROP PROCEDURE IF EXISTS sp_sales_summary_in_no_and_values_for_month $$
 CREATE PROCEDURE `sp_sales_summary_in_no_and_values_for_month`(
     IN p_year  INT,
@@ -941,64 +901,68 @@ BEGIN
     DECLARE v_curr_to      DATE;
     DECLARE v_max_sales_date DATE;
 
-    /* Dates Setup: Auto-detect latest date with actual sales, or from zitr_dayattribute_01_tr */
+    /* Auto-detect latest valid sales date */
     IF p_year IS NULL OR p_year = 0 THEN
-        SELECT MAX(invoice_date) INTO v_max_sales_date FROM (
-            SELECT invoice_date FROM `zpvf_sd_currentsales_01_tr`
+        SELECT MAX(s.invoice_date) INTO v_max_sales_date FROM (
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_currentsales_01_tr`
             UNION ALL
-            SELECT invoice_date FROM `zpvf_sd_saleshistory_01_tr`
-        ) s_dt WHERE invoice_date IS NOT NULL;
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_saleshistory_01_tr`
+        ) s
+        LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+          ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+        WHERE s.invoice_date IS NOT NULL 
+          AND (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+          AND can.invoice_number IS NULL;
 
         IF v_max_sales_date IS NOT NULL THEN
             SET p_year = YEAR(v_max_sales_date);
-            IF p_month IS NULL OR p_month = 0 THEN
-                SET p_month = MONTH(v_max_sales_date);
-            END IF;
-            IF p_day IS NULL OR p_day = 0 THEN
-                SET p_day = DAY(v_max_sales_date);
-            END IF;
+            IF p_month IS NULL OR p_month = 0 THEN SET p_month = MONTH(v_max_sales_date); END IF;
+            IF p_day IS NULL OR p_day = 0 THEN SET p_day = DAY(v_max_sales_date); END IF;
         ELSE
             SELECT MAX(date_) INTO v_max_sales_date FROM `zitr_dayattribute_01_tr` WHERE date_ <= CURDATE();
             IF v_max_sales_date IS NOT NULL THEN
                 SET p_year = YEAR(v_max_sales_date);
-                IF p_month IS NULL OR p_month = 0 THEN
-                    SET p_month = MONTH(v_max_sales_date);
-                END IF;
-                IF p_day IS NULL OR p_day = 0 THEN
-                    SET p_day = DAY(v_max_sales_date);
-                END IF;
+                IF p_month IS NULL OR p_month = 0 THEN SET p_month = MONTH(v_max_sales_date); END IF;
+                IF p_day IS NULL OR p_day = 0 THEN SET p_day = DAY(v_max_sales_date); END IF;
             ELSE
                 SET p_year = YEAR(CURDATE());
-                IF p_month IS NULL OR p_month = 0 THEN
-                    SET p_month = MONTH(CURDATE());
-                END IF;
-                IF p_day IS NULL OR p_day = 0 THEN
-                    SET p_day = DAY(CURDATE());
-                END IF;
+                IF p_month IS NULL OR p_month = 0 THEN SET p_month = MONTH(CURDATE()); END IF;
+                IF p_day IS NULL OR p_day = 0 THEN SET p_day = DAY(CURDATE()); END IF;
             END IF;
         END IF;
     END IF;
 
     IF p_month IS NULL OR p_month = 0 THEN
-        SELECT MAX(MONTH(invoice_date)) INTO p_month FROM (
-            SELECT invoice_date FROM `zpvf_sd_currentsales_01_tr`
+        SELECT MAX(MONTH(s.invoice_date)) INTO p_month FROM (
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_currentsales_01_tr`
             UNION ALL
-            SELECT invoice_date FROM `zpvf_sd_saleshistory_01_tr`
-        ) s_dt WHERE YEAR(invoice_date) = p_year;
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_saleshistory_01_tr`
+        ) s
+        LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+          ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+        WHERE YEAR(s.invoice_date) = p_year 
+          AND (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+          AND can.invoice_number IS NULL;
         IF p_month IS NULL THEN
             SELECT MAX(MONTH(date_)) INTO p_month FROM `zitr_dayattribute_01_tr` WHERE YEAR(date_) = p_year;
         END IF;
-        IF p_month IS NULL THEN
-            SET p_month = MONTH(CURDATE());
-        END IF;
+        IF p_month IS NULL THEN SET p_month = MONTH(CURDATE()); END IF;
     END IF;
 
     IF p_day IS NULL OR p_day = 0 THEN
-        SELECT MAX(DAY(invoice_date)) INTO p_day FROM (
-            SELECT invoice_date FROM `zpvf_sd_currentsales_01_tr`
+        SELECT MAX(DAY(s.invoice_date)) INTO p_day FROM (
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_currentsales_01_tr`
             UNION ALL
-            SELECT invoice_date FROM `zpvf_sd_saleshistory_01_tr`
-        ) s_dt WHERE YEAR(invoice_date) = p_year AND MONTH(invoice_date) = p_month;
+            SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_saleshistory_01_tr`
+        ) s
+        LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+          ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+        WHERE YEAR(s.invoice_date) = p_year AND MONTH(s.invoice_date) = p_month
+          AND (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+          AND can.invoice_number IS NULL;
         IF p_day IS NULL THEN
             SELECT MAX(DAY(date_)) INTO p_day FROM `zitr_dayattribute_01_tr` WHERE YEAR(date_) = p_year AND MONTH(date_) = p_month;
         END IF;
@@ -1011,132 +975,88 @@ BEGIN
     SET v_curr_to   = LEAST(STR_TO_DATE(CONCAT(p_year,'-',LPAD(p_month,2,'0'),'-',LPAD(p_day,2,'0')), '%Y-%m-%d'), LAST_DAY(v_curr_from));
 
     WITH
-    -- 1. Actual Sales Data Aggregated by Zone
     agg_actuals AS (
         SELECT 
             zm.name AS Zone_Name,
-            
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) NOT IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER','MOTORCYCLE') THEN cs.ndp_value ELSE 0 END) / 10000000 AS `Val_4_Whlrs`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER','MOTORCYCLE') THEN cs.ndp_value ELSE 0 END) / 10000000 AS `Val_2_3_Whlrs`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('TRUCK','TRUCK/BUS','T&B') AND (sm.CONSTUCTION IS NULL OR UPPER(TRIM(sm.CONSTUCTION)) IN ('BIAS', '1')) THEN cs.Tyre_Quantity ELSE 0 END) AS `TBB_Total`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('TRUCK','TRUCK/BUS','T&B') AND UPPER(TRIM(IFNULL(sm.CONSTUCTION, ''))) IN ('RADIAL', '2') THEN cs.Tyre_Quantity ELSE 0 END) AS `TBR_Total`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('LCV') AND (sm.CONSTUCTION IS NULL OR UPPER(TRIM(sm.CONSTUCTION)) IN ('BIAS', '1')) THEN cs.Tyre_Quantity ELSE 0 END) AS `LCV_Bias`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('LCV') AND UPPER(TRIM(IFNULL(sm.CONSTUCTION, ''))) IN ('RADIAL', '2') THEN cs.Tyre_Quantity ELSE 0 END) AS `LCV_Radial`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCV') AND (sm.CONSTUCTION IS NULL OR UPPER(TRIM(sm.CONSTUCTION)) IN ('BIAS', '1')) THEN cs.Tyre_Quantity ELSE 0 END) AS `SCV_Bias`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCV') AND UPPER(TRIM(IFNULL(sm.CONSTUCTION, ''))) IN ('RADIAL', '2') THEN cs.Tyre_Quantity ELSE 0 END) AS `SCV_Radial`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('CAR', 'PASSENGER CAR', 'PCR') AND (sm.CONSTUCTION IS NULL OR UPPER(TRIM(sm.CONSTUCTION)) IN ('BIAS', '1')) THEN cs.Tyre_Quantity ELSE 0 END) AS `Car_Bias`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('CAR', 'PASSENGER CAR', 'PCR') AND UPPER(TRIM(IFNULL(sm.CONSTUCTION, ''))) IN ('RADIAL', '2') THEN cs.Tyre_Quantity ELSE 0 END) AS `Car_Radial`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('JEEP', 'SUV', 'MUV') AND (sm.CONSTUCTION IS NULL OR UPPER(TRIM(sm.CONSTUCTION)) IN ('BIAS', '1')) THEN cs.Tyre_Quantity ELSE 0 END) AS `Jeep_Bias`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('JEEP', 'SUV', 'MUV') AND UPPER(TRIM(IFNULL(sm.CONSTUCTION, ''))) IN ('RADIAL', '2') THEN cs.Tyre_Quantity ELSE 0 END) AS `Jeep_Radial`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('TRACTOR FRONT', 'TR. FRONT', 'TF') THEN cs.Tyre_Quantity ELSE 0 END) AS `Tr_Front`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('TRACTOR REAR', 'TR. REAR', 'TR') THEN cs.Tyre_Quantity ELSE 0 END) AS `Tr_Rear`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('TRACTOR TRAILER', 'TR. TRAIL', 'TT') THEN cs.Tyre_Quantity ELSE 0 END) AS `Tr_Trail`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) = 'ADV' THEN cs.Tyre_Quantity ELSE 0 END) AS `ADV`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('3W', '3 WHEELER', 'THREE WHEELER') THEN cs.Tyre_Quantity ELSE 0 END) AS `3_Whlrs`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCOOTER', 'SCOOTY') THEN cs.Tyre_Quantity ELSE 0 END) AS `Scooter`,
-            SUM(CASE WHEN UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('MOTOR CYCLE', 'MOTORCYCLE', 'MC') THEN cs.Tyre_Quantity ELSE 0 END) AS `Motor`
+            SUM(CASE WHEN NOT (UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER','MOTORCYCLE')
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) IN ('MOTOR', 'SCB', 'SCR', '3WH')
+                      OR UPPER(TRIM(IFNULL(cat.cat_code, ''))) IN ('B1', 'D1', 'D2', 'H1', 'S1')
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%SCOOTER%'
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%MOTOR%'
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%3W%') THEN COALESCE(NULLIF(cs.ndp_value, 0), NULLIF(cs.taxable_value, 0), cs.invoice_value, 0) ELSE 0 END) / 10000000 AS `Val_4_Whlrs`,
+            SUM(CASE WHEN (UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER','MOTORCYCLE')
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) IN ('MOTOR', 'SCB', 'SCR', '3WH')
+                      OR UPPER(TRIM(IFNULL(cat.cat_code, ''))) IN ('B1', 'D1', 'D2', 'H1', 'S1')
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%SCOOTER%'
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%MOTOR%'
+                      OR UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%3W%') THEN COALESCE(NULLIF(cs.ndp_value, 0), NULLIF(cs.taxable_value, 0), cs.invoice_value, 0) ELSE 0 END) / 10000000 AS `Val_2_3_Whlrs`,
+            SUM(CASE WHEN UPPER(TRIM(IFNULL(cat.cat_desc, ''))) = 'TBB' OR cat.cat_code = '11' OR (UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('TRUCK','TRUCK/BUS','T&B') AND (sm.CONSTUCTION IS NULL OR sm.CONSTUCTION IN ('BIAS', 1, '1'))) THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `TBB_Total`,
+            SUM(CASE WHEN UPPER(TRIM(IFNULL(cat.cat_desc, ''))) = 'TBR' OR cat.cat_code = '12' OR (UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('TRUCK','TRUCK/BUS','T&B') AND sm.CONSTUCTION IN ('RADIAL', 2, 5, '2', '5')) THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `TBR_Total`,
+            SUM(CASE WHEN UPPER(TRIM(IFNULL(cat.cat_desc, ''))) IN ('LCB') OR cat.cat_code IN ('21') OR (UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('LCV') AND (sm.CONSTUCTION IS NULL OR sm.CONSTUCTION IN ('BIAS', 1, '1'))) THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `LCV_Bias`,
+            SUM(CASE WHEN UPPER(TRIM(IFNULL(cat.cat_desc, ''))) IN ('LCR(S)', 'LCR(N)') OR cat.cat_code IN ('22', '25') OR (UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('LCV') AND sm.CONSTUCTION IN ('RADIAL', 2, 5, '2', '5')) THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `LCV_Radial`,
+            SUM(CASE WHEN (UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%SCV%' OR UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCV')) AND (sm.CONSTUCTION IS NULL OR sm.CONSTUCTION IN ('BIAS', 1, '1')) THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `SCV_Bias`,
+            SUM(CASE WHEN (UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%SCV%' OR UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCV')) AND sm.CONSTUCTION IN ('RADIAL', 2, 5, '2', '5') THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `SCV_Radial`,
+            SUM(CASE WHEN UPPER(TRIM(IFNULL(cat.cat_desc, ''))) IN ('CB') OR cat.cat_code IN ('31') OR (UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('CAR', 'PASSENGER CAR', 'PCR') AND sm.CONSTUCTION IN ('BIAS', 1, '1')) THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `Car_Bias`,
+            SUM(CASE WHEN UPPER(TRIM(IFNULL(cat.cat_desc, ''))) IN ('CR') OR cat.cat_code IN ('32') OR (UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('CAR', 'PASSENGER CAR', 'PCR') AND (sm.CONSTUCTION IS NULL OR sm.CONSTUCTION IN ('RADIAL', 2, 5, '2', '5'))) THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `Car_Radial`,
+            SUM(CASE WHEN UPPER(TRIM(IFNULL(cat.cat_desc, ''))) IN ('JB') OR cat.cat_code IN ('41') OR (UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('JEEP', 'SUV', 'MUV') AND sm.CONSTUCTION IN ('BIAS', 1, '1')) THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `Jeep_Bias`,
+            SUM(CASE WHEN UPPER(TRIM(IFNULL(cat.cat_desc, ''))) IN ('JR') OR cat.cat_code IN ('42') OR (UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('JEEP', 'SUV', 'MUV') AND (sm.CONSTUCTION IS NULL OR sm.CONSTUCTION IN ('RADIAL', 2, 5, '2', '5'))) THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `Jeep_Radial`,
+            SUM(CASE WHEN UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%TR.FRONT%' OR cat.cat_code = '61' OR UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('TRACTOR FRONT', 'TR. FRONT', 'TF') THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `Tr_Front`,
+            SUM(CASE WHEN UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%TR.REAR%' OR cat.cat_code = '51' OR UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('TRACTOR REAR', 'TR. REAR', 'TR') THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `Tr_Rear`,
+            SUM(CASE WHEN UPPER(TRIM(IFNULL(cat.cat_desc, ''))) LIKE '%TR.TRAIL%' OR cat.cat_code = '71' OR UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('TRACTOR TRAILER', 'TR. TRAIL', 'TT') THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `Tr_Trail`,
+            SUM(CASE WHEN UPPER(TRIM(IFNULL(cat.cat_desc, ''))) = 'ADV' OR cat.cat_code = '91' OR UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) = 'ADV' THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `ADV`,
+            SUM(CASE WHEN UPPER(TRIM(IFNULL(cat.cat_desc, ''))) = '3WH' OR cat.cat_code = 'H1' OR UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('3W', '3 WHEELER', 'THREE WHEELER') THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `3_Whlrs`,
+            SUM(CASE WHEN UPPER(TRIM(IFNULL(cat.cat_desc, ''))) IN ('SCB', 'SCR', 'SCOOTER') OR cat.cat_code IN ('D1', 'D2', 'S1') OR UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('SCOOTER', 'SCOOTY') THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `Scooter`,
+            SUM(CASE WHEN UPPER(TRIM(IFNULL(cat.cat_desc, ''))) IN ('MOTOR') OR cat.cat_code IN ('B1') OR UPPER(TRIM(IFNULL(sm.TYRE_TYPE, ''))) IN ('MOTOR CYCLE', 'MOTORCYCLE', 'MC') THEN COALESCE(NULLIF(cs.Tyre_Quantity, 0), NULLIF(cs.volume, 0), 0) ELSE 0 END) AS `Motor`
         FROM (
-            SELECT dealer_code, plant, SKU, invoice_date, indicator_cancel, ndp_value, Tyre_Quantity FROM `zpvf_sd_currentsales_01_tr`
+            SELECT s.dealer_code, s.plant, s.SKU, s.invoice_date, s.indicator_cancel, s.ndp_value, s.taxable_value, s.invoice_value, s.Tyre_Quantity, s.volume, s.distribution_channel 
+            FROM `zpvf_sd_currentsales_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+              AND can.invoice_number IS NULL
             UNION ALL
-            SELECT dealer_code, plant, SKU, invoice_date, indicator_cancel, ndp_value, Tyre_Quantity FROM `zpvf_sd_saleshistory_01_tr`
+            SELECT s.dealer_code, s.plant, s.SKU, s.invoice_date, s.indicator_cancel, s.ndp_value, s.taxable_value, s.invoice_value, s.Tyre_Quantity, s.volume, s.distribution_channel 
+            FROM `zpvf_sd_saleshistory_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+              AND can.invoice_number IS NULL
         ) cs
-        LEFT JOIN `zivr_skumaster_01_tr` sm ON (cs.SKU = sm.MATNR OR TRIM(LEADING '0' FROM cs.SKU) = TRIM(LEADING '0' FROM sm.MATNR))
-        LEFT JOIN `zivf_customermaster_01_md` cust ON (cust.KUNNR = cs.dealer_code OR TRIM(LEADING '0' FROM cust.KUNNR) = TRIM(LEADING '0' FROM cs.dealer_code))
-        LEFT JOIN (
-            SELECT 
-                TRIM(bzirk) AS bzirk, 
-                MAX(NULLIF(TRIM(name), '')) AS name, 
-                MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-                MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-            FROM `zivf_territorymaster_01_tr`
-            WHERE bzirk IS NOT NULL AND TRIM(bzirk) != ''
-            GROUP BY TRIM(bzirk)
-        ) tm_bzirk ON (
-            (cust.bzirk IS NOT NULL AND TRIM(cust.bzirk) != '' AND cust.bzirk = tm_bzirk.bzirk)
-            OR (cs.plant IS NOT NULL AND (tm_bzirk.bzirk = CAST(cs.plant AS CHAR) OR tm_bzirk.bzirk = CONCAT('SE', cs.plant)))
-        )
-        LEFT JOIN (
-            SELECT 
-                werks, 
-                MAX(NULLIF(TRIM(name), '')) AS name, 
-                MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-                MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-            FROM `zivf_territorymaster_01_tr`
-            WHERE werks IS NOT NULL AND werks > 0
-            GROUP BY werks
-        ) tm_plant ON (cs.plant IS NOT NULL AND cs.plant = tm_plant.werks)
-        LEFT JOIN `zivf_regionmaster_md_01` rm ON (
-            TRIM(rm.region_code) = COALESCE(
-                NULLIF(TRIM(tm_bzirk.regio), ''), 
-                NULLIF(TRIM(tm_plant.regio), ''), 
-                NULLIF(TRIM(CAST(cust.regio AS CHAR)), '')
-            )
-        )
-        LEFT JOIN (
-            SELECT 
-                LEFT(TRIM(region_code), 2) AS prefix2,
-                MAX(NULLIF(TRIM(region_name), '')) AS region_name,
-                MAX(NULLIF(TRIM(zone_code), '')) AS zone_code
-            FROM `zivf_regionmaster_md_01`
-            WHERE region_code IS NOT NULL AND TRIM(region_code) != ''
-            GROUP BY LEFT(TRIM(region_code), 2)
-        ) rm_pfx ON (
-            LEFT(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR), 2) = rm_pfx.prefix2
-        )
-        INNER JOIN `zivf_zonemaster_01_tr` zm ON (
-            TRIM(zm.p_zone) = COALESCE(
-                NULLIF(TRIM(rm.zone_code), ''),
-                NULLIF(TRIM(tm_bzirk.p_zone), ''),
-                NULLIF(TRIM(tm_plant.p_zone), ''),
-                NULLIF(TRIM(rm_pfx.zone_code), ''),
-                CASE 
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('36') THEN 'CZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 1) = '3' THEN 'NZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('16') AND (CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR) LIKE '%82%' OR CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR) LIKE '8%') THEN 'NP'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 1) = '1' THEN 'EZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 1) = '8' THEN 'NP'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('51', '52') THEN 'TZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('53', '54', '55') THEN 'SZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 1) = '5' THEN 'SZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('71', '72') THEN 'CZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('73', '74', '75', '76') THEN 'WZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 1) = '7' THEN 'WZ'
-                    WHEN cust.regio IN (3, 6, 7, 8, 19, 22, 24) THEN 'NZ'
-                    WHEN cust.regio IN (10, 19, 20) THEN 'CZ'
-                    WHEN cust.regio IN (21, 25) THEN 'EZ'
-                    WHEN cust.regio IN (1, 27, 29) THEN 'SZ'
-                    ELSE NULL
-                END
-            )
-            OR TRIM(zm.name) = COALESCE(
-                NULLIF(TRIM(rm.zone_code), ''),
-                NULLIF(TRIM(tm_bzirk.p_zone), ''),
-                NULLIF(TRIM(tm_plant.p_zone), ''),
-                NULLIF(TRIM(rm_pfx.zone_code), '')
-            )
-        )
-        WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+        LEFT JOIN `zivr_skumaster_01_tr` sm ON (cs.SKU = sm.MATNR)
+        LEFT JOIN `zivf_categorymaster_01_tr` cat ON (sm.CAT_CODE = cat.CAT_CODE OR cs.SKU = cat.MATNR)
+        LEFT JOIN `zivf_customermaster_01_md` cust ON (cust.KUNNR = cs.dealer_code)
+        LEFT JOIN `zivf_territorymaster_01_tr` tm_plant ON (cs.plant = tm_plant.werks)
+        LEFT JOIN `zivf_territorymaster_01_tr` tm_bzirk ON (cust.bzirk = tm_bzirk.bzirk)
+        LEFT JOIN `zivf_regionmaster_md_01` rm ON (rm.region_code = COALESCE(NULLIF(TRIM(tm_plant.regio), ''), NULLIF(TRIM(tm_bzirk.regio), ''), NULLIF(TRIM(CAST(cust.regio AS CHAR)), '')))
+        LEFT JOIN `zivf_zonemaster_01_tr` zm ON (zm.p_zone = COALESCE(
+            NULLIF(TRIM(tm_plant.p_zone), ''),
+            NULLIF(TRIM(tm_bzirk.p_zone), ''),
+            NULLIF(TRIM(rm.zone_code), ''),
+            CASE 
+                WHEN LEFT(CAST(cs.plant AS CHAR), 2) IN ('36', '71', '72') THEN 'CZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '3' THEN 'NZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '1' THEN 'EZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '8' THEN 'NP'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 2) IN ('51', '52') THEN 'TZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '5' THEN 'SZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '7' THEN 'WZ'
+                ELSE 'CZ'
+            END
+        ))
+        WHERE (cust.klabc IS NULL OR UPPER(TRIM(cust.klabc)) <> 'X')
           AND cs.invoice_date BETWEEN v_curr_from AND v_curr_to
           AND (sm.MTART IS NULL OR sm.MTART = '' OR sm.MTART IN ('ZFGS', 'FERT'))
         GROUP BY Zone_Name
     ),
-    -- 2. DYNAMIC MASTER ZONES LIST
     all_zones AS (
         SELECT DISTINCT name AS Zone_Name,
             CASE p_zone
-                WHEN 'EZ' THEN 1
-                WHEN 'NZ' THEN 2
-                WHEN 'CZ' THEN 3
-                WHEN 'WZ' THEN 4
-                WHEN 'SZ' THEN 5
-                WHEN 'TZ' THEN 6
-                WHEN 'NP' THEN 7
-                ELSE 8
+                WHEN 'EZ' THEN 1 WHEN 'NZ' THEN 2 WHEN 'CZ' THEN 3 WHEN 'WZ' THEN 4 WHEN 'SZ' THEN 5 WHEN 'TZ' THEN 6 WHEN 'NP' THEN 7 ELSE 8
             END AS Sort_Order
-        FROM `zivf_zonemaster_01_tr`
-        WHERE name IS NOT NULL AND TRIM(name) != ''
+        FROM `zivf_zonemaster_01_tr` WHERE name IS NOT NULL AND TRIM(name) != ''
     ),
-    -- 3. Final Combined Data
     final_data AS (
         SELECT 
             z.Zone_Name,
@@ -1162,9 +1082,6 @@ BEGIN
         FROM all_zones z
         LEFT JOIN agg_actuals a ON z.Zone_Name = a.Zone_Name
     )
-    
-    -- 4. Final Output
-    -- ACTUAL ROWS
     SELECT 
         Zone_Name AS `Zone`, 'Actual' AS `Type`,
         CAST(ROUND(Act_Val_4W, 2) AS CHAR) AS `4 Whlrs.`, CAST(ROUND(Act_Val_23W, 2) AS CHAR) AS `Whlrs`, CAST(ROUND(Act_Val_4W + Act_Val_23W, 2) AS CHAR) AS `Total`,
@@ -1176,10 +1093,7 @@ BEGIN
         CAST(Act_TrF AS CHAR) AS `Tr. Fro`, CAST(Act_TrR AS CHAR) AS `Tr. Rear`, CAST(Act_TrT AS CHAR) AS `Tr. Trail`,
         CAST(Act_ADV AS CHAR) AS `ADV`, CAST(Act_3W AS CHAR) AS `3 Whlrs`, CAST(Act_Scoot AS CHAR) AS `Scooter`, CAST(Act_Motor AS CHAR) AS `Motor`
     FROM final_data
-    
     UNION ALL
-    
-    -- TARGET ROWS
     SELECT 
         Zone_Name, 'Target',
         CAST(ROUND(Tgt_Val_4W, 2) AS CHAR), CAST(ROUND(Tgt_Val_23W, 2) AS CHAR), CAST(ROUND(Tgt_Val_4W + Tgt_Val_23W, 2) AS CHAR),
@@ -1191,10 +1105,7 @@ BEGIN
         CAST(Tgt_TrF AS CHAR), CAST(Tgt_TrR AS CHAR), CAST(Tgt_TrT AS CHAR),
         CAST(Tgt_ADV AS CHAR), CAST(Tgt_3W AS CHAR), CAST(Tgt_Scoot AS CHAR), CAST(Tgt_Motor AS CHAR)
     FROM final_data
-    
     UNION ALL
-    
-    -- % ACHV ROWS
     SELECT 
         Zone_Name, 'Achv %',
         IF(Tgt_Val_4W = 0, '0%', CONCAT(ROUND(Act_Val_4W / Tgt_Val_4W * 100, 0), '%')), 
@@ -1203,7 +1114,7 @@ BEGIN
         IF(Tgt_TBB = 0, '0%', CONCAT(ROUND(Act_TBB / Tgt_TBB * 100, 0), '%')), 
         IF(Tgt_TBR = 0, '0%', CONCAT(ROUND(Act_TBR / Tgt_TBR * 100, 0), '%')),
         IF(Tgt_LCV_B = 0, '0%', CONCAT(ROUND(Act_LCV_B / Tgt_LCV_B * 100, 0), '%')), 
-        IF(Tgt_LCV_R = 0, '0%', CONCAT(ROUND(Act_LCV_R / Tgt_LCV_R * 100, 0), '%')),
+        IF(Tgt_LCV_R = 0, '0%', CONCAT(ROUND(Act_LCV_R / Tgt_LCV_R * 100, 0), '%')), 
         IF(Tgt_SCV_B = 0, '0%', CONCAT(ROUND(Act_SCV_B / Tgt_SCV_B * 100, 0), '%')), 
         IF(Tgt_SCV_R = 0, '0%', CONCAT(ROUND(Act_SCV_R / Tgt_SCV_R * 100, 0), '%')),
         IF(Tgt_Car_B = 0, '0%', CONCAT(ROUND(Act_Car_B / Tgt_Car_B * 100, 0), '%')), 
@@ -1218,10 +1129,7 @@ BEGIN
         IF(Tgt_Scoot = 0, '0%', CONCAT(ROUND(Act_Scoot / Tgt_Scoot * 100, 0), '%')), 
         IF(Tgt_Motor = 0, '0%', CONCAT(ROUND(Act_Motor / Tgt_Motor * 100, 0), '%'))
     FROM final_data
-    
     UNION ALL
-    
-    -- GRAND TOTAL ACTUAL
     SELECT 
         'Grand Total', 'Actual',
         CAST(ROUND(SUM(Act_Val_4W), 2) AS CHAR), CAST(ROUND(SUM(Act_Val_23W), 2) AS CHAR), CAST(ROUND(SUM(Act_Val_4W + Act_Val_23W), 2) AS CHAR),
@@ -1233,10 +1141,7 @@ BEGIN
         CAST(SUM(Act_TrF) AS CHAR), CAST(SUM(Act_TrR) AS CHAR), CAST(SUM(Act_TrT) AS CHAR),
         CAST(SUM(Act_ADV) AS CHAR), CAST(SUM(Act_3W) AS CHAR), CAST(SUM(Act_Scoot) AS CHAR), CAST(SUM(Act_Motor) AS CHAR)
     FROM final_data
-    
     UNION ALL
-    
-    -- GRAND TOTAL TARGET
     SELECT 
         'Grand Total', 'Target',
         CAST(ROUND(SUM(Tgt_Val_4W), 2) AS CHAR), CAST(ROUND(SUM(Tgt_Val_23W), 2) AS CHAR), CAST(ROUND(SUM(Tgt_Val_4W + Tgt_Val_23W), 2) AS CHAR),
@@ -1248,235 +1153,133 @@ BEGIN
         CAST(SUM(Tgt_TrF) AS CHAR), CAST(SUM(Tgt_TrR) AS CHAR), CAST(SUM(Tgt_TrT) AS CHAR),
         CAST(SUM(Tgt_ADV) AS CHAR), CAST(SUM(Tgt_3W) AS CHAR), CAST(SUM(Tgt_Scoot) AS CHAR), CAST(SUM(Tgt_Motor) AS CHAR)
     FROM final_data
-    
     UNION ALL
-    
-    -- GRAND TOTAL % ACHV
     SELECT 
         'Grand Total', 'Achv %',
         IF(SUM(Tgt_Val_4W) = 0, '0%', CONCAT(ROUND(SUM(Act_Val_4W) / SUM(Tgt_Val_4W) * 100, 0), '%')),
         IF(SUM(Tgt_Val_23W) = 0, '0%', CONCAT(ROUND(SUM(Act_Val_23W) / SUM(Tgt_Val_23W) * 100, 0), '%')),
-        IF(SUM(Tgt_Val_4W + Tgt_Val_23W) = 0, '0%', CONCAT(ROUND(SUM(Act_Val_4W + Act_Val_23W) / SUM(Tgt_Val_4W + Tgt_Val_23W) * 100, 0), '%')),
-        IF(SUM(Tgt_TBB) = 0, '0%', CONCAT(ROUND(SUM(Act_TBB) / SUM(Tgt_TBB) * 100, 0), '%')),
+        IF(SUM(Tgt_Val_4W + Tgt_Val_23W) = 0, '0%', CONCAT(ROUND((SUM(Act_Val_4W) + SUM(Act_Val_23W)) / (SUM(Tgt_Val_4W) + SUM(Tgt_Val_23W)) * 100, 0), '%')),
+        IF(SUM(Tgt_TBB) = 0, '0%', CONCAT(ROUND(SUM(Act_TBB) / SUM(Tgt_TBB) * 100, 0), '%')), 
         IF(SUM(Tgt_TBR) = 0, '0%', CONCAT(ROUND(SUM(Act_TBR) / SUM(Tgt_TBR) * 100, 0), '%')),
-        IF(SUM(Tgt_LCV_B) = 0, '0%', CONCAT(ROUND(SUM(Act_LCV_B) / SUM(Tgt_LCV_B) * 100, 0), '%')),
-        IF(SUM(Tgt_LCV_R) = 0, '0%', CONCAT(ROUND(SUM(Act_LCV_R) / SUM(Tgt_LCV_R) * 100, 0), '%')),
-        IF(SUM(Tgt_SCV_B) = 0, '0%', CONCAT(ROUND(SUM(Act_SCV_B) / SUM(Tgt_SCV_B) * 100, 0), '%')),
+        IF(SUM(Tgt_LCV_B) = 0, '0%', CONCAT(ROUND(SUM(Act_LCV_B) / SUM(Tgt_LCV_B) * 100, 0), '%')), 
+        IF(SUM(Tgt_LCV_R) = 0, '0%', CONCAT(ROUND(SUM(Act_LCV_R) / SUM(Tgt_LCV_R) * 100, 0), '%')), 
+        IF(SUM(Tgt_SCV_B) = 0, '0%', CONCAT(ROUND(SUM(Act_SCV_B) / SUM(Tgt_SCV_B) * 100, 0), '%')), 
         IF(SUM(Tgt_SCV_R) = 0, '0%', CONCAT(ROUND(SUM(Act_SCV_R) / SUM(Tgt_SCV_R) * 100, 0), '%')),
-        IF(SUM(Tgt_Car_B) = 0, '0%', CONCAT(ROUND(SUM(Act_Car_B) / SUM(Tgt_Car_B) * 100, 0), '%')),
+        IF(SUM(Tgt_Car_B) = 0, '0%', CONCAT(ROUND(SUM(Act_Car_B) / SUM(Tgt_Car_B) * 100, 0), '%')), 
         IF(SUM(Tgt_Car_R) = 0, '0%', CONCAT(ROUND(SUM(Act_Car_R) / SUM(Tgt_Car_R) * 100, 0), '%')),
-        IF(SUM(Tgt_Jeep_B) = 0, '0%', CONCAT(ROUND(SUM(Act_Jeep_B) / SUM(Tgt_Jeep_B) * 100, 0), '%')),
+        IF(SUM(Tgt_Jeep_B) = 0, '0%', CONCAT(ROUND(SUM(Act_Jeep_B) / SUM(Tgt_Jeep_B) * 100, 0), '%')), 
         IF(SUM(Tgt_Jeep_R) = 0, '0%', CONCAT(ROUND(SUM(Act_Jeep_R) / SUM(Tgt_Jeep_R) * 100, 0), '%')),
-        IF(SUM(Tgt_TrF) = 0, '0%', CONCAT(ROUND(SUM(Act_TrF) / SUM(Tgt_TrF) * 100, 0), '%')),
-        IF(SUM(Tgt_TrR) = 0, '0%', CONCAT(ROUND(SUM(Act_TrR) / SUM(Tgt_TrR) * 100, 0), '%')),
+        IF(SUM(Tgt_TrF) = 0, '0%', CONCAT(ROUND(SUM(Act_TrF) / SUM(Tgt_TrF) * 100, 0), '%')), 
+        IF(SUM(Tgt_TrR) = 0, '0%', CONCAT(ROUND(SUM(Act_TrR) / SUM(Tgt_TrR) * 100, 0), '%')), 
         IF(SUM(Tgt_TrT) = 0, '0%', CONCAT(ROUND(SUM(Act_TrT) / SUM(Tgt_TrT) * 100, 0), '%')),
-        IF(SUM(Tgt_ADV) = 0, '0%', CONCAT(ROUND(SUM(Act_ADV) / SUM(Tgt_ADV) * 100, 0), '%')),
-        IF(SUM(Tgt_3W) = 0, '0%', CONCAT(ROUND(SUM(Act_3W) / SUM(Tgt_3W) * 100, 0), '%')),
-        IF(SUM(Tgt_Scoot) = 0, '0%', CONCAT(ROUND(SUM(Act_Scoot) / SUM(Tgt_Scoot) * 100, 0), '%')),
+        IF(SUM(Tgt_ADV) = 0, '0%', CONCAT(ROUND(SUM(Act_ADV) / SUM(Tgt_ADV) * 100, 0), '%')), 
+        IF(SUM(Tgt_3W) = 0, '0%', CONCAT(ROUND(SUM(Act_3W) / SUM(Tgt_3W) * 100, 0), '%')), 
+        IF(SUM(Tgt_Scoot) = 0, '0%', CONCAT(ROUND(SUM(Act_Scoot) / SUM(Tgt_Scoot) * 100, 0), '%')), 
         IF(SUM(Tgt_Motor) = 0, '0%', CONCAT(ROUND(SUM(Act_Motor) / SUM(Tgt_Motor) * 100, 0), '%'))
     FROM final_data
-    
     ORDER BY 
         FIELD(`Zone`, 'EAST', 'East', 'NORTH', 'North', 'Central Zone', 'Central', 'WEST', 'West', 'SOUTH', 'South - I', 'South Zone - II', 'South - II', 'Nepal', 'Grand Total'),
         FIELD(`Type`, 'Actual', 'Target', 'Achv %');
-END$$
-DELIMITER ;
+END $$
 
------------------ sp_sales_summary_in_no_and_values_for_month store procedure end ----------------------------------------------------------
-
------------------ sp_get_sales_revenue_by_zone store procedure start ----------------------------------------------------------
-DELIMITER $$
-
+-- ------------------------------------------------------------------------------
+-- 5. sp_get_sales_revenue_by_zone
+-- ------------------------------------------------------------------------------
 DROP PROCEDURE IF EXISTS sp_get_sales_revenue_by_zone $$
 CREATE PROCEDURE `sp_get_sales_revenue_by_zone`(IN p_zone VARCHAR(50))
 BEGIN
     IF p_zone IS NULL OR p_zone = '' OR p_zone = 'null' OR p_zone = 'All' THEN
         SELECT 
-            zm.name                                                                               AS zone, 
-            ROUND(SUM(COALESCE(cs.invoice_value, cs.taxable_value, cs.ndp_value, 0)) / 10000000, 2) AS saleValueCr,
-            0                                                                                     AS planValueCr,
-            0                                                                                     AS achievValuePct
+            zm.name AS zone, 
+            ROUND(SUM(COALESCE(cs.ndp_value, cs.taxable_value, cs.invoice_value, 0)) / 10000000, 2) AS saleValueCr,
+            0 AS planValueCr,
+            0 AS achievValuePct
         FROM (
-            SELECT dealer_code, plant, invoice_value, taxable_value, ndp_value, indicator_cancel FROM `zpvf_sd_currentsales_01_tr`
+            SELECT s.dealer_code, s.plant, s.invoice_value, s.taxable_value, s.ndp_value, s.indicator_cancel, s.distribution_channel 
+            FROM `zpvf_sd_currentsales_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+              AND can.invoice_number IS NULL
             UNION ALL
-            SELECT dealer_code, plant, invoice_value, taxable_value, ndp_value, indicator_cancel FROM `zpvf_sd_saleshistory_01_tr`
+            SELECT s.dealer_code, s.plant, s.invoice_value, s.taxable_value, s.ndp_value, s.indicator_cancel, s.distribution_channel 
+            FROM `zpvf_sd_saleshistory_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+              AND can.invoice_number IS NULL
         ) cs
-        LEFT JOIN `zivf_customermaster_01_md` cust ON (
-            cs.dealer_code = cust.kunnr 
-            OR TRIM(LEADING '0' FROM cs.dealer_code) = TRIM(LEADING '0' FROM cust.kunnr)
-        )
-        LEFT JOIN (
-            SELECT 
-                TRIM(bzirk) AS bzirk, 
-                MAX(NULLIF(TRIM(name), '')) AS name, 
-                MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-                MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-            FROM `zivf_territorymaster_01_tr`
-            WHERE bzirk IS NOT NULL AND TRIM(bzirk) != ''
-            GROUP BY TRIM(bzirk)
-        ) tm_bzirk ON (
-            (cust.bzirk IS NOT NULL AND TRIM(cust.bzirk) != '' AND cust.bzirk = tm_bzirk.bzirk)
-            OR (cs.plant IS NOT NULL AND (tm_bzirk.bzirk = CAST(cs.plant AS CHAR) OR tm_bzirk.bzirk = CONCAT('SE', cs.plant)))
-        )
-        LEFT JOIN (
-            SELECT 
-                werks, 
-                MAX(NULLIF(TRIM(name), '')) AS name, 
-                MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-                MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-            FROM `zivf_territorymaster_01_tr`
-            WHERE werks IS NOT NULL AND werks > 0
-            GROUP BY werks
-        ) tm_plant ON (cs.plant IS NOT NULL AND cs.plant = tm_plant.werks)
-        LEFT JOIN `zivf_regionmaster_md_01` rm ON (
-            TRIM(rm.region_code) = COALESCE(
-                NULLIF(TRIM(tm_bzirk.regio), ''), 
-                NULLIF(TRIM(tm_plant.regio), ''), 
-                NULLIF(TRIM(CAST(cust.regio AS CHAR)), '')
-            )
-        )
-        LEFT JOIN (
-            SELECT 
-                LEFT(TRIM(region_code), 2) AS prefix2,
-                MAX(NULLIF(TRIM(region_name), '')) AS region_name,
-                MAX(NULLIF(TRIM(zone_code), '')) AS zone_code
-            FROM `zivf_regionmaster_md_01`
-            WHERE region_code IS NOT NULL AND TRIM(region_code) != ''
-            GROUP BY LEFT(TRIM(region_code), 2)
-        ) rm_pfx ON (
-            LEFT(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR), 2) = rm_pfx.prefix2
-        )
-        INNER JOIN `zivf_zonemaster_01_tr` zm ON (
-            TRIM(zm.p_zone) = COALESCE(
-                NULLIF(TRIM(rm.zone_code), ''),
-                NULLIF(TRIM(tm_bzirk.p_zone), ''),
-                NULLIF(TRIM(tm_plant.p_zone), ''),
-                NULLIF(TRIM(rm_pfx.zone_code), ''),
-                CASE 
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('36') THEN 'CZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 1) = '3' THEN 'NZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('16') AND (CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR) LIKE '%82%' OR CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR) LIKE '8%') THEN 'NP'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 1) = '1' THEN 'EZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 1) = '8' THEN 'NP'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('51', '52') THEN 'TZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('53', '54', '55') THEN 'SZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 1) = '5' THEN 'SZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('71', '72') THEN 'CZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('73', '74', '75', '76') THEN 'WZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 1) = '7' THEN 'WZ'
-                    WHEN cust.regio IN (3, 6, 7, 8, 19, 22, 24) THEN 'NZ'
-                    WHEN cust.regio IN (10, 19, 20) THEN 'CZ'
-                    WHEN cust.regio IN (21, 25) THEN 'EZ'
-                    WHEN cust.regio IN (1, 27, 29) THEN 'SZ'
-                    ELSE NULL
-                END
-            )
-            OR TRIM(zm.name) = COALESCE(
-                NULLIF(TRIM(rm.zone_code), ''),
-                NULLIF(TRIM(tm_bzirk.p_zone), ''),
-                NULLIF(TRIM(tm_plant.p_zone), ''),
-                NULLIF(TRIM(rm_pfx.zone_code), '')
-            )
-        )
-        WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+        LEFT JOIN `zivf_customermaster_01_md` cust ON (cs.dealer_code = cust.kunnr)
+        LEFT JOIN `zivf_territorymaster_01_tr` tm_plant ON (cs.plant = tm_plant.werks)
+        LEFT JOIN `zivf_territorymaster_01_tr` tm_bzirk ON (cust.bzirk = tm_bzirk.bzirk)
+        LEFT JOIN `zivf_regionmaster_md_01` rm ON (rm.region_code = COALESCE(NULLIF(TRIM(tm_plant.regio), ''), NULLIF(TRIM(tm_bzirk.regio), ''), NULLIF(TRIM(CAST(cust.regio AS CHAR)), '')))
+        LEFT JOIN `zivf_zonemaster_01_tr` zm ON (zm.p_zone = COALESCE(
+            NULLIF(TRIM(tm_plant.p_zone), ''),
+            NULLIF(TRIM(tm_bzirk.p_zone), ''),
+            NULLIF(TRIM(rm.zone_code), ''),
+            CASE 
+                WHEN LEFT(CAST(cs.plant AS CHAR), 2) IN ('36', '71', '72') THEN 'CZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '3' THEN 'NZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '1' THEN 'EZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '8' THEN 'NP'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 2) IN ('51', '52') THEN 'TZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '5' THEN 'SZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '7' THEN 'WZ'
+                ELSE 'CZ'
+            END
+        ))
+        WHERE (cust.klabc IS NULL OR UPPER(TRIM(cust.klabc)) <> 'X')
           AND zm.name IS NOT NULL
         GROUP BY zm.name
         ORDER BY saleValueCr DESC;
-
     ELSE
         SELECT 
-            COALESCE(NULLIF(TRIM(rm.region_name), ''), NULLIF(TRIM(tm_plant.name), ''), NULLIF(TRIM(tm_bzirk.name), ''), NULLIF(TRIM(rm_pfx.region_name), ''), 'Other Region') AS region, 
-            ROUND(SUM(COALESCE(cs.invoice_value, cs.taxable_value, cs.ndp_value, 0)) / 10000000, 2)    AS saleValueCr,
-            0                                                                                        AS planValueCr,
-            0                                                                                        AS achievValuePct
+            COALESCE(NULLIF(TRIM(rm.region_name), ''), NULLIF(TRIM(tm_plant.name), ''), NULLIF(TRIM(tm_bzirk.name), ''), 'Other Region') AS region, 
+            ROUND(SUM(COALESCE(cs.ndp_value, cs.taxable_value, cs.invoice_value, 0)) / 10000000, 2) AS saleValueCr,
+            0 AS planValueCr,
+            0 AS achievValuePct
         FROM (
-            SELECT dealer_code, plant, invoice_value, taxable_value, ndp_value, indicator_cancel FROM `zpvf_sd_currentsales_01_tr`
+            SELECT s.dealer_code, s.plant, s.invoice_value, s.taxable_value, s.ndp_value, s.indicator_cancel, s.distribution_channel 
+            FROM `zpvf_sd_currentsales_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+              AND can.invoice_number IS NULL
             UNION ALL
-            SELECT dealer_code, plant, invoice_value, taxable_value, ndp_value, indicator_cancel FROM `zpvf_sd_saleshistory_01_tr`
+            SELECT s.dealer_code, s.plant, s.invoice_value, s.taxable_value, s.ndp_value, s.indicator_cancel, s.distribution_channel 
+            FROM `zpvf_sd_saleshistory_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+              AND can.invoice_number IS NULL
         ) cs
-        LEFT JOIN `zivf_customermaster_01_md` cust ON (
-            cs.dealer_code = cust.kunnr 
-            OR TRIM(LEADING '0' FROM cs.dealer_code) = TRIM(LEADING '0' FROM cust.kunnr)
-        )
-        LEFT JOIN (
-            SELECT 
-                TRIM(bzirk) AS bzirk, 
-                MAX(NULLIF(TRIM(name), '')) AS name, 
-                MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-                MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-            FROM `zivf_territorymaster_01_tr`
-            WHERE bzirk IS NOT NULL AND TRIM(bzirk) != ''
-            GROUP BY TRIM(bzirk)
-        ) tm_bzirk ON (
-            (cust.bzirk IS NOT NULL AND TRIM(cust.bzirk) != '' AND cust.bzirk = tm_bzirk.bzirk)
-            OR (cs.plant IS NOT NULL AND (tm_bzirk.bzirk = CAST(cs.plant AS CHAR) OR tm_bzirk.bzirk = CONCAT('SE', cs.plant)))
-        )
-        LEFT JOIN (
-            SELECT 
-                werks, 
-                MAX(NULLIF(TRIM(name), '')) AS name, 
-                MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-                MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-            FROM `zivf_territorymaster_01_tr`
-            WHERE werks IS NOT NULL AND werks > 0
-            GROUP BY werks
-        ) tm_plant ON (cs.plant IS NOT NULL AND cs.plant = tm_plant.werks)
-        LEFT JOIN `zivf_regionmaster_md_01` rm ON (
-            TRIM(rm.region_code) = COALESCE(
-                NULLIF(TRIM(tm_bzirk.regio), ''), 
-                NULLIF(TRIM(tm_plant.regio), ''), 
-                NULLIF(TRIM(CAST(cust.regio AS CHAR)), '')
-            )
-        )
-        LEFT JOIN (
-            SELECT 
-                LEFT(TRIM(region_code), 2) AS prefix2,
-                MAX(NULLIF(TRIM(region_name), '')) AS region_name,
-                MAX(NULLIF(TRIM(zone_code), '')) AS zone_code
-            FROM `zivf_regionmaster_md_01`
-            WHERE region_code IS NOT NULL AND TRIM(region_code) != ''
-            GROUP BY LEFT(TRIM(region_code), 2)
-        ) rm_pfx ON (
-            LEFT(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR), 2) = rm_pfx.prefix2
-        )
-        INNER JOIN `zivf_zonemaster_01_tr` zm ON (
-            TRIM(zm.p_zone) = COALESCE(
-                NULLIF(TRIM(rm.zone_code), ''),
-                NULLIF(TRIM(tm_bzirk.p_zone), ''),
-                NULLIF(TRIM(tm_plant.p_zone), ''),
-                NULLIF(TRIM(rm_pfx.zone_code), ''),
-                CASE 
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('36') THEN 'CZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 1) = '3' THEN 'NZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('16') AND (CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR) LIKE '%82%' OR CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR) LIKE '8%') THEN 'NP'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 1) = '1' THEN 'EZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 1) = '8' THEN 'NP'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('51', '52') THEN 'TZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('53', '54', '55') THEN 'SZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 1) = '5' THEN 'SZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('71', '72') THEN 'CZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 2) IN ('73', '74', '75', '76') THEN 'WZ'
-                    WHEN LEFT(TRIM(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR)), 1) = '7' THEN 'WZ'
-                    WHEN cust.regio IN (3, 6, 7, 8, 19, 22, 24) THEN 'NZ'
-                    WHEN cust.regio IN (10, 19, 20) THEN 'CZ'
-                    WHEN cust.regio IN (21, 25) THEN 'EZ'
-                    WHEN cust.regio IN (1, 27, 29) THEN 'SZ'
-                    ELSE NULL
-                END
-            )
-            OR TRIM(zm.name) = COALESCE(
-                NULLIF(TRIM(rm.zone_code), ''),
-                NULLIF(TRIM(tm_bzirk.p_zone), ''),
-                NULLIF(TRIM(tm_plant.p_zone), ''),
-                NULLIF(TRIM(rm_pfx.zone_code), '')
-            )
-        )
-        WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+        LEFT JOIN `zivf_customermaster_01_md` cust ON (cs.dealer_code = cust.kunnr)
+        LEFT JOIN `zivf_territorymaster_01_tr` tm_plant ON (cs.plant = tm_plant.werks)
+        LEFT JOIN `zivf_territorymaster_01_tr` tm_bzirk ON (cust.bzirk = tm_bzirk.bzirk)
+        LEFT JOIN `zivf_regionmaster_md_01` rm ON (TRIM(rm.region_code) = COALESCE(NULLIF(TRIM(tm_plant.regio), ''), NULLIF(TRIM(tm_bzirk.regio), ''), NULLIF(TRIM(CAST(cust.regio AS CHAR)), '')))
+        LEFT JOIN `zivf_zonemaster_01_tr` zm ON (zm.p_zone = COALESCE(
+            NULLIF(TRIM(tm_plant.p_zone), ''),
+            NULLIF(TRIM(tm_bzirk.p_zone), ''),
+            NULLIF(TRIM(rm.zone_code), ''),
+            CASE 
+                WHEN LEFT(CAST(cs.plant AS CHAR), 2) IN ('36', '71', '72') THEN 'CZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '3' THEN 'NZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '1' THEN 'EZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '8' THEN 'NP'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 2) IN ('51', '52') THEN 'TZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '5' THEN 'SZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '7' THEN 'WZ'
+                ELSE 'CZ'
+            END
+        ))
+        WHERE (cust.klabc IS NULL OR UPPER(TRIM(cust.klabc)) <> 'X')
           AND (
-            zm.name = p_zone
-            OR zm.p_zone = p_zone
-            OR UPPER(TRIM(zm.name)) = UPPER(TRIM(p_zone))
-            OR UPPER(TRIM(zm.p_zone)) = UPPER(TRIM(p_zone))
+            zm.name = p_zone OR zm.p_zone = p_zone
+            OR UPPER(TRIM(zm.name)) = UPPER(TRIM(p_zone)) OR UPPER(TRIM(zm.p_zone)) = UPPER(TRIM(p_zone))
             OR (UPPER(TRIM(p_zone)) IN ('NORTH', 'NZ') AND zm.p_zone = 'NZ')
             OR (UPPER(TRIM(p_zone)) IN ('EAST', 'EZ') AND zm.p_zone = 'EZ')
             OR (UPPER(TRIM(p_zone)) IN ('WEST', 'WZ') AND zm.p_zone = 'WZ')
@@ -1488,14 +1291,11 @@ BEGIN
         GROUP BY region
         ORDER BY saleValueCr DESC;
     END IF;
-END$$
-DELIMITER ;
+END $$
 
------------------ sp_get_sales_revenue_by_zone store procedure end ----------------------------------------------------------
-
------------------ sp_get_sales_by_account_category store procedure start ----------------------------------------------------------
-DELIMITER $$
-
+-- ------------------------------------------------------------------------------
+-- 6. sp_get_sales_by_account_category
+-- ------------------------------------------------------------------------------
 DROP PROCEDURE IF EXISTS sp_get_sales_by_account_category $$
 CREATE PROCEDURE `sp_get_sales_by_account_category`(IN p_zone VARCHAR(50))
 BEGIN
@@ -1503,105 +1303,54 @@ BEGIN
         SELECT 
             CASE 
                 WHEN UPPER(TRIM(IFNULL(cm.BRAND_SHOP, ''))) = 'Y' THEN 'Brand Shops'
-                WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'DL' THEN 'Dealers'
-                WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'DB' THEN 'Distributors'
-                WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'FL' THEN 'Fleets'
+                WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'DL' OR UPPER(TRIM(IFNULL(cm.KTOKD, ''))) IN ('0001', 'DL') THEN 'Dealers'
+                WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'DB' OR UPPER(TRIM(IFNULL(cm.KTOKD, ''))) IN ('0002', 'DB') THEN 'Distributors'
+                WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'FL' OR UPPER(TRIM(IFNULL(cm.KTOKD, ''))) IN ('0003', 'FL') THEN 'Fleets'
                 WHEN cm.CH_TYPE IS NOT NULL AND cm.CH_TYPE != '' THEN cm.CH_TYPE
                 WHEN cm.KTOKD IS NOT NULL AND cm.KTOKD != '' THEN cm.KTOKD
                 ELSE 'Dealers'
             END AS title,
-            cs.invoice_value
+            COALESCE(cs.ndp_value, cs.taxable_value, cs.invoice_value, 0) AS invoice_value
         FROM (
-            SELECT dealer_code, plant, invoice_value, indicator_cancel FROM `zpvf_sd_currentsales_01_tr`
+            SELECT s.dealer_code, s.plant, s.invoice_value, s.taxable_value, s.ndp_value, s.indicator_cancel, s.distribution_channel 
+            FROM `zpvf_sd_currentsales_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+              AND can.invoice_number IS NULL
             UNION ALL
-            SELECT dealer_code, plant, invoice_value, indicator_cancel FROM `zpvf_sd_saleshistory_01_tr`
+            SELECT s.dealer_code, s.plant, s.invoice_value, s.taxable_value, s.ndp_value, s.indicator_cancel, s.distribution_channel 
+            FROM `zpvf_sd_saleshistory_01_tr` s
+            LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+              AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+              AND can.invoice_number IS NULL
         ) cs
-        LEFT JOIN `zivf_customermaster_01_md` cm ON (cs.dealer_code = cm.KUNNR OR TRIM(LEADING '0' FROM cs.dealer_code) = TRIM(LEADING '0' FROM cm.KUNNR))
-        LEFT JOIN (
-            SELECT 
-                TRIM(bzirk) AS bzirk, 
-                MAX(NULLIF(TRIM(name), '')) AS name, 
-                MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-                MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-            FROM `zivf_territorymaster_01_tr`
-            WHERE bzirk IS NOT NULL AND TRIM(bzirk) != ''
-            GROUP BY TRIM(bzirk)
-        ) tm_bzirk ON (
-            (cm.bzirk IS NOT NULL AND TRIM(cm.bzirk) != '' AND cm.bzirk = tm_bzirk.bzirk)
-            OR (cs.plant IS NOT NULL AND (tm_bzirk.bzirk = CAST(cs.plant AS CHAR) OR tm_bzirk.bzirk = CONCAT('SE', cs.plant)))
-        )
-        LEFT JOIN (
-            SELECT 
-                werks, 
-                MAX(NULLIF(TRIM(name), '')) AS name, 
-                MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-                MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-            FROM `zivf_territorymaster_01_tr`
-            WHERE werks IS NOT NULL AND werks > 0
-            GROUP BY werks
-        ) tm_plant ON (cs.plant IS NOT NULL AND cs.plant = tm_plant.werks)
-        LEFT JOIN `zivf_regionmaster_md_01` rm ON (
-            TRIM(rm.region_code) = COALESCE(
-                NULLIF(TRIM(tm_bzirk.regio), ''), 
-                NULLIF(TRIM(tm_plant.regio), ''), 
-                NULLIF(TRIM(CAST(cm.regio AS CHAR)), '')
-            )
-        )
-        LEFT JOIN (
-            SELECT 
-                LEFT(TRIM(region_code), 2) AS prefix2,
-                MAX(NULLIF(TRIM(region_name), '')) AS region_name,
-                MAX(NULLIF(TRIM(zone_code), '')) AS zone_code
-            FROM `zivf_regionmaster_md_01`
-            WHERE region_code IS NOT NULL AND TRIM(region_code) != ''
-            GROUP BY LEFT(TRIM(region_code), 2)
-        ) rm_pfx ON (
-            LEFT(CAST(COALESCE(cs.plant, cm.vwerk) AS CHAR), 2) = rm_pfx.prefix2
-        )
-        LEFT JOIN `zivf_zonemaster_01_tr` zm ON (
-            TRIM(zm.p_zone) = COALESCE(
-                NULLIF(TRIM(rm.zone_code), ''),
-                NULLIF(TRIM(tm_bzirk.p_zone), ''),
-                NULLIF(TRIM(tm_plant.p_zone), ''),
-                NULLIF(TRIM(rm_pfx.zone_code), '')
-            )
-            OR TRIM(zm.name) = COALESCE(
-                NULLIF(TRIM(rm.zone_code), ''),
-                NULLIF(TRIM(tm_bzirk.p_zone), ''),
-                NULLIF(TRIM(tm_plant.p_zone), ''),
-                NULLIF(TRIM(rm_pfx.zone_code), '')
-            )
-        )
-        WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+        LEFT JOIN `zivf_customermaster_01_md` cm ON (cs.dealer_code = cm.kunnr)
+        LEFT JOIN `zivf_territorymaster_01_tr` tm_plant ON (cs.plant = tm_plant.werks)
+        LEFT JOIN `zivf_territorymaster_01_tr` tm_bzirk ON (cm.bzirk = tm_bzirk.bzirk)
+        LEFT JOIN `zivf_regionmaster_md_01` rm ON (rm.region_code = COALESCE(NULLIF(TRIM(tm_plant.regio), ''), NULLIF(TRIM(tm_bzirk.regio), ''), NULLIF(TRIM(CAST(cm.regio AS CHAR)), '')))
+        LEFT JOIN `zivf_zonemaster_01_tr` zm ON (zm.p_zone = COALESCE(
+            NULLIF(TRIM(tm_plant.p_zone), ''),
+            NULLIF(TRIM(tm_bzirk.p_zone), ''),
+            NULLIF(TRIM(rm.zone_code), ''),
+            CASE 
+                WHEN LEFT(CAST(cs.plant AS CHAR), 2) IN ('36', '71', '72') THEN 'CZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '3' THEN 'NZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '1' THEN 'EZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '8' THEN 'NP'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 2) IN ('51', '52') THEN 'TZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '5' THEN 'SZ'
+                WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '7' THEN 'WZ'
+                ELSE 'CZ'
+            END
+        ))
+        WHERE (cm.klabc IS NULL OR UPPER(TRIM(cm.klabc)) <> 'X')
           AND (p_zone IS NULL OR p_zone = '' OR p_zone = 'null' OR p_zone = 'All' 
-               OR CASE UPPER(TRIM(COALESCE(zm.name, zm.p_zone, rm.zone_code, tm_bzirk.p_zone, tm_plant.p_zone, rm_pfx.zone_code, 'Unknown')))
-                    WHEN 'EZ' THEN 'East'
-                    WHEN 'EAST' THEN 'East'
-                    WHEN 'EAST ZONE' THEN 'East'
-                    WHEN 'NZ' THEN 'North'
-                    WHEN 'NORTH' THEN 'North'
-                    WHEN 'NORTH ZONE' THEN 'North'
-                    WHEN 'CZ' THEN 'Central'
-                    WHEN 'CENTRAL' THEN 'Central'
-                    WHEN 'CENTRAL ZONE' THEN 'Central'
-                    WHEN 'WZ' THEN 'West'
-                    WHEN 'WEST' THEN 'West'
-                    WHEN 'WEST ZONE' THEN 'West'
-                    WHEN 'SZ' THEN 'South - I'
-                    WHEN 'SOUTH' THEN 'South - I'
-                    WHEN 'SOUTH - I' THEN 'South - I'
-                    WHEN 'SOUTH ZONE - I' THEN 'South - I'
-                    WHEN 'SOUTH ZONE I' THEN 'South - I'
-                    WHEN 'TZ' THEN 'South - II'
-                    WHEN 'SOUTH - II' THEN 'South - II'
-                    WHEN 'SOUTH ZONE - II' THEN 'South - II'
-                    WHEN 'SOUTH ZONE II' THEN 'South - II'
-                    WHEN 'NP' THEN 'Nepal'
-                    WHEN 'NEPAL' THEN 'Nepal'
-                    WHEN 'NEPAL ZONE' THEN 'Nepal'
-                    ELSE COALESCE(NULLIF(TRIM(zm.name), ''), NULLIF(TRIM(zm.p_zone), ''), 'Unknown')
-                  END = p_zone
-               OR UPPER(TRIM(COALESCE(zm.name, zm.p_zone, rm.zone_code, tm_bzirk.p_zone, tm_plant.p_zone, rm_pfx.zone_code, ''))) = UPPER(TRIM(p_zone)))
+               OR zm.name = p_zone OR zm.p_zone = p_zone
+               OR UPPER(TRIM(zm.name)) = UPPER(TRIM(p_zone)) OR UPPER(TRIM(zm.p_zone)) = UPPER(TRIM(p_zone)))
     ),
     totals AS (
         SELECT SUM(invoice_value) AS grand_total FROM filtered_data
@@ -1614,27 +1363,30 @@ BEGIN
     FROM filtered_data
     GROUP BY title
     ORDER BY valCr DESC;
-END$$
-DELIMITER ;
+END $$
 
------------------ sp_get_sales_by_account_category store procedure end ----------------------------------------------------------
-
------------------ sp_get_non_billed_accounts_pct store procedure start ----------------------------------------------------------
-DELIMITER $$
-
+-- ------------------------------------------------------------------------------
+-- 7. sp_get_non_billed_accounts_pct
+-- ------------------------------------------------------------------------------
 DROP PROCEDURE IF EXISTS sp_get_non_billed_accounts_pct $$
 CREATE PROCEDURE `sp_get_non_billed_accounts_pct`(IN p_zone VARCHAR(50))
 BEGIN
     DECLARE v_act_year INT;
     DECLARE v_act_month INT;
 
-    /* Find active month of the dataset */
-    SELECT YEAR(MAX(invoice_date)), MONTH(MAX(invoice_date)) INTO v_act_year, v_act_month
+    /* Detect active uncancelled month */
+    SELECT YEAR(MAX(s.invoice_date)), MONTH(MAX(s.invoice_date)) INTO v_act_year, v_act_month
     FROM (
-        SELECT invoice_date FROM `zpvf_sd_currentsales_01_tr`
+        SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_currentsales_01_tr`
         UNION ALL
-        SELECT invoice_date FROM `zpvf_sd_saleshistory_01_tr`
-    ) s_all WHERE invoice_date IS NOT NULL;
+        SELECT invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_saleshistory_01_tr`
+    ) s
+    LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+      ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+    WHERE s.invoice_date IS NOT NULL 
+      AND (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+      AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+      AND can.invoice_number IS NULL;
 
     IF v_act_year IS NULL THEN
         SET v_act_year = YEAR(CURDATE());
@@ -1642,122 +1394,49 @@ BEGIN
     END IF;
 
     WITH current_month_sales AS (
-        SELECT DISTINCT dealer_code
+        SELECT DISTINCT s.dealer_code
         FROM (
-            SELECT dealer_code, invoice_date, indicator_cancel FROM `zpvf_sd_currentsales_01_tr`
+            SELECT dealer_code, invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_currentsales_01_tr`
             UNION ALL
-            SELECT dealer_code, invoice_date, indicator_cancel FROM `zpvf_sd_saleshistory_01_tr`
-        ) cs
-        WHERE (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1'))
-          AND YEAR(cs.invoice_date) = v_act_year
-          AND MONTH(cs.invoice_date) = v_act_month
+            SELECT dealer_code, invoice_date, indicator_cancel, distribution_channel, invoice_number, plant, fkart FROM `zpvf_sd_saleshistory_01_tr`
+        ) s
+        LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+          ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+        WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+          AND can.invoice_number IS NULL
+          AND YEAR(s.invoice_date) = v_act_year
+          AND MONTH(s.invoice_date) = v_act_month
     )
     SELECT 
         CASE 
             WHEN UPPER(TRIM(IFNULL(cm.BRAND_SHOP, ''))) = 'Y' THEN 'Brand Shops'
-            WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'DL' THEN 'Dealers'
-            WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'DB' THEN 'Distributors'
-            WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'FL' THEN 'Fleets'
+            WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'DL' OR UPPER(TRIM(IFNULL(cm.KTOKD, ''))) IN ('0001', 'DL') THEN 'Dealers'
+            WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'DB' OR UPPER(TRIM(IFNULL(cm.KTOKD, ''))) IN ('0002', 'DB') THEN 'Distributors'
+            WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'FL' OR UPPER(TRIM(IFNULL(cm.KTOKD, ''))) IN ('0003', 'FL') THEN 'Fleets'
             WHEN cm.CH_TYPE IS NOT NULL AND cm.CH_TYPE != '' THEN cm.CH_TYPE
             WHEN cm.KTOKD IS NOT NULL AND cm.KTOKD != '' THEN cm.KTOKD
             ELSE 'Other'
         END AS category_name,
         ROUND((COUNT(DISTINCT CASE WHEN cms.dealer_code IS NULL THEN cm.KUNNR END) / NULLIF(COUNT(DISTINCT cm.KUNNR), 0)) * 100, 2) AS nonBilledPct
     FROM `zivf_customermaster_01_md` cm
-    LEFT JOIN current_month_sales cms ON (cm.KUNNR = cms.dealer_code OR TRIM(LEADING '0' FROM cm.KUNNR) = TRIM(LEADING '0' FROM cms.dealer_code))
-    LEFT JOIN (
-        SELECT 
-            TRIM(bzirk) AS bzirk, 
-            MAX(NULLIF(TRIM(name), '')) AS name, 
-            MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-            MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-        FROM `zivf_territorymaster_01_tr`
-        WHERE bzirk IS NOT NULL AND TRIM(bzirk) != ''
-        GROUP BY TRIM(bzirk)
-    ) tm_bzirk ON (
-        (cm.bzirk IS NOT NULL AND TRIM(cm.bzirk) != '' AND cm.bzirk = tm_bzirk.bzirk)
-        OR (cm.vwerk IS NOT NULL AND (tm_bzirk.bzirk = CAST(cm.vwerk AS CHAR) OR tm_bzirk.bzirk = CONCAT('SE', cm.vwerk)))
-    )
-    LEFT JOIN (
-        SELECT 
-            werks, 
-            MAX(NULLIF(TRIM(name), '')) AS name, 
-            MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-            MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-        FROM `zivf_territorymaster_01_tr`
-        WHERE werks IS NOT NULL AND werks > 0
-        GROUP BY werks
-    ) tm_plant ON (cm.vwerk IS NOT NULL AND cm.vwerk = tm_plant.werks)
-    LEFT JOIN `zivf_regionmaster_md_01` rm ON (
-        TRIM(rm.region_code) = COALESCE(
-            NULLIF(TRIM(tm_bzirk.regio), ''), 
-            NULLIF(TRIM(tm_plant.regio), ''), 
-            NULLIF(TRIM(CAST(cm.regio AS CHAR)), '')
-        )
-    )
-    LEFT JOIN (
-        SELECT 
-            LEFT(TRIM(region_code), 2) AS prefix2,
-            MAX(NULLIF(TRIM(region_name), '')) AS region_name,
-            MAX(NULLIF(TRIM(zone_code), '')) AS zone_code
-        FROM `zivf_regionmaster_md_01`
-        WHERE region_code IS NOT NULL AND TRIM(region_code) != ''
-        GROUP BY LEFT(TRIM(region_code), 2)
-    ) rm_pfx ON (
-        LEFT(CAST(cm.vwerk AS CHAR), 2) = rm_pfx.prefix2
-    )
+    LEFT JOIN current_month_sales cms ON (cm.KUNNR = cms.dealer_code)
+    LEFT JOIN `zivf_territorymaster_01_tr` tm_plant ON (cm.vwerk = tm_plant.werks)
+    LEFT JOIN `zivf_territorymaster_01_tr` tm_bzirk ON (cm.bzirk = tm_bzirk.bzirk)
+    LEFT JOIN `zivf_regionmaster_md_01` rm ON (TRIM(rm.region_code) = COALESCE(NULLIF(TRIM(tm_plant.regio), ''), NULLIF(TRIM(tm_bzirk.regio), ''), NULLIF(TRIM(CAST(cm.regio AS CHAR)), '')))
     LEFT JOIN `zivf_zonemaster_01_tr` zm ON (
-        TRIM(zm.p_zone) = COALESCE(
-            NULLIF(TRIM(rm.zone_code), ''),
-            NULLIF(TRIM(tm_bzirk.p_zone), ''),
-            NULLIF(TRIM(tm_plant.p_zone), ''),
-            NULLIF(TRIM(rm_pfx.zone_code), '')
-        )
-        OR TRIM(zm.name) = COALESCE(
-            NULLIF(TRIM(rm.zone_code), ''),
-            NULLIF(TRIM(tm_bzirk.p_zone), ''),
-            NULLIF(TRIM(tm_plant.p_zone), ''),
-            NULLIF(TRIM(rm_pfx.zone_code), '')
-        )
+        zm.p_zone = COALESCE(NULLIF(TRIM(tm_plant.p_zone), ''), NULLIF(TRIM(tm_bzirk.p_zone), ''), NULLIF(TRIM(rm.zone_code), ''))
     )
-    WHERE (p_zone IS NULL OR p_zone = '' OR p_zone = 'null' OR p_zone = 'All' 
-           OR CASE UPPER(TRIM(COALESCE(zm.name, zm.p_zone, rm.zone_code, tm_bzirk.p_zone, tm_plant.p_zone, rm_pfx.zone_code, 'Unknown')))
-                WHEN 'EZ' THEN 'East'
-                WHEN 'EAST' THEN 'East'
-                WHEN 'EAST ZONE' THEN 'East'
-                WHEN 'NZ' THEN 'North'
-                WHEN 'NORTH' THEN 'North'
-                WHEN 'NORTH ZONE' THEN 'North'
-                WHEN 'CZ' THEN 'Central'
-                WHEN 'CENTRAL' THEN 'Central'
-                WHEN 'CENTRAL ZONE' THEN 'Central'
-                WHEN 'WZ' THEN 'West'
-                WHEN 'WEST' THEN 'West'
-                WHEN 'WEST ZONE' THEN 'West'
-                WHEN 'SZ' THEN 'South - I'
-                WHEN 'SOUTH' THEN 'South - I'
-                WHEN 'SOUTH - I' THEN 'South - I'
-                WHEN 'SOUTH ZONE - I' THEN 'South - I'
-                WHEN 'SOUTH ZONE I' THEN 'South - I'
-                WHEN 'TZ' THEN 'South - II'
-                WHEN 'SOUTH - II' THEN 'South - II'
-                WHEN 'SOUTH ZONE - II' THEN 'South - II'
-                WHEN 'SOUTH ZONE II' THEN 'South - II'
-                WHEN 'NP' THEN 'Nepal'
-                WHEN 'NEPAL' THEN 'Nepal'
-                WHEN 'NEPAL ZONE' THEN 'Nepal'
-                ELSE COALESCE(NULLIF(TRIM(zm.name), ''), NULLIF(TRIM(zm.p_zone), ''), 'Unknown')
-              END = p_zone
-           OR UPPER(TRIM(COALESCE(zm.name, zm.p_zone, rm.zone_code, tm_bzirk.p_zone, tm_plant.p_zone, rm_pfx.zone_code, ''))) = UPPER(TRIM(p_zone)))
+    WHERE (cm.klabc IS NULL OR UPPER(TRIM(cm.klabc)) <> 'X')
+      AND (p_zone IS NULL OR p_zone = '' OR p_zone = 'null' OR p_zone = 'All' 
+           OR zm.name = p_zone OR zm.p_zone = p_zone
+           OR UPPER(TRIM(zm.name)) = UPPER(TRIM(p_zone)) OR UPPER(TRIM(zm.p_zone)) = UPPER(TRIM(p_zone)))
     GROUP BY category_name;
-END$$
-DELIMITER ;
+END $$
 
------------------ sp_get_non_billed_accounts_pct store procedure end ----------------------------------------------------------
-
------------------ sp_get_overdue_pct store procedure start ----------------------------------------------------------
-DELIMITER $$
-
+-- ------------------------------------------------------------------------------
+-- 8. sp_get_overdue_pct
+-- ------------------------------------------------------------------------------
 DROP PROCEDURE IF EXISTS sp_get_overdue_pct $$
 CREATE PROCEDURE `sp_get_overdue_pct`(IN p_zone VARCHAR(50))
 BEGIN
@@ -1765,104 +1444,27 @@ BEGIN
 
     SELECT COUNT(*) INTO v_cnt
     FROM `zivf_customermaster_01_md` cm
-    LEFT JOIN (
-        SELECT 
-            TRIM(bzirk) AS bzirk, 
-            MAX(NULLIF(TRIM(name), '')) AS name, 
-            MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-            MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-        FROM `zivf_territorymaster_01_tr`
-        WHERE bzirk IS NOT NULL AND TRIM(bzirk) != ''
-        GROUP BY TRIM(bzirk)
-    ) tm_bzirk ON (
-        (cm.bzirk IS NOT NULL AND TRIM(cm.bzirk) != '' AND cm.bzirk = tm_bzirk.bzirk)
-        OR (cm.vwerk IS NOT NULL AND (tm_bzirk.bzirk = CAST(cm.vwerk AS CHAR) OR tm_bzirk.bzirk = CONCAT('SE', cm.vwerk)))
-    )
-    LEFT JOIN (
-        SELECT 
-            werks, 
-            MAX(NULLIF(TRIM(name), '')) AS name, 
-            MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-            MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-        FROM `zivf_territorymaster_01_tr`
-        WHERE werks IS NOT NULL AND werks > 0
-        GROUP BY werks
-    ) tm_plant ON (cm.vwerk IS NOT NULL AND cm.vwerk = tm_plant.werks)
-    LEFT JOIN `zivf_regionmaster_md_01` rm ON (
-        TRIM(rm.region_code) = COALESCE(
-            NULLIF(TRIM(tm_bzirk.regio), ''), 
-            NULLIF(TRIM(tm_plant.regio), ''), 
-            NULLIF(TRIM(CAST(cm.regio AS CHAR)), '')
-        )
-    )
-    LEFT JOIN (
-        SELECT 
-            LEFT(TRIM(region_code), 2) AS prefix2,
-            MAX(NULLIF(TRIM(region_name), '')) AS region_name,
-            MAX(NULLIF(TRIM(zone_code), '')) AS zone_code
-        FROM `zivf_regionmaster_md_01`
-        WHERE region_code IS NOT NULL AND TRIM(region_code) != ''
-        GROUP BY LEFT(TRIM(region_code), 2)
-    ) rm_pfx ON (
-        LEFT(CAST(cm.vwerk AS CHAR), 2) = rm_pfx.prefix2
-    )
+    LEFT JOIN `zivf_territorymaster_01_tr` tm_plant ON (cm.vwerk = tm_plant.werks)
+    LEFT JOIN `zivf_territorymaster_01_tr` tm_bzirk ON (cm.bzirk = tm_bzirk.bzirk)
+    LEFT JOIN `zivf_regionmaster_md_01` rm ON (TRIM(rm.region_code) = COALESCE(NULLIF(TRIM(tm_plant.regio), ''), NULLIF(TRIM(tm_bzirk.regio), ''), NULLIF(TRIM(CAST(cm.regio AS CHAR)), '')))
     LEFT JOIN `zivf_zonemaster_01_tr` zm ON (
-        TRIM(zm.p_zone) = COALESCE(
-            NULLIF(TRIM(rm.zone_code), ''),
-            NULLIF(TRIM(tm_bzirk.p_zone), ''),
-            NULLIF(TRIM(tm_plant.p_zone), ''),
-            NULLIF(TRIM(rm_pfx.zone_code), '')
-        )
-        OR TRIM(zm.name) = COALESCE(
-            NULLIF(TRIM(rm.zone_code), ''),
-            NULLIF(TRIM(tm_bzirk.p_zone), ''),
-            NULLIF(TRIM(tm_plant.p_zone), ''),
-            NULLIF(TRIM(rm_pfx.zone_code), '')
-        )
+        zm.p_zone = COALESCE(NULLIF(TRIM(tm_plant.p_zone), ''), NULLIF(TRIM(tm_bzirk.p_zone), ''), NULLIF(TRIM(rm.zone_code), ''))
     )
-    WHERE (p_zone IS NULL OR p_zone = '' OR p_zone = 'null' OR p_zone = 'All' 
-           OR CASE UPPER(TRIM(COALESCE(zm.name, zm.p_zone, rm.zone_code, tm_bzirk.p_zone, tm_plant.p_zone, rm_pfx.zone_code, 'Unknown')))
-                WHEN 'EZ' THEN 'East'
-                WHEN 'EAST' THEN 'East'
-                WHEN 'EAST ZONE' THEN 'East'
-                WHEN 'NZ' THEN 'North'
-                WHEN 'NORTH' THEN 'North'
-                WHEN 'NORTH ZONE' THEN 'North'
-                WHEN 'CZ' THEN 'Central'
-                WHEN 'CENTRAL' THEN 'Central'
-                WHEN 'CENTRAL ZONE' THEN 'Central'
-                WHEN 'WZ' THEN 'West'
-                WHEN 'WEST' THEN 'West'
-                WHEN 'WEST ZONE' THEN 'West'
-                WHEN 'SZ' THEN 'South - I'
-                WHEN 'SOUTH' THEN 'South - I'
-                WHEN 'SOUTH - I' THEN 'South - I'
-                WHEN 'SOUTH ZONE - I' THEN 'South - I'
-                WHEN 'SOUTH ZONE I' THEN 'South - I'
-                WHEN 'TZ' THEN 'South - II'
-                WHEN 'SOUTH - II' THEN 'South - II'
-                WHEN 'SOUTH ZONE - II' THEN 'South - II'
-                WHEN 'SOUTH ZONE II' THEN 'South - II'
-                WHEN 'NP' THEN 'Nepal'
-                WHEN 'NEPAL' THEN 'Nepal'
-                WHEN 'NEPAL ZONE' THEN 'Nepal'
-                ELSE COALESCE(NULLIF(TRIM(zm.name), ''), NULLIF(TRIM(zm.p_zone), ''), 'Unknown')
-              END = p_zone
-           OR UPPER(TRIM(COALESCE(zm.name, zm.p_zone, rm.zone_code, tm_bzirk.p_zone, tm_plant.p_zone, rm_pfx.zone_code, ''))) = UPPER(TRIM(p_zone)));
+    WHERE (cm.klabc IS NULL OR UPPER(TRIM(cm.klabc)) <> 'X')
+      AND (p_zone IS NULL OR p_zone = '' OR p_zone = 'null' OR p_zone = 'All' 
+           OR zm.name = p_zone OR zm.p_zone = p_zone
+           OR UPPER(TRIM(zm.name)) = UPPER(TRIM(p_zone)) OR UPPER(TRIM(zm.p_zone)) = UPPER(TRIM(p_zone)));
 
     SELECT '31 - 45' AS name, ROUND(((v_cnt * 7.5) % 45) + 20, 1) AS value, '#38BDF8' AS fill
     UNION ALL
     SELECT '46 - 90', ROUND(((v_cnt * 3.2) % 20) + 10, 1), '#A3E635'
     UNION ALL
     SELECT '90+', ROUND(((v_cnt * 5.1) % 15) + 5, 1), '#FBBF24';
-END$$
-DELIMITER ;
+END $$
 
------------------ sp_get_overdue_pct store procedure end ----------------------------------------------------------
-
------------------ sp_get_exposure_pct store procedure start ----------------------------------------------------------
-DELIMITER $$
-
+-- ------------------------------------------------------------------------------
+-- 9. sp_get_exposure_pct
+-- ------------------------------------------------------------------------------
 DROP PROCEDURE IF EXISTS sp_get_exposure_pct $$
 CREATE PROCEDURE `sp_get_exposure_pct`(IN p_zone VARCHAR(50))
 BEGIN
@@ -1870,99 +1472,25 @@ BEGIN
         SELECT 
             CASE 
                 WHEN UPPER(TRIM(IFNULL(cm.BRAND_SHOP, ''))) = 'Y' THEN 'Brand Shops'
-                WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'DL' THEN 'Dealers'
-                WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'DB' THEN 'Distributors'
-                WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'FL' THEN 'Fleets'
+                WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'DL' OR UPPER(TRIM(IFNULL(cm.KTOKD, ''))) IN ('0001', 'DL') THEN 'Dealers'
+                WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'DB' OR UPPER(TRIM(IFNULL(cm.KTOKD, ''))) IN ('0002', 'DB') THEN 'Distributors'
+                WHEN UPPER(TRIM(IFNULL(cm.CH_TYPE, ''))) = 'FL' OR UPPER(TRIM(IFNULL(cm.KTOKD, ''))) IN ('0003', 'FL') THEN 'Fleets'
                 WHEN cm.CH_TYPE IS NOT NULL AND cm.CH_TYPE != '' THEN cm.CH_TYPE
                 WHEN cm.KTOKD IS NOT NULL AND cm.KTOKD != '' THEN cm.KTOKD
                 ELSE 'Other'
             END AS name,
             COUNT(DISTINCT cm.KUNNR) AS cnt
         FROM `zivf_customermaster_01_md` cm
-        LEFT JOIN (
-            SELECT 
-                TRIM(bzirk) AS bzirk, 
-                MAX(NULLIF(TRIM(name), '')) AS name, 
-                MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-                MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-            FROM `zivf_territorymaster_01_tr`
-            WHERE bzirk IS NOT NULL AND TRIM(bzirk) != ''
-            GROUP BY TRIM(bzirk)
-        ) tm_bzirk ON (
-            (cm.bzirk IS NOT NULL AND TRIM(cm.bzirk) != '' AND cm.bzirk = tm_bzirk.bzirk)
-            OR (cm.vwerk IS NOT NULL AND (tm_bzirk.bzirk = CAST(cm.vwerk AS CHAR) OR tm_bzirk.bzirk = CONCAT('SE', cm.vwerk)))
-        )
-        LEFT JOIN (
-            SELECT 
-                werks, 
-                MAX(NULLIF(TRIM(name), '')) AS name, 
-                MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-                MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-            FROM `zivf_territorymaster_01_tr`
-            WHERE werks IS NOT NULL AND werks > 0
-            GROUP BY werks
-        ) tm_plant ON (cm.vwerk IS NOT NULL AND cm.vwerk = tm_plant.werks)
-        LEFT JOIN `zivf_regionmaster_md_01` rm ON (
-            TRIM(rm.region_code) = COALESCE(
-                NULLIF(TRIM(tm_bzirk.regio), ''), 
-                NULLIF(TRIM(tm_plant.regio), ''), 
-                NULLIF(TRIM(CAST(cm.regio AS CHAR)), '')
-            )
-        )
-        LEFT JOIN (
-            SELECT 
-                LEFT(TRIM(region_code), 2) AS prefix2,
-                MAX(NULLIF(TRIM(region_name), '')) AS region_name,
-                MAX(NULLIF(TRIM(zone_code), '')) AS zone_code
-            FROM `zivf_regionmaster_md_01`
-            WHERE region_code IS NOT NULL AND TRIM(region_code) != ''
-            GROUP BY LEFT(TRIM(region_code), 2)
-        ) rm_pfx ON (
-            LEFT(CAST(cm.vwerk AS CHAR), 2) = rm_pfx.prefix2
-        )
+        LEFT JOIN `zivf_territorymaster_01_tr` tm_plant ON (cm.vwerk = tm_plant.werks)
+        LEFT JOIN `zivf_territorymaster_01_tr` tm_bzirk ON (cm.bzirk = tm_bzirk.bzirk)
+        LEFT JOIN `zivf_regionmaster_md_01` rm ON (TRIM(rm.region_code) = COALESCE(NULLIF(TRIM(tm_plant.regio), ''), NULLIF(TRIM(tm_bzirk.regio), ''), NULLIF(TRIM(CAST(cm.regio AS CHAR)), '')))
         LEFT JOIN `zivf_zonemaster_01_tr` zm ON (
-            TRIM(zm.p_zone) = COALESCE(
-                NULLIF(TRIM(rm.zone_code), ''),
-                NULLIF(TRIM(tm_bzirk.p_zone), ''),
-                NULLIF(TRIM(tm_plant.p_zone), ''),
-                NULLIF(TRIM(rm_pfx.zone_code), '')
-            )
-            OR TRIM(zm.name) = COALESCE(
-                NULLIF(TRIM(rm.zone_code), ''),
-                NULLIF(TRIM(tm_bzirk.p_zone), ''),
-                NULLIF(TRIM(tm_plant.p_zone), ''),
-                NULLIF(TRIM(rm_pfx.zone_code), '')
-            )
+            zm.p_zone = COALESCE(NULLIF(TRIM(tm_plant.p_zone), ''), NULLIF(TRIM(tm_bzirk.p_zone), ''), NULLIF(TRIM(rm.zone_code), ''))
         )
-        WHERE (p_zone IS NULL OR p_zone = '' OR p_zone = 'null' OR p_zone = 'All' 
-               OR CASE UPPER(TRIM(COALESCE(zm.name, zm.p_zone, rm.zone_code, tm_bzirk.p_zone, tm_plant.p_zone, rm_pfx.zone_code, 'Unknown')))
-                    WHEN 'EZ' THEN 'East'
-                    WHEN 'EAST' THEN 'East'
-                    WHEN 'EAST ZONE' THEN 'East'
-                    WHEN 'NZ' THEN 'North'
-                    WHEN 'NORTH' THEN 'North'
-                    WHEN 'NORTH ZONE' THEN 'North'
-                    WHEN 'CZ' THEN 'Central'
-                    WHEN 'CENTRAL' THEN 'Central'
-                    WHEN 'CENTRAL ZONE' THEN 'Central'
-                    WHEN 'WZ' THEN 'West'
-                    WHEN 'WEST' THEN 'West'
-                    WHEN 'WEST ZONE' THEN 'West'
-                    WHEN 'SZ' THEN 'South - I'
-                    WHEN 'SOUTH' THEN 'South - I'
-                    WHEN 'SOUTH - I' THEN 'South - I'
-                    WHEN 'SOUTH ZONE - I' THEN 'South - I'
-                    WHEN 'SOUTH ZONE I' THEN 'South - I'
-                    WHEN 'TZ' THEN 'South - II'
-                    WHEN 'SOUTH - II' THEN 'South - II'
-                    WHEN 'SOUTH ZONE - II' THEN 'South - II'
-                    WHEN 'SOUTH ZONE II' THEN 'South - II'
-                    WHEN 'NP' THEN 'Nepal'
-                    WHEN 'NEPAL' THEN 'Nepal'
-                    WHEN 'NEPAL ZONE' THEN 'Nepal'
-                    ELSE COALESCE(NULLIF(TRIM(zm.name), ''), NULLIF(TRIM(zm.p_zone), ''), 'Unknown')
-                  END = p_zone
-               OR UPPER(TRIM(COALESCE(zm.name, zm.p_zone, rm.zone_code, tm_bzirk.p_zone, tm_plant.p_zone, rm_pfx.zone_code, ''))) = UPPER(TRIM(p_zone)))
+        WHERE (cm.klabc IS NULL OR UPPER(TRIM(cm.klabc)) <> 'X')
+          AND (p_zone IS NULL OR p_zone = '' OR p_zone = 'null' OR p_zone = 'All' 
+               OR zm.name = p_zone OR zm.p_zone = p_zone
+               OR UPPER(TRIM(zm.name)) = UPPER(TRIM(p_zone)) OR UPPER(TRIM(zm.p_zone)) = UPPER(TRIM(p_zone)))
         GROUP BY name
     ),
     tot AS (
@@ -1973,120 +1501,65 @@ BEGIN
         ROUND((c.cnt / NULLIF((SELECT total_cnt FROM tot), 0)) * 100, 1) AS value
     FROM cat_counts c
     ORDER BY value DESC;
-END$$
-DELIMITER ;
+END $$
 
------------------ sp_get_exposure_pct store procedure end ----------------------------------------------------------
-
------------------ sp_get_category_sales store procedure start ----------------------------------------------------------
-DELIMITER $$
-
+-- ------------------------------------------------------------------------------
+-- 10. sp_get_category_sales
+-- ------------------------------------------------------------------------------
 DROP PROCEDURE IF EXISTS sp_get_category_sales $$
 CREATE PROCEDURE `sp_get_category_sales`(IN p_zone VARCHAR(50))
 BEGIN
     SELECT 
         COALESCE(cat.CAT_DESC, sku.TYRE_TYPE, sku.CAT_CODE, 'Other Categories') AS category, 
-        ROUND(SUM(cs.invoice_value) / 10000000, 2)                               AS total_sales_cr
+        ROUND(SUM(COALESCE(cs.ndp_value, cs.taxable_value, cs.invoice_value, 0)) / 10000000, 2) AS total_sales_cr
     FROM (
-        SELECT dealer_code, plant, SKU, invoice_value, indicator_cancel FROM `zpvf_sd_currentsales_01_tr`
+        SELECT s.dealer_code, s.plant, s.SKU, s.invoice_value, s.taxable_value, s.ndp_value, s.indicator_cancel, s.distribution_channel 
+        FROM `zpvf_sd_currentsales_01_tr` s
+        LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+          ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+        WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+          AND can.invoice_number IS NULL
         UNION ALL
-        SELECT dealer_code, plant, SKU, invoice_value, indicator_cancel FROM `zpvf_sd_saleshistory_01_tr`
+        SELECT s.dealer_code, s.plant, s.SKU, s.invoice_value, s.taxable_value, s.ndp_value, s.indicator_cancel, s.distribution_channel 
+        FROM `zpvf_sd_saleshistory_01_tr` s
+        LEFT JOIN `zpvf_sd_cancelledsalesinvoice_01_tr` can
+          ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+        WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+          AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+          AND can.invoice_number IS NULL
     ) cs
-    LEFT JOIN `zivr_skumaster_01_tr` sku ON (cs.SKU = sku.MATNR OR TRIM(LEADING '0' FROM cs.SKU) = TRIM(LEADING '0' FROM sku.MATNR))
-    LEFT JOIN `zivf_categorymaster_01_tr` cat ON sku.CAT_CODE = cat.CAT_CODE
-    LEFT JOIN `zivf_customermaster_01_md` cust ON (cs.dealer_code = cust.KUNNR OR TRIM(LEADING '0' FROM cs.dealer_code) = TRIM(LEADING '0' FROM cust.KUNNR))
-    LEFT JOIN (
-        SELECT 
-            TRIM(bzirk) AS bzirk, 
-            MAX(NULLIF(TRIM(name), '')) AS name, 
-            MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-            MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-        FROM `zivf_territorymaster_01_tr`
-        WHERE bzirk IS NOT NULL AND TRIM(bzirk) != ''
-        GROUP BY TRIM(bzirk)
-    ) tm_bzirk ON (
-        (cust.bzirk IS NOT NULL AND TRIM(cust.bzirk) != '' AND cust.bzirk = tm_bzirk.bzirk)
-        OR (cs.plant IS NOT NULL AND (tm_bzirk.bzirk = CAST(cs.plant AS CHAR) OR tm_bzirk.bzirk = CONCAT('SE', cs.plant)))
-    )
-    LEFT JOIN (
-        SELECT 
-            werks, 
-            MAX(NULLIF(TRIM(name), '')) AS name, 
-            MAX(NULLIF(TRIM(CAST(regio AS CHAR)), '')) AS regio, 
-            MAX(NULLIF(TRIM(p_zone), '')) AS p_zone
-        FROM `zivf_territorymaster_01_tr`
-        WHERE werks IS NOT NULL AND werks > 0
-        GROUP BY werks
-    ) tm_plant ON (cs.plant IS NOT NULL AND cs.plant = tm_plant.werks)
-    LEFT JOIN `zivf_regionmaster_md_01` rm ON (
-        TRIM(rm.region_code) = COALESCE(
-            NULLIF(TRIM(tm_bzirk.regio), ''), 
-            NULLIF(TRIM(tm_plant.regio), ''), 
-            NULLIF(TRIM(CAST(cust.regio AS CHAR)), '')
-        )
-    )
-    LEFT JOIN (
-        SELECT 
-            LEFT(TRIM(region_code), 2) AS prefix2,
-            MAX(NULLIF(TRIM(region_name), '')) AS region_name,
-            MAX(NULLIF(TRIM(zone_code), '')) AS zone_code
-        FROM `zivf_regionmaster_md_01`
-        WHERE region_code IS NOT NULL AND TRIM(region_code) != ''
-        GROUP BY LEFT(TRIM(region_code), 2)
-    ) rm_pfx ON (
-        LEFT(CAST(COALESCE(cs.plant, cust.vwerk) AS CHAR), 2) = rm_pfx.prefix2
-    )
-    LEFT JOIN `zivf_zonemaster_01_tr` zm ON (
-        TRIM(zm.p_zone) = COALESCE(
-            NULLIF(TRIM(rm.zone_code), ''),
-            NULLIF(TRIM(tm_bzirk.p_zone), ''),
-            NULLIF(TRIM(tm_plant.p_zone), ''),
-            NULLIF(TRIM(rm_pfx.zone_code), '')
-        )
-        OR TRIM(zm.name) = COALESCE(
-            NULLIF(TRIM(rm.zone_code), ''),
-            NULLIF(TRIM(tm_bzirk.p_zone), ''),
-            NULLIF(TRIM(tm_plant.p_zone), ''),
-            NULLIF(TRIM(rm_pfx.zone_code), '')
-        )
-    )
-    WHERE (cs.indicator_cancel IS NULL OR cs.indicator_cancel NOT IN ('X', 'Y', '1'))
+    LEFT JOIN `zivr_skumaster_01_tr` sku ON (cs.SKU = sku.MATNR)
+    LEFT JOIN `zivf_categorymaster_01_tr` cat ON (sku.CAT_CODE = cat.CAT_CODE OR cs.SKU = cat.MATNR)
+    LEFT JOIN `zivf_customermaster_01_md` cust ON (cs.dealer_code = cust.kunnr)
+    LEFT JOIN `zivf_territorymaster_01_tr` tm_plant ON (cs.plant = tm_plant.werks)
+    LEFT JOIN `zivf_territorymaster_01_tr` tm_bzirk ON (cust.bzirk = tm_bzirk.bzirk)
+    LEFT JOIN `zivf_regionmaster_md_01` rm ON (rm.region_code = COALESCE(NULLIF(TRIM(tm_plant.regio), ''), NULLIF(TRIM(tm_bzirk.regio), ''), NULLIF(TRIM(CAST(cust.regio AS CHAR)), '')))
+    LEFT JOIN `zivf_zonemaster_01_tr` zm ON (zm.p_zone = COALESCE(
+        NULLIF(TRIM(tm_plant.p_zone), ''),
+        NULLIF(TRIM(tm_bzirk.p_zone), ''),
+        NULLIF(TRIM(rm.zone_code), ''),
+        CASE 
+            WHEN LEFT(CAST(cs.plant AS CHAR), 2) IN ('36', '71', '72') THEN 'CZ'
+            WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '3' THEN 'NZ'
+            WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '1' THEN 'EZ'
+            WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '8' THEN 'NP'
+            WHEN LEFT(CAST(cs.plant AS CHAR), 2) IN ('51', '52') THEN 'TZ'
+            WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '5' THEN 'SZ'
+            WHEN LEFT(CAST(cs.plant AS CHAR), 1) = '7' THEN 'WZ'
+            ELSE 'CZ'
+        END
+    ))
+    WHERE (cust.klabc IS NULL OR UPPER(TRIM(cust.klabc)) <> 'X')
       AND (p_zone IS NULL OR p_zone = '' OR p_zone = 'null' OR p_zone = 'All' 
-           OR CASE UPPER(TRIM(COALESCE(zm.name, zm.p_zone, rm.zone_code, tm_bzirk.p_zone, tm_plant.p_zone, rm_pfx.zone_code, 'Unknown')))
-                WHEN 'EZ' THEN 'East'
-                WHEN 'EAST' THEN 'East'
-                WHEN 'EAST ZONE' THEN 'East'
-                WHEN 'NZ' THEN 'North'
-                WHEN 'NORTH' THEN 'North'
-                WHEN 'NORTH ZONE' THEN 'North'
-                WHEN 'CZ' THEN 'Central'
-                WHEN 'CENTRAL' THEN 'Central'
-                WHEN 'CENTRAL ZONE' THEN 'Central'
-                WHEN 'WZ' THEN 'West'
-                WHEN 'WEST' THEN 'West'
-                WHEN 'WEST ZONE' THEN 'West'
-                WHEN 'SZ' THEN 'South - I'
-                WHEN 'SOUTH' THEN 'South - I'
-                WHEN 'SOUTH - I' THEN 'South - I'
-                WHEN 'SOUTH ZONE - I' THEN 'South - I'
-                WHEN 'SOUTH ZONE I' THEN 'South - I'
-                WHEN 'TZ' THEN 'South - II'
-                WHEN 'SOUTH - II' THEN 'South - II'
-                WHEN 'SOUTH ZONE - II' THEN 'South - II'
-                WHEN 'SOUTH ZONE II' THEN 'South - II'
-                WHEN 'NP' THEN 'Nepal'
-                WHEN 'NEPAL' THEN 'Nepal'
-                WHEN 'NEPAL ZONE' THEN 'Nepal'
-                ELSE COALESCE(NULLIF(TRIM(zm.name), ''), NULLIF(TRIM(zm.p_zone), ''), 'Unknown')
-              END = p_zone
-           OR UPPER(TRIM(COALESCE(zm.name, zm.p_zone, rm.zone_code, tm_bzirk.p_zone, tm_plant.p_zone, rm_pfx.zone_code, ''))) = UPPER(TRIM(p_zone)))
+           OR zm.name = p_zone OR zm.p_zone = p_zone
+           OR UPPER(TRIM(zm.name)) = UPPER(TRIM(p_zone)) OR UPPER(TRIM(zm.p_zone)) = UPPER(TRIM(p_zone)))
     GROUP BY category
     HAVING total_sales_cr > 0
     ORDER BY total_sales_cr DESC;
-END$$
-DELIMITER ;
+END $$
 
------------------ sp_get_category_sales store procedure end ----------------------------------------------------------
+DELIMITER ;
 """
 
 def run_stored_procedures(db_name):

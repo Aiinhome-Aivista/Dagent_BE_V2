@@ -669,14 +669,18 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
     fact_from = None
     fact_cols = {}
 
+    canc_tbl = find_tbl(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled_sales_invoice", "cancelled"])
+    can_filter = f"LEFT JOIN `{user_db}`.`{canc_tbl}` can ON s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10')" if canc_tbl else ""
+    can_null = "AND can.invoice_number IS NULL" if canc_tbl else ""
+
     if curr_sales_tbl and hist_sales_tbl:
-        fact_from = f"(SELECT * FROM `{user_db}`.`{curr_sales_tbl}` UNION ALL SELECT * FROM `{user_db}`.`{hist_sales_tbl}`) s"
+        fact_from = f"(SELECT s.* FROM (SELECT * FROM `{user_db}`.`{curr_sales_tbl}` WHERE (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1')) AND (distribution_channel = 10 OR distribution_channel = '10') UNION ALL SELECT * FROM `{user_db}`.`{hist_sales_tbl}` WHERE (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1')) AND (distribution_channel = 10 OR distribution_channel = '10')) s {can_filter} WHERE 1=1 {can_null}) s"
         fact_cols = table_columns.get(curr_sales_tbl) or table_columns.get(hist_sales_tbl) or {}
     elif curr_sales_tbl:
-        fact_from = f"`{user_db}`.`{curr_sales_tbl}` s"
+        fact_from = f"(SELECT s.* FROM `{user_db}`.`{curr_sales_tbl}` s {can_filter} WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1')) AND (s.distribution_channel = 10 OR s.distribution_channel = '10') {can_null}) s"
         fact_cols = table_columns.get(curr_sales_tbl, {})
     elif hist_sales_tbl:
-        fact_from = f"`{user_db}`.`{hist_sales_tbl}` s"
+        fact_from = f"(SELECT s.* FROM `{user_db}`.`{hist_sales_tbl}` s {can_filter} WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1')) AND (s.distribution_channel = 10 OR s.distribution_channel = '10') {can_null}) s"
         fact_cols = table_columns.get(hist_sales_tbl, {})
     elif sales_data_tbl:
         fact_from = f"`{user_db}`.`{sales_data_tbl}` s"
@@ -712,11 +716,16 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
             joins.append(f"LEFT JOIN `{user_db}`.`{cust_tbl}` cm ON s.`{s_cust}` = cm.`{c_cust}`")
 
     # 2. Territory Master `tm`
-    if terr_tbl and cust_tbl:
-        c_terr = check_match(table_columns[cust_tbl], ["bzirk", "territory", "territory_code"])
-        t_terr = check_match(table_columns[terr_tbl], ["bzirk", "territory_code", "territory"])
-        if c_terr and t_terr:
-            joins.append(f"LEFT JOIN `{user_db}`.`{terr_tbl}` tm ON cm.`{c_terr}` = tm.`{t_terr}`")
+    if terr_tbl:
+        s_plant = check_match(fact_cols, ["plant", "werks", "vwerk"])
+        t_plant = check_match(table_columns[terr_tbl], ["werks", "plant"])
+        if s_plant and t_plant:
+            joins.append(f"LEFT JOIN `{user_db}`.`{terr_tbl}` tm ON s.`{s_plant}` = tm.`{t_plant}`")
+        elif cust_tbl:
+            c_terr = check_match(table_columns[cust_tbl], ["bzirk", "territory", "territory_code"])
+            t_terr = check_match(table_columns[terr_tbl], ["bzirk", "territory_code", "territory"])
+            if c_terr and t_terr:
+                joins.append(f"LEFT JOIN `{user_db}`.`{terr_tbl}` tm ON cm.`{c_terr}` = tm.`{t_terr}`")
 
     # 3. Region Master `rm`
     if reg_tbl:
@@ -733,7 +742,12 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
 
     # 4. Zone Master `zm`
     if zone_tbl:
-        if reg_tbl and any("rm" in j for j in joins):
+        if terr_tbl and any("tm" in j for j in joins):
+            t_zone = check_match(table_columns[terr_tbl], ["p_zone", "zone_code", "zone"])
+            z_zone = check_match(table_columns[zone_tbl], ["p_zone", "zone_code", "zone"])
+            if t_zone and z_zone:
+                joins.append(f"LEFT JOIN `{user_db}`.`{zone_tbl}` zm ON tm.`{t_zone}` = zm.`{z_zone}`")
+        elif reg_tbl and any("rm" in j for j in joins):
             r_zone = check_match(table_columns[reg_tbl], ["zone_code", "zone", "p_zone"])
             z_zone = check_match(table_columns[zone_tbl], ["p_zone", "zone_code", "zone"])
             if r_zone and z_zone:
@@ -743,11 +757,6 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
             z_zone = check_match(table_columns[zone_tbl], ["p_zone", "zone_code", "zone"])
             if c_zone and z_zone:
                 joins.append(f"LEFT JOIN `{user_db}`.`{zone_tbl}` zm ON cm.`{c_zone}` = zm.`{z_zone}`")
-        elif terr_tbl and any("tm" in j for j in joins):
-            t_zone = check_match(table_columns[terr_tbl], ["p_zone", "zone_code", "zone"])
-            z_zone = check_match(table_columns[zone_tbl], ["p_zone", "zone_code", "zone"])
-            if t_zone and z_zone:
-                joins.append(f"LEFT JOIN `{user_db}`.`{zone_tbl}` zm ON tm.`{t_zone}` = zm.`{z_zone}`")
 
     # 5. SKU Master `sm`
     if sku_tbl:
@@ -845,7 +854,7 @@ def tyre_sales_data_controller(get_db_connection):
             return any(f and str(f).strip().lower() != "all" for f in filters)
 
         required_metrics = {
-            "vehicle_type": ["tyre_type_name", "tyre_type", "vehicle_type", "maktx", "tyre_type_description", "tyre_type_desc", "category_name", "category"],
+            "vehicle_type": ["cat_desc", "category_name", "category", "tyre_type_description", "tyre_type_desc", "tyre_type_name", "vehicle_type", "tyre_type", "maktx"],
             "invoice_value": ["invoice_value", "ndp_value", "taxable_value", "revenue", "Invoice_Value_INR"]
         }
         optional_dims = {}
@@ -1158,47 +1167,98 @@ def dashboard_filters_controller(get_db_connection):
             cursor.execute("SHOW TABLES")
             tables = [list(r.values())[0] for r in cursor.fetchall()]
             
-            # Find categories across all tables (SAP CategoryMaster has CAT_DESC, SKUMaster has CATG/PRD_CAT)
+            # 1. Find categories across all tables with { value: code, label: desc }
             for tbl in tables:
-                t_name = f"`{user_db}`.`{tbl}`"
-                cat = get_actual_column_name(cursor, t_name, ["cat_desc", "catg", "prd_cat", "product_category", "category", "product_type"])
-                if cat:
-                    try:
-                        cursor.execute(f"SELECT DISTINCT {cat} as val FROM {t_name} WHERE {cat} IS NOT NULL AND {cat} != '' ORDER BY val ASC")
-                        res = [r["val"] for r in cursor.fetchall() if r["val"]]
-                        if res:
-                            filters_data["categories"] = res
-                            break
-                    except Exception as e:
-                        print(f"Error fetching categories from {t_name}: {e}")
+                tbl_low = tbl.lower()
+                if "category" in tbl_low:
+                    t_name = f"`{user_db}`.`{tbl}`"
+                    code_col = get_actual_column_name(cursor, t_name, ["cat_code", "category_code", "code"])
+                    desc_col = get_actual_column_name(cursor, t_name, ["cat_desc", "category_name", "category"])
+                    if code_col and desc_col:
+                        try:
+                            cursor.execute(f"SELECT DISTINCT {code_col} as val_code, {desc_col} as val_label FROM {t_name} WHERE {desc_col} IS NOT NULL AND {desc_col} != '' ORDER BY val_label ASC")
+                            res = [{"value": r["val_code"], "label": r["val_label"]} for r in cursor.fetchall() if r.get("val_label")]
+                            if res:
+                                filters_data["categories"] = res
+                                break
+                        except Exception as e:
+                            print(f"Error fetching categories from {t_name}: {e}")
 
-            # Find constructions across all tables (SAP SKUMaster has CONSTUCTION)
+            if not filters_data["categories"]:
+                for tbl in tables:
+                    t_name = f"`{user_db}`.`{tbl}`"
+                    cat = get_actual_column_name(cursor, t_name, ["cat_desc", "catg", "prd_cat", "product_category", "category", "product_type"])
+                    if cat:
+                        try:
+                            cursor.execute(f"SELECT DISTINCT {cat} as val FROM {t_name} WHERE {cat} IS NOT NULL AND {cat} != '' ORDER BY val ASC")
+                            res = [{"value": r["val"], "label": r["val"]} for r in cursor.fetchall() if r["val"]]
+                            if res:
+                                filters_data["categories"] = res
+                                break
+                        except Exception as e:
+                            print(f"Error fetching categories from {t_name}: {e}")
+
+            # 2. Find constructions across all tables with { value: code, label: desc }
+            construction_labels = {
+                1: "Bias",
+                2: "Radial",
+                3: "Tubeless Bias",
+                4: "Tubeless Radial",
+                5: "Radial (Tube Type)",
+                6: "Radial (Tubeless)",
+                7: "Solid / OTR"
+            }
             for tbl in tables:
                 t_name = f"`{user_db}`.`{tbl}`"
                 const = get_actual_column_name(cursor, t_name, ["constuction", "construction_type", "construction"])
                 if const:
                     try:
                         cursor.execute(f"SELECT DISTINCT {const} as val FROM {t_name} WHERE {const} IS NOT NULL AND {const} != '' ORDER BY val ASC")
-                        res = [r["val"] for r in cursor.fetchall() if r["val"]]
+                        res = []
+                        for r in cursor.fetchall():
+                            raw_val = r["val"]
+                            try:
+                                val_int = int(raw_val)
+                                lbl = construction_labels.get(val_int, f"Type {raw_val}")
+                            except (ValueError, TypeError):
+                                lbl = str(raw_val)
+                            res.append({"value": raw_val, "label": lbl})
                         if res:
                             filters_data["constructions"] = res
                             break
                     except Exception as e:
                         print(f"Error fetching constructions from {t_name}: {e}")
 
-            # Find tyreTypes across all tables (SAP SKUMaster has TYRE_TYPE)
+            # 3. Find tyreTypes across all tables with { value: code, label: desc }
             for tbl in tables:
-                t_name = f"`{user_db}`.`{tbl}`"
-                tyre = get_actual_column_name(cursor, t_name, ["tyre_type", "vehicle_type", "tyre_type_name"])
-                if tyre:
-                    try:
-                        cursor.execute(f"SELECT DISTINCT {tyre} as val FROM {t_name} WHERE {tyre} IS NOT NULL AND {tyre} != '' ORDER BY val ASC")
-                        res = [r["val"] for r in cursor.fetchall() if r["val"]]
-                        if res:
-                            filters_data["tyreTypes"] = res
-                            break
-                    except Exception as e:
-                        print(f"Error fetching tyreTypes from {t_name}: {e}")
+                tbl_low = tbl.lower()
+                if "category" in tbl_low:
+                    t_name = f"`{user_db}`.`{tbl}`"
+                    code_col = get_actual_column_name(cursor, t_name, ["cat_code", "category_code", "code"])
+                    desc_col = get_actual_column_name(cursor, t_name, ["cat_desc", "category_name", "category"])
+                    if desc_col:
+                        try:
+                            cursor.execute(f"SELECT DISTINCT {code_col or desc_col} as val_code, {desc_col} as val_label FROM {t_name} WHERE {desc_col} IS NOT NULL AND {desc_col} != '' ORDER BY val_label ASC")
+                            res = [{"value": r["val_code"], "label": r["val_label"]} for r in cursor.fetchall() if r.get("val_label")]
+                            if res:
+                                filters_data["tyreTypes"] = res
+                                break
+                        except Exception as e:
+                            print(f"Error fetching tyreTypes from categorymaster: {e}")
+
+            if not filters_data["tyreTypes"]:
+                for tbl in tables:
+                    t_name = f"`{user_db}`.`{tbl}`"
+                    tyre = get_actual_column_name(cursor, t_name, ["tyre_type", "vehicle_type", "tyre_type_name"])
+                    if tyre:
+                        try:
+                            cursor.execute(f"SELECT DISTINCT {tyre} as val FROM {t_name} WHERE {tyre} IS NOT NULL AND {tyre} != '' ORDER BY val ASC")
+                            res = [{"value": r["val"], "label": r["val"]} for r in cursor.fetchall() if r["val"]]
+                            if res:
+                                filters_data["tyreTypes"] = res
+                                break
+                        except Exception as e:
+                            print(f"Error fetching tyreTypes from {t_name}: {e}")
 
             # Find years and months across actual sales tables (both CurrentSales and SalesHistory)
             all_years = set()
@@ -1302,11 +1362,11 @@ def sales_by_zone_data_controller(get_db_connection):
         optional_dims = {}
         if has_valid_filters(selected_years) or has_valid_filters(selected_months):
             optional_dims["invoice_date"] = ["invoice_date", "date", "billing__doc_date"]
-        if product_type and product_type.lower() != 'all':
-            optional_dims["customer_category"] = ["cat_desc", "category", "product_category", "catg", "prd_cat"]
-        if vehicle_type and vehicle_type.lower() != 'all':
-            optional_dims["vehicle_type"] = ["tyre_type", "vehicle_type", "tyre_type_name", "maktx"]
-        if construction_type and construction_type.lower() != 'all':
+        if product_type and str(product_type).lower() != 'all':
+            optional_dims["customer_category"] = ["cat_code", "cat_desc", "category", "product_category", "catg", "prd_cat"]
+        if vehicle_type and str(vehicle_type).lower() != 'all':
+            optional_dims["vehicle_type"] = ["cat_code", "cat_desc", "tyre_type", "vehicle_type", "tyre_type_name", "maktx"]
+        if construction_type and str(construction_type).lower() != 'all':
             optional_dims["construction_type"] = ["constuction", "CONSTRUCTION", "construction_type", "construction"]
         from_clause, user_db, cols = get_query_context_for_session(cursor, session_id, required_metrics, optional_dims)
 
@@ -1331,19 +1391,29 @@ def sales_by_zone_data_controller(get_db_connection):
         actual_tyre = cols.get("vehicle_type")
 
         where_clauses = [f"{actual_zone} IS NOT NULL", f"{actual_zone} <> ''"]
+        if "cm" in from_clause:
+            where_clauses.append("(cm.`klabc` IS NULL OR UPPER(TRIM(cm.`klabc`)) <> 'X')")
         params = []
 
-        if product_type and product_type.lower() != 'all' and actual_cat:
-            where_clauses.append(f"{actual_cat} = %s")
-            params.append(product_type)
+        if product_type and str(product_type).lower() != 'all' and actual_cat:
+            if "catm" in from_clause:
+                where_clauses.append(f"({actual_cat} = %s OR catm.`cat_desc` = %s OR catm.`cat_code` = %s)")
+                params.extend([product_type, product_type, product_type])
+            else:
+                where_clauses.append(f"{actual_cat} = %s")
+                params.append(product_type)
                 
-        if construction_type and construction_type.lower() != 'all' and actual_const:
+        if construction_type and str(construction_type).lower() != 'all' and actual_const:
             where_clauses.append(f"{actual_const} = %s")
             params.append(construction_type)
 
-        if vehicle_type and vehicle_type.lower() != 'all' and actual_tyre:
-            where_clauses.append(f"{actual_tyre} = %s")
-            params.append(vehicle_type)
+        if vehicle_type and str(vehicle_type).lower() != 'all' and actual_tyre:
+            if "catm" in from_clause:
+                where_clauses.append(f"({actual_tyre} = %s OR catm.`cat_desc` = %s OR catm.`cat_code` = %s)")
+                params.extend([vehicle_type, vehicle_type, vehicle_type])
+            else:
+                where_clauses.append(f"{actual_tyre} = %s")
+                params.append(vehicle_type)
 
         # Years filter
         if actual_invoice_date and selected_years:

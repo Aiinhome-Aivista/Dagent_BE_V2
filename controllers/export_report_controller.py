@@ -950,20 +950,36 @@ def export_domestic_sales_report_controller(get_db_connection):
                 max_dt_val = None
                 for cand in sales_candidates:
                     try:
-                        cursor.execute(f"SELECT MAX(invoice_date) as max_dt FROM {table_prefix}`{cand}` WHERE invoice_date <= CURDATE()")
+                        canc_table = f"{table_prefix}`zpvf_sd_cancelledsalesinvoice_01_tr`"
+                        cursor.execute(f"""
+                            SELECT MAX(s.invoice_date) as max_dt 
+                            FROM {table_prefix}`{cand}` s
+                            LEFT JOIN {canc_table} can 
+                              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+                            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+                              AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+                              AND can.invoice_number IS NULL
+                        """)
                         r = cursor.fetchone()
                         if r and r.get('max_dt'):
                             max_dt_val = r['max_dt']
                             break
                     except Exception:
                         try:
-                            cursor.execute(f"SELECT MAX(billing__doc_date) as max_dt FROM {table_prefix}`{cand}` WHERE billing__doc_date <= CURDATE()")
+                            cursor.execute(f"SELECT MAX(invoice_date) as max_dt FROM {table_prefix}`{cand}` WHERE (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1')) AND (distribution_channel = 10 OR distribution_channel = '10')")
                             r = cursor.fetchone()
                             if r and r.get('max_dt'):
                                 max_dt_val = r['max_dt']
                                 break
                         except Exception:
-                            pass
+                            try:
+                                cursor.execute(f"SELECT MAX(billing__doc_date) as max_dt FROM {table_prefix}`{cand}` WHERE 1=1")
+                                r = cursor.fetchone()
+                                if r and r.get('max_dt'):
+                                    max_dt_val = r['max_dt']
+                                    break
+                            except Exception:
+                                pass
                 if max_dt_val:
                     if not year: year = max_dt_val.year
                     if not month: month = max_dt_val.month
@@ -1059,20 +1075,36 @@ def export_domestic_sales_preview_controller(get_db_connection):
                 max_dt_val = None
                 for cand in sales_candidates:
                     try:
-                        cursor.execute(f"SELECT MAX(invoice_date) as max_dt FROM {table_prefix}`{cand}` WHERE invoice_date <= CURDATE()")
+                        canc_table = f"{table_prefix}`zpvf_sd_cancelledsalesinvoice_01_tr`"
+                        cursor.execute(f"""
+                            SELECT MAX(s.invoice_date) as max_dt 
+                            FROM {table_prefix}`{cand}` s
+                            LEFT JOIN {canc_table} can 
+                              ON (s.invoice_number = can.invoice_number AND s.plant = can.plant AND s.fkart = can.fkart AND (can.distribution_channel = 10 OR can.distribution_channel = '10'))
+                            WHERE (s.indicator_cancel IS NULL OR s.indicator_cancel NOT IN ('X', 'Y', '1'))
+                              AND (s.distribution_channel = 10 OR s.distribution_channel = '10')
+                              AND can.invoice_number IS NULL
+                        """)
                         r = cursor.fetchone()
                         if r and r.get('max_dt'):
                             max_dt_val = r['max_dt']
                             break
                     except Exception:
                         try:
-                            cursor.execute(f"SELECT MAX(billing__doc_date) as max_dt FROM {table_prefix}`{cand}` WHERE billing__doc_date <= CURDATE()")
+                            cursor.execute(f"SELECT MAX(invoice_date) as max_dt FROM {table_prefix}`{cand}` WHERE (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1')) AND (distribution_channel = 10 OR distribution_channel = '10')")
                             r = cursor.fetchone()
                             if r and r.get('max_dt'):
                                 max_dt_val = r['max_dt']
                                 break
                         except Exception:
-                            pass
+                            try:
+                                cursor.execute(f"SELECT MAX(billing__doc_date) as max_dt FROM {table_prefix}`{cand}` WHERE 1=1")
+                                r = cursor.fetchone()
+                                if r and r.get('max_dt'):
+                                    max_dt_val = r['max_dt']
+                                    break
+                            except Exception:
+                                pass
                 if max_dt_val:
                     if not year: year = max_dt_val.year
                     if not month: month = max_dt_val.month
