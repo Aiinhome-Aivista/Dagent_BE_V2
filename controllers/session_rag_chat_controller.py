@@ -225,6 +225,84 @@ def _load_all(session_id, get_fn):
     chunks += _load_sheets(session_id, get_fn)
     chunks += _load_web(session_id, get_fn)
     chunks += _load_analysis_report(session_id, get_fn)
+    chunks += _load_hana(session_id, get_fn)
+    return chunks
+
+
+def _load_hana(session_id, get_fn):
+    chunks = []
+    local = cur = None
+    try:
+        local = _local_conn(get_fn)
+        cur   = local.cursor(dictionary=True)
+        cur.execute("""
+            SELECT schema_name, view_name, row_count, column_count, columns_detail
+            FROM sap_hana_view_metadata
+            WHERE session_id = %s
+        """, (session_id,))
+        rows = cur.fetchall()
+        if not rows:
+            return chunks
+
+        print(f"[RAG] Loading SAP HANA metadata: {len(rows)} views found")
+        for r in rows:
+            schema = r.get("schema_name") or "SAP_S4"
+            view = r.get("view_name") or ""
+            row_cnt = int(r.get("row_count") or 0)
+            cols_raw = r.get("columns_detail")
+            cols = []
+            if isinstance(cols_raw, str):
+                try:
+                    c_json = json.loads(cols_raw)
+                    cols = [c["name"] for c in c_json if isinstance(c, dict) and "name" in c]
+                except Exception:
+                    pass
+            elif isinstance(cols_raw, list):
+                cols = [c["name"] for c in cols_raw if isinstance(c, dict) and "name" in c]
+
+            col_str = ", ".join(cols[:50])
+            chunks.append(_chunk(
+                f"[SCHEMA] db:{schema} table:{view} columns:{col_str} total_rows:{row_cnt}",
+                db=schema, table=view, kind="schema"
+            ))
+            chunks.append(_chunk(
+                f"[COUNT] db:{schema} table:{view} has {row_cnt:,} rows total.\n"
+                f"Number of {view}: {row_cnt:,}\n"
+                f"Columns in {view}: {col_str}",
+                db=schema, table=view, kind="count"
+            ))
+
+        # Add SAP S4 Business Architecture & Rules chunk
+        biz_rules = """[SCHEMA] db:SAP_S4 table:BUSINESS_RELATIONSHIPS_AND_RULES
+SAP S/4HANA Sales & Distribution (SD) Architecture and Business Rules:
+1. Fact Tables:
+   - ZPVF_SD_SalesHistory_01_TR (Historical Invoices)
+   - ZPVF_SD_CurrentSales_01_TR (Current Period Invoices)
+   Fact Columns: invoice_number, invoice_date, plant, dealer_code, SKU, volume, Tyre_Quantity, invoice_value, total_discount, gst, taxable_value, FKART, BILL_TYPE, distribution_channel, indicator_cancel.
+2. Master Tables & Joins:
+   - Customer Master: ZIVF_CustomerMaster_01_MD (Join on dealer_code = KUNNR). Dealer Name is NAME1. MANDATORY FILTER: KLABC <> 'X'.
+   - SKU / Material Master: ZIVR_SKUMaster_01_TR (Join on SKU = MATNR). Description is MAKTX, Brand is BRAND, Category Code is CAT_CODE, Construction is CONSTUCTION, Tyre Type is TYRE_TYPE.
+   - Category Master: ZIVF_CategoryMaster_01_TR (Join on CAT_CODE = CAT_CODE). Category Description is CAT_DESC.
+   - Territory Master: ZIVF_TerritoryMaster_01_TR (Join on CustomerMaster.BZIRK = TerritoryMaster.BZIRK). Territory Name is NAME.
+   - Zone Master: ZIVF_ZoneMaster_01_TR (Join on TerritoryMaster.P_ZONE = ZoneMaster.P_ZONE). Zone Name is NAME.
+   - Region Master: ZIVF_RegionMaster_MD_01 (Join on TerritoryMaster.REGIO = RegionMaster.region_code). Region Name is region_name.
+   - Date Master: ZITR_DayAttribute_01_TR (Join on invoice_date = Date_). Year-Month is YMONTH, Year is CAL_YEAR, Qtr is QTR.
+3. Filtering & Exclusion Rules:
+   - Distribution Channel: ALWAYS filter distribution_channel = 10 (or '10').
+   - Cancelled Invoices: ALWAYS filter indicator_cancel <> 'X'.
+   - Exclude Cancelled Sales Invoices: Invoices matching ZPVF_SD_CancelledSalesInvoice_01_TR on invoice_number, plant, and FKART must NOT be counted.
+   - Customer Status: ALWAYS filter KLABC <> 'X' on ZIVF_CustomerMaster_01_MD.
+4. Business Metrics:
+   - Sales / Revenue = SUM(invoice_value)
+   - Volume / Quantity = SUM(Tyre_Quantity) or SUM(volume)
+   - Average Realization = SUM(invoice_value) / NULLIF(SUM(Tyre_Quantity), 0)
+"""
+        chunks.append(_chunk(biz_rules, db="SAP_S4", table="BUSINESS_RULES", kind="schema"))
+    except Exception as e:
+        print(f"[RAG] _load_hana error: {e}")
+    finally:
+        if cur: cur.close()
+        if local: local.close()
     return chunks
 
 
@@ -1020,35 +1098,164 @@ def _to_str(val):
     return str(val) if val else ""
 
 
-SYS = """ """
-# """
-# You are a senior data analyst and database expert with deep analytical reasoning capabilities.
-# You have access to the user's actual database records as retrieved chunks.
+DEFAULT_CANON_SYS = """You are a Query Canonicalizer for Business Intelligence.
+Convert the user's natural language question into a structured JSON representation (Canonical Query).
+Do not generate SQL yet. Extract the core analytical components.
 
-# Chunk types:
-#   [SCHEMA]           — table structure, column names, total row count
-#   [COUNT]            — exact row counts AND all distinct values per column — PRIMARY source for counts/lists
-#   [ROW]              — individual database records with all field values
-#   [JOIN]             — pre-computed cross-table joins: user X has N records in table Y with details
-#   [WEB]              — saved web content (raw)
-#   [ANALYSIS_WEB]     — web research grouped by topic with titles and summaries
-#   [ANALYSIS_DB_META] — database metadata: which databases and tables were analyzed
+Return ONLY a JSON object in this format:
+{
+  "analytical_intent": "e.g., dealer_ranking, sales_trend, total_revenue, category_breakdown",
+  "metric": "e.g., sales, volume, discount, quantity",
+  "aggregation": "e.g., sum, count, avg",
+  "sort": "e.g., desc, asc",
+  "limit": 5
+}
+If a component is missing from the user's question, set it to null.
+"""
 
-# DEEP ANALYSIS RULES:
-# 1. Read EVERY chunk exhaustively before forming your answer.
-# 2. For COUNT questions: find [COUNT] chunk with "Number of X: N" — this is authoritative.
-# 3. For LIST questions: find [COUNT] chunk "All values of column_name:" — gives complete list.
-# 4. For JOIN/relationship questions: find [JOIN] chunks — they show cross-table activity per user.
-# 5. For WHY questions: analyze patterns, dates, sequences, frequencies across chunks to infer reasons.
-# 6. For TREND questions: compare timestamps, sequences, values across [ROW] chunks.
-# 7. For COMPARISON questions: pull data from multiple tables and compare side by side.
-# 8. For DEEP questions: combine ROW + JOIN + COUNT chunks to give comprehensive multi-part answers.
-# 9. CRITICAL: If the requested data (e.g. specific columns or metrics) does NOT exist in the context, clearly state that it is unavailable. NEVER hallucinate or invent fake names, metrics, or records.
-# 10. Always answer in full sentences with specifics — no vague responses.
-# 11. DO NOT include source citations in the answer text — keep answer clean.
-# 12. follow_up_questions MUST follow the EXACT format specified in the user prompt.
-# 13. Respond ONLY in valid JSON.
-# """
+DEFAULT_SQL_SYS = """You are a Senior Data Analyst, SQL Expert, and Business Intelligence Assistant.
+
+PRIMARY OBJECTIVE:
+Generate SQL that computes answers from the FULL DATASET.
+
+SCHEMA & BUSINESS DEFINITIONS:
+1. TARGET SCHEMA / DATABASE:
+   - For SAP S/4HANA (JK Tyre), the schema is "SAP_S4".
+   - Fact views:
+     * "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" (Sales History Fact - default)
+     * "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" (Current Sales Fact)
+   - Master views:
+     * Customer Master: "SAP_S4"."ZIVF_CustomerMaster_01_MD" (Join: fact.dealer_code = CustomerMaster.KUNNR)
+       Name column: CustomerMaster.NAME1
+     * SKU / Product Master: "SAP_S4"."ZIVR_SKUMaster_01_TR" (Join: fact.SKU = SKUMaster.MATNR)
+       Description: SKUMaster.MAKTX, Brand: SKUMaster.BRAND, Category code: SKUMaster.CAT_CODE
+       Construction (Tyre type / Radial / Bias): SKUMaster.CONSTUCTION (spelled CONSTUCTION)
+     * Category Master: "SAP_S4"."ZIVF_CategoryMaster_01_TR" (Join: SKUMaster.CAT_CODE = CategoryMaster.CAT_CODE)
+       Category description: CategoryMaster.CAT_DESC (Tyre, Tube, Flap)
+     * Territory Master: "SAP_S4"."ZIVF_TerritoryMaster_01_TR" (Join: CustomerMaster.BZIRK = TerritoryMaster.BZIRK)
+       Territory Name: TerritoryMaster.NAME, Area: TerritoryMaster.AREA, Zone code: TerritoryMaster.P_ZONE, Region code: TerritoryMaster.REGIO
+     * Zone Master: "SAP_S4"."ZIVF_ZoneMaster_01_TR" (Join: TerritoryMaster.P_ZONE = ZoneMaster.P_ZONE)
+       Zone Name: ZoneMaster.NAME
+     * Region Master: "SAP_S4"."ZIVF_RegionMaster_MD_01" (Join: TerritoryMaster.REGIO = RegionMaster.region_code)
+       Region Name: RegionMaster.region_name
+     * Date Attribute: "SAP_S4"."ZITR_DayAttribute_01_TR" (Join: fact.invoice_date = DayAttribute.Date_)
+       Month: DayAttribute.YMONTH, Year: DayAttribute.CAL_YEAR
+
+2. MANDATORY FILTERS & BUSINESS RULES:
+   - Distribution Channel: ALWAYS filter fact.distribution_channel = 10 (or '10').
+   - Cancelled Invoice Indicator: ALWAYS filter fact.indicator_cancel <> 'X'.
+   - Exclude Cancelled Sales Invoices: Exclude invoices that match "SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR" on (invoice_number, plant, FKART):
+     AND NOT EXISTS (
+         SELECT 1 FROM "SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR" c
+         WHERE c.invoice_number = fact.invoice_number
+           AND c.plant = fact.plant
+           AND c.FKART = fact.FKART
+     )
+   - Customer Status: ALWAYS filter CustomerMaster.KLABC <> 'X' on "SAP_S4"."ZIVF_CustomerMaster_01_MD".
+
+3. METRICS:
+   - Sales / Revenue: SUM(fact.invoice_value)
+   - Volume / Quantity: SUM(fact.Tyre_Quantity) or SUM(fact.volume)
+   - Net Sales: SUM(fact.invoice_value) - SUM(fact.total_discount)
+   - Invoice Count: COUNT(DISTINCT fact.invoice_number)
+   - Average Realization: SUM(fact.invoice_value) / NULLIF(SUM(fact.Tyre_Quantity), 0)
+
+4. SYNTAX & FORMATTING:
+   - For SAP HANA, use double quotes for identifiers: "SAP_S4"."ZPVF_SD_SalesHistory_01_TR".
+   - For MySQL, use backticks for identifiers.
+   - Always output valid JSON:
+     {
+       "db": "SAP_S4",
+       "sql": "SELECT ... FROM ...",
+       "reasoning": "..."
+     }
+"""
+
+DEFAULT_DEFAULT_TPL = """Business data summary ({len_chunks} total chunks):
+{sample}
+
+This is a business intelligence assistant. Generate exactly 5 "What" questions about the actual business data above.
+ALL 5 questions MUST start with "What ".
+Focus on business-relevant insights: counts, values, names, metrics.
+Reference actual table names, column names, and values from the data.
+
+Return ONLY: {"suggested_questions":["What ...?","What ...?","What ...?","What ...?","What ...?"]}
+"""
+
+DEFAULT_GRAPH_TPL = """Retrieved business data:
+{context}
+
+{hist}Chart request: "{question}"
+
+Extract actual numeric/categorical values ONLY from the chunks.
+{followup_ins}
+Return ONLY:
+{{
+  "chart_type":"bar"|"line"|"pie"|"scatter",
+  "title":"...",
+  "labels":[...],
+  "datasets":[{{"label":"...","data":[...]}}],
+  "source_note":"...",
+  "follow_up_questions":["{ftype} ...?","{ftype} ...?","{ftype} ...?"]
+}}
+"""
+
+DEFAULT_REPORT_TPL = """You are a senior business analyst. Write a comprehensive report from the business data below.
+Retrieved data:
+{context}
+
+{hist}Report request: "{question}"
+
+Write an analytical business report using ONLY the chunks above.
+Be specific — use actual numbers, names, values from the data.
+{followup_ins}
+Return ONLY:
+{{
+  "report_title":"...",
+  "sections":[{{"heading":"...","content":"..."}}],
+  "key_findings":["Finding 1","Finding 2","Finding 3"],
+  "follow_up_questions":["{ftype} ...?","{ftype} ...?","{ftype} ...?"]
+}}
+"""
+
+DEFAULT_ANSWER_TPL = """You are an advanced business intelligence AI specialized in analyzing actual business database records.
+This is NOT a general chatbot. Every answer must be grounded in the business data provided below.
+
+Retrieved data:
+{context}
+
+{hist}Business Question: "{question}"
+
+Detected intent: {intent}
+Relevant tables: {table_hints}
+
+{multi_hint}
+DEEP ANALYSIS PROTOCOL:
+1. Exhaustively scan every piece of data.
+2. If SQL execution results are present, SQL Results are the ONLY source of truth.
+3. Answer strictly from SQL Results and retrieved context. Never invent or hallucinate numbers, names, or metrics not present.
+4. If a field is not present in SQL Results or context, state that the information is not available.
+5. If SQL Results exist, ignore any conflicting retrieved chunks.
+6. Do NOT include "(source:...)" or "[source:...]" tags in the answer text.
+7. {followup_ins}
+
+VISUALIZATION RULES:
+If the question involves comparison, distribution, ranking, trends, or category breakdown, generate up to 3 visualizations in the "visualizations" array.
+Supported types:
+1. Table:
+   {"type":"table", "title":"...", "columns":[{"key":"colKey","label":"Col Label"}], "data":[{"colKey":"value"}]}
+2. Bar Chart:
+   {"type":"bar_chart", "title":"...", "xKey":"category", "yKey":"value", "data":[{"category":"A","value":100}]}
+3. Line Chart (for trends over time):
+   {"type":"line_chart", "title":"...", "xKey":"month", "yKey":"value", "seriesKey":"series", "data":[{"series":"Radial","month":"Jan","value":100}]}
+
+Return ONLY valid JSON (answer must be a markdown string):
+{
+  "answer": "...",
+  "follow_up_questions": [],
+  "visualizations": []
+}
+"""
 
 
 # ══════════════════════════════════════════════════════
@@ -1404,30 +1611,50 @@ def _build_business_map(table_cols, workspace_id):
     from database.prompt_loader import get_prompt
     
     # Defaults (Fallback if no config found)
-    FACT_TABLE_HINTS = ["invoice"]
-    MEASURE_COLUMN   = "Invoice_Value"
+    FACT_TABLE_HINTS = ["invoice", "sales", "saleshistory", "currentsales", "zpvf_sd_saleshistory_01_tr", "zpvf_sd_currentsales_01_tr"]
+    MEASURE_COLUMN   = "invoice_value"
     DIMENSIONS = [
         {
             "label":    "product",
-            "fact_key": "Material",
-            "dim_key":  "Material",
-            "owns":     ["CATEGORY", "CONSTRUCTION", "vehicle type", "OLD CODE"],
+            "fact_key": "SKU",
+            "dim_key":  "MATNR",
+            "owns":     ["CAT_CODE", "CATG", "CONSTUCTION", "TYRE_TYPE", "BRAND", "MAKTX", "CATEGORY", "CONSTRUCTION", "vehicle type"],
         },
         {
             "label":    "customer",
-            "fact_key": "Customer",
-            "dim_key":  "Customer",
-            "owns":     ["CUSTOMER_CATEGORY", "Region", "Zone", "Account group"],
+            "fact_key": "dealer_code",
+            "dim_key":  "KUNNR",
+            "owns":     ["NAME1", "BZIRK", "REGIO", "KLABC", "DLR_CATG", "Customer", "Cname"],
         },
+        {
+            "label":    "territory",
+            "fact_key": "BZIRK",
+            "dim_key":  "BZIRK",
+            "owns":     ["NAME", "AREA", "P_ZONE", "REGIO"],
+        },
+        {
+            "label":    "category",
+            "fact_key": "CAT_CODE",
+            "dim_key":  "CAT_CODE",
+            "owns":     ["CAT_DESC", "SHORT_DESC"],
+        },
+        {
+            "label":    "date",
+            "fact_key": "invoice_date",
+            "dim_key":  "Date_",
+            "owns":     ["WEEK", "YMONTH", "QTR", "FIN_YEAR", "CAL_YEAR"],
+        }
     ]
-    PRODUCT_HIERARCHY = ["CATEGORY", "CONSTRUCTION", "vehicle type"]
+    PRODUCT_HIERARCHY = ["CAT_DESC", "CONSTUCTION", "TYRE_TYPE", "BRAND", "MAKTX", "CATEGORY", "CONSTRUCTION", "vehicle type"]
     COLUMN_SYNONYMS = {
-        "product category": "CATEGORY", "category": "CATEGORY", "categories": "CATEGORY",
-        "construction": "CONSTRUCTION", "tyre type": "CONSTRUCTION", "tire type": "CONSTRUCTION",
-        "vehicle category": "vehicle type", "vehicle type": "vehicle type",
-        "vehicle": "vehicle type", "by vehicle": "vehicle type",
-        "region": "Region", "zone": "Zone",
-        "dealer": "Customer", "customer": "Customer",
+        "product category": "CAT_DESC", "category": "CAT_DESC", "categories": "CAT_DESC",
+        "construction": "CONSTUCTION", "tyre type": "CONSTUCTION", "tire type": "CONSTUCTION",
+        "radial": "CONSTUCTION", "bias": "CONSTUCTION",
+        "brand": "BRAND", "product": "MAKTX", "material": "MATNR", "sku": "SKU",
+        "region": "region_name", "zone": "P_ZONE", "territory": "NAME",
+        "dealer": "NAME1", "customer": "NAME1", "dealer code": "dealer_code", "customer code": "KUNNR",
+        "month": "YMONTH", "year": "CAL_YEAR", "quarter": "QTR",
+        "sales": "invoice_value", "revenue": "invoice_value", "volume": "Tyre_Quantity",
     }
     
     # Fetch from database
@@ -1797,10 +2024,7 @@ def session_rag_chat_controller(get_connection_func):
     # Apply fetched prompts
     system_prompt = get_prompt(workspace_id, 'rag_chat')
     if not system_prompt or not system_prompt.strip():
-        return jsonify({
-            "status": "error", "statusCode": 500,
-            "message": "RAG chat prompt not configured in database. Please configure it in the Admin Panel."
-        }), 500
+        system_prompt = SYS
 
     # Greeting
     if question and _is_greet(question):
@@ -1850,24 +2074,13 @@ def session_rag_chat_controller(get_connection_func):
     if not question:
         count_chunks = [c["text"] for c in all_chunks if c["kind"]=="count"]
         sample = "\n".join(count_chunks)[:15000]
-        _default_tpl = get_prompt(workspace_id, 'rag_chat_default') or ''
+        _default_tpl = get_prompt(workspace_id, 'rag_chat_default') or DEFAULT_DEFAULT_TPL
         _default_msg = (
             _default_tpl
             .replace('{sample}', sample)
             .replace('{len_chunks}', str(len(all_chunks)))
         )
         res = _mistral(system_prompt, _default_msg)
-        res = _mistral(SYS, f"""
-Business data summary ({len(all_chunks)} total chunks):
-{sample}
-
-This is a business intelligence assistant. Generate exactly 5 "What" questions about the actual business data above.
-ALL 5 questions MUST start with "What ".
-Focus on business-relevant insights: counts, values, names, metrics.
-Reference actual table names, column names, and values from the data.
-
-Return ONLY: {{"suggested_questions":["What ...?","What ...?","What ...?"]}}
-""")
         if not res:
             return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
         return jsonify({
@@ -1919,24 +2132,7 @@ Return ONLY: {{"suggested_questions":["What ...?","What ...?","What ...?"]}}
         # ─────────────────────────────────────────────
         canon_sys = get_prompt(workspace_id, 'canonicalization')
         if not canon_sys or not canon_sys.strip():
-            return jsonify({
-                "status": "error", "statusCode": 500, 
-                "message": "Canonicalization prompt not configured in database."
-            }), 500
-#         """You are a Query Canonicalizer for Business Intelligence.
-# Convert the user's natural language question into a structured JSON representation (Canonical Query).
-# Do not generate SQL yet. Extract the core analytical components.
-
-# Return ONLY a JSON object in this format:
-# {
-#   "analytical_intent": "e.g., dealer_ranking, sales_trend, total_revenue",
-#   "metric": "e.g., sales, volume, discount",
-#   "aggregation": "e.g., sum, count, avg",
-#   "sort": "e.g., desc, asc",
-#   "limit": 5
-# }
-# If a component is missing from the user's question, set it to null.
-# """
+            canon_sys = DEFAULT_CANON_SYS
         canon_json = _mistral(canon_sys, f"Natural Language Question: {question}", temperature=0.0)
         canonical_query_str = json.dumps(canon_json, indent=2) if canon_json else f'{{"raw_question": "{question}"}}'
         print(f"[CANONICAL_QUERY] {canonical_query_str}")
@@ -1946,10 +2142,7 @@ Return ONLY: {{"suggested_questions":["What ...?","What ...?","What ...?"]}}
         # ─────────────────────────────────────────────
         sql_sys = get_prompt(workspace_id, 'sql_generation')
         if not sql_sys or not sql_sys.strip():
-            return jsonify({
-                "status": "error", "statusCode": 500, 
-                "message": "SQL Generation prompt not configured in database."
-            }), 500
+            sql_sys = DEFAULT_SQL_SYS
 #         """You are a Senior Data Analyst, SQL Expert, and Business Intelligence Assistant.
 
 # PRIMARY OBJECTIVE
@@ -2408,45 +2601,86 @@ Return ONLY: {{"suggested_questions":["What ...?","What ...?","What ...?"]}}
             print(f"[SQL_GEN] db: {target_db} | sql: {sql_query}")
 
             conn_sql = cur_sql = None
+            tunnel = None
+            is_hana = False
             sql_results = []
             try:
-                # Determine connection
-                if not target_db:
-                    conn_sql = get_connection_func()
-                    cur_sql = conn_sql.cursor(dictionary=True)
-                else:
+                # 1. Check if session has SAP HANA connection
+                temp_conn = get_connection_func()
+                temp_cur = temp_conn.cursor(dictionary=True)
+                temp_cur.execute("""
+                    SELECT credential, db_type, connection_id FROM database_credential 
+                    WHERE session_id=%s AND (LOWER(db_type) LIKE '%hana%' OR LOWER(db_type) LIKE '%sap%')
+                    LIMIT 1
+                """, (session_id,))
+                hana_cred_row = temp_cur.fetchone()
+                if not hana_cred_row:
+                    temp_cur.execute("SELECT connection_id FROM sap_hana_view_metadata WHERE session_id=%s LIMIT 1", (session_id,))
+                    sh_row = temp_cur.fetchone()
+                    if sh_row and sh_row.get("connection_id"):
+                        temp_cur.execute("SELECT credential, db_type FROM database_credential WHERE connection_id=%s LIMIT 1", (sh_row["connection_id"],))
+                        hana_cred_row = temp_cur.fetchone()
+                temp_cur.close()
+                temp_conn.close()
+
+                if hana_cred_row:
                     try:
-                        conn_sql = mysql.connector.connect(
-                            host=MYSQL_CONFIG["host"], port=MYSQL_CONFIG["port"],
-                            user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"],
-                            database=target_db, connection_timeout=10)
+                        cred = json.loads(hana_cred_row["credential"]) if isinstance(hana_cred_row["credential"], str) else hana_cred_row["credential"]
+                        from database.hana_metadata_service import get_hana_connection_from_credential
+                        conn_sql, tunnel, effective_schema = get_hana_connection_from_credential(cred)
+                        cur_sql = conn_sql.cursor()
+                        is_hana = True
+                        print("[SQL_GEN] Successfully connected to SAP HANA database.")
+                    except Exception as he:
+                        print(f"[SQL_GEN] SAP HANA connection attempt failed: {he}")
+                        is_hana = False
+
+                if not is_hana:
+                    # Determine connection
+                    if not target_db:
+                        conn_sql = get_connection_func()
                         cur_sql = conn_sql.cursor(dictionary=True)
-                    except Exception as e:
-                        print(f"[SQL_GEN] MySQL failed, trying Postgres: {e}")
-                        if PSYCOPG2_AVAILABLE:
-                            temp_conn = get_connection_func()
-                            temp_cur = temp_conn.cursor(dictionary=True)
-                            temp_cur.execute("SELECT credential FROM database_credential WHERE session_id=%s AND db_type IN ('postgresql', 'postgres')", (session_id,))
-                            pg_rows = temp_cur.fetchall()
-                            temp_cur.close()
-                            temp_conn.close()
-                            
-                            for r in pg_rows:
-                                cred = json.loads(r["credential"]) if isinstance(r["credential"], str) else r["credential"]
-                                if cred.get("database") == target_db:
-                                    conn_sql = psycopg2.connect(
-                                        host=cred.get("host"), port=cred.get("port", 5432),
-                                        user=cred.get("username"), password=cred.get("password"),
-                                        dbname=target_db, connect_timeout=10)
-                                    cur_sql = conn_sql.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-                                    break
+                    else:
+                        try:
+                            conn_sql = mysql.connector.connect(
+                                host=MYSQL_CONFIG["host"], port=MYSQL_CONFIG["port"],
+                                user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"],
+                                database=target_db, connection_timeout=10)
+                            cur_sql = conn_sql.cursor(dictionary=True)
+                        except Exception as e:
+                            print(f"[SQL_GEN] MySQL failed, trying Postgres: {e}")
+                            if PSYCOPG2_AVAILABLE:
+                                temp_conn = get_connection_func()
+                                temp_cur = temp_conn.cursor(dictionary=True)
+                                temp_cur.execute("SELECT credential FROM database_credential WHERE session_id=%s AND db_type IN ('postgresql', 'postgres')", (session_id,))
+                                pg_rows = temp_cur.fetchall()
+                                temp_cur.close()
+                                temp_conn.close()
+                                
+                                for r in pg_rows:
+                                    cred = json.loads(r["credential"]) if isinstance(r["credential"], str) else r["credential"]
+                                    if cred.get("database") == target_db:
+                                        conn_sql = psycopg2.connect(
+                                            host=cred.get("host"), port=cred.get("port", 5432),
+                                            user=cred.get("username"), password=cred.get("password"),
+                                            dbname=target_db, connect_timeout=10)
+                                        cur_sql = conn_sql.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                                        break
                 
                 if cur_sql:
                     for _attempt in range(2):
                         try:
-                            cur_sql.execute(sql_query)
+                            run_query = sql_query
+                            if is_hana and '`' in run_query:
+                                run_query = run_query.replace('`', '"')
+
+                            cur_sql.execute(run_query)
                             rows = cur_sql.fetchall()
-                            sql_results = [dict(r) for r in rows]
+                            if is_hana:
+                                cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
+                                sql_results = [dict(zip(cols, r)) for r in rows]
+                            else:
+                                sql_results = [dict(r) for r in rows]
 
                             # Convert non-serializable objects to string
                             for row in sql_results:
@@ -2501,6 +2735,9 @@ Return ONLY: {{"suggested_questions":["What ...?","What ...?","What ...?"]}}
                 if conn_sql: 
                     try: conn_sql.close() 
                     except: pass
+                if tunnel:
+                    try: tunnel.stop()
+                    except: pass
 
             if sql_results:
                 # Override context with SQL results for final LLM generation
@@ -2524,7 +2761,7 @@ Return ONLY: {{"suggested_questions":["What ...?","What ...?","What ...?"]}}
     if _is_graph(question):
         ftype        = _next_followup_type(session_id)
         followup_ins = _followup_instruction(ftype)
-        _graph_tpl = get_prompt(workspace_id, 'rag_chat_graph') or ''
+        _graph_tpl = get_prompt(workspace_id, 'rag_chat_graph') or DEFAULT_GRAPH_TPL
         _graph_msg = (
             _graph_tpl
             .replace('{context}', context)
@@ -2533,24 +2770,6 @@ Return ONLY: {{"suggested_questions":["What ...?","What ...?","What ...?"]}}
             .replace('{followup_ins}', followup_ins)
         )
         res = _mistral(system_prompt, _graph_msg)
-        res = _mistral(SYS, f"""
-Retrieved business data:
-{context}
-
-{hist}Chart request: "{question}"
-
-Extract actual numeric/categorical values ONLY from the chunks.
-{followup_ins}
-Return ONLY:
-{{
-  "chart_type":"bar"|"line"|"pie"|"scatter",
-  "title":"...",
-  "labels":[...],
-  "datasets":[{{"label":"...","data":[...]}}],
-  "source_note":"...",
-  "follow_up_questions":["{ftype} ...?","{ftype} ...?","{ftype} ...?"]
-}}
-""")
         if not res:
             return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
         _advance_turn(session_id)
@@ -2577,7 +2796,7 @@ Return ONLY:
     if _is_report(question):
         ftype        = _next_followup_type(session_id)
         followup_ins = _followup_instruction(ftype)
-        _report_tpl = get_prompt(workspace_id, 'rag_chat_report') or ''
+        _report_tpl = get_prompt(workspace_id, 'rag_chat_report') or DEFAULT_REPORT_TPL
         _report_msg = (
             _report_tpl
             .replace('{context}', context)
@@ -2586,24 +2805,6 @@ Return ONLY:
             .replace('{followup_ins}', followup_ins)
         )
         res = _mistral(system_prompt, _report_msg)
-        res = _mistral(SYS, f"""
-You are a senior business analyst. Write a comprehensive report from the business data below.
-Retrieved data:
-{context}
-
-{hist}Report request: "{question}"
-
-Write an analytical business report using ONLY the chunks above.
-Be specific — use actual numbers, names, values from the data.
-{followup_ins}
-Return ONLY:
-{{
-  "report_title":"...",
-  "sections":[{{"heading":"...","content":"..."}}],
-  "key_findings":["Finding 1","Finding 2","Finding 3"],
-  "follow_up_questions":["{ftype} ...?","{ftype} ...?","{ftype} ...?"]
-}}
-""")
         if not res:
             return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
         _advance_turn(session_id)
@@ -2637,10 +2838,7 @@ Return ONLY:
 
     _answer_tpl = get_prompt(workspace_id, 'rag_chat_answer')
     if not _answer_tpl or not _answer_tpl.strip():
-        return jsonify({
-            "status": "error", "statusCode": 500,
-            "message": "RAG chat answer prompt not configured in database. Please configure it in the Admin Panel."
-        }), 500
+        _answer_tpl = DEFAULT_ANSWER_TPL
     _answer_msg = (
         _answer_tpl
         .replace('{context}', context)

@@ -586,9 +586,7 @@ def get_saved_credentials():
 
 @app.route("/session-chat", methods=["POST"])
 def session_chat():
-    workspace_id = get_workspace_id_from_req(get_db_connection)
-    if workspace_id is not None:
-        return execute_dynamic_controller(workspace_id, "rag_chat_controller_code", session_rag_chat_controller, get_db_connection)
+    # Dynamic DB controller execution is bypassed to always run local controller code
     return session_rag_chat_controller(get_db_connection)
 
 @app.route("/api/store-chat-session", methods=["POST"])
