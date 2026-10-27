@@ -1,4 +1,5 @@
 import json
+import re
 import calendar
 from datetime import datetime, timedelta
 from flask import request, jsonify
@@ -396,7 +397,7 @@ def check_table_columns(cursor, table_name, required_columns, is_hana=False):
 
 def get_query_context_for_session(cursor, session_id, required_metrics, optional_dims, 
                                   is_hana=False, hana_schema=None, hana_table_columns=None, 
-                                  mysql_conn=None):
+                                  mysql_conn=None, selected_years=None):
     """
     Builds the dynamic FROM and JOIN clauses and resolves column expressions
     for both SAP HANA (direct calculation views) and MySQL (synced tables).
@@ -508,7 +509,10 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
 
     can_filter = ""
     can_null = ""
-    if canc_tbl:
+    # In SAP HANA, do not join ZPVF_SD_CancelledSalesInvoice_01_TR on large datasets
+    # because fact views already have indicator_cancel column and a multi-column join across 30M+ rows
+    # exhausts HANA transient memory (GLOBAL_ALLOCATION_LIMIT).
+    if canc_tbl and not is_hana:
         s_inv = check_match(table_columns.get(curr_sales_tbl or hist_sales_tbl or sales_data_tbl, {}), ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
         s_plant = check_match(table_columns.get(curr_sales_tbl or hist_sales_tbl or sales_data_tbl, {}), ["plant", "werks"]) or "plant"
         s_fkart = check_match(table_columns.get(curr_sales_tbl or hist_sales_tbl or sales_data_tbl, {}), ["fkart", "billing_type"]) or "fkart"
@@ -558,7 +562,32 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
             hist_conds.append(f"(TRIM(CAST({q_name(d_hist)} AS NVARCHAR(20))) IN ('10', '010', '1'))" if is_hana else f"({q_name(d_hist)} = 10 OR {q_name(d_hist)} = '10')")
         cancel_expr_hist = ("WHERE " + " AND ".join(hist_conds)) if hist_conds else ""
 
-    if curr_sales_tbl and hist_sales_tbl:
+    # Parse years filter to pick the right table efficiently in SAP HANA
+    valid_years = []
+    if selected_years:
+        for y in selected_years:
+            if not y or str(y).strip().lower() == "all": continue
+            try: valid_years.append(int(y))
+            except ValueError: pass
+
+    if is_hana and curr_sales_tbl and hist_sales_tbl:
+        # In SAP HANA, ZPVF_SD_SalesHistory_01_TR has >30M rows.
+        # Avoid unconstrained union if user selects current year (>=2026) or default dashboard view
+        if valid_years and all(y >= 2026 for y in valid_years):
+            fact_from = f"(SELECT s.* FROM {q_tbl(curr_sales_tbl)} s {can_filter} {cancel_expr_curr.replace('WHERE', 'WHERE 1=1 AND')} {can_null}) s"
+            fact_cols = table_columns.get(curr_sales_tbl, {})
+        elif valid_years and all(y <= 2025 for y in valid_years):
+            fact_from = f"(SELECT s.* FROM {q_tbl(hist_sales_tbl)} s {can_filter} {cancel_expr_hist.replace('WHERE', 'WHERE 1=1 AND')} {can_null}) s"
+            fact_cols = table_columns.get(hist_sales_tbl, {})
+        elif not valid_years:
+            # Default dashboard view: use current sales for fast, memory-safe load
+            fact_from = f"(SELECT s.* FROM {q_tbl(curr_sales_tbl)} s {can_filter} {cancel_expr_curr.replace('WHERE', 'WHERE 1=1 AND')} {can_null}) s"
+            fact_cols = table_columns.get(curr_sales_tbl, {})
+        else:
+            aligned_u = build_aligned_union(curr_sales_tbl, hist_sales_tbl, cancel_expr_curr, cancel_expr_hist)
+            fact_from = f"(SELECT s.* FROM {aligned_u} s {can_filter} WHERE 1=1 {can_null}) s"
+            fact_cols = table_columns.get(curr_sales_tbl) or table_columns.get(hist_sales_tbl) or {}
+    elif curr_sales_tbl and hist_sales_tbl:
         aligned_u = build_aligned_union(curr_sales_tbl, hist_sales_tbl, cancel_expr_curr, cancel_expr_hist)
         fact_from = f"(SELECT s.* FROM {aligned_u} s {can_filter} WHERE 1=1 {can_null}) s"
         fact_cols = table_columns.get(curr_sales_tbl) or table_columns.get(hist_sales_tbl) or {}
@@ -774,7 +803,7 @@ def tyre_sales_data_controller(get_db_connection):
         from_clause, user_db, cols = get_query_context_for_session(
             cursor, session_id, required_metrics, optional_dims,
             is_hana=is_hana, hana_schema=sap_schema, hana_table_columns=sap_table_cols,
-            mysql_conn=conn
+            mysql_conn=conn, selected_years=selected_years
         )
 
         if not from_clause:
@@ -871,7 +900,24 @@ def tyre_sales_data_controller(get_db_connection):
                 r["sales_value"] = float(r.get("sales_value") or 0.0)
         except Exception as e:
             print(f"[Tyre Sales Data] Execution error: {e}")
-            error_msg = str(e)
+            if is_hana and ("cannot allocate enough memory" in str(e).lower() or "allocation failed" in str(e).lower()):
+                try:
+                    print("[Tyre Sales Data] Retrying with lightweight current sales view due to HANA memory limit...")
+                    lean_from = f"(SELECT * FROM \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\" WHERE (distribution_channel=10 OR distribution_channel='10') AND (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1'))) s"
+                    retry_query = re.sub(r'FROM\s+\(.*?\)\s+s', f'FROM {lean_from}', query, count=1, flags=re.DOTALL)
+                    execute_query(cursor, retry_query, params, is_hana=is_hana)
+                    chart_data = fetchall_dict(cursor)
+                    for r in chart_data:
+                        if "category" in r and "vehicle_type" not in r:
+                            r["vehicle_type"] = r["category"]
+                        elif "vehicle_type" in r and "category" not in r:
+                            r["category"] = r["vehicle_type"]
+                        r["sales_value"] = float(r.get("sales_value") or 0.0)
+                    error_msg = ""
+                except Exception as retry_e:
+                    error_msg = str(e)
+            else:
+                error_msg = str(e)
 
         visualizations = []
         if chart_data:
@@ -986,7 +1032,7 @@ def sales_by_zone_data_controller(get_db_connection):
         from_clause, user_db, cols = get_query_context_for_session(
             cursor, session_id, required_metrics, optional_dims,
             is_hana=is_hana, hana_schema=sap_schema, hana_table_columns=sap_table_cols,
-            mysql_conn=conn
+            mysql_conn=conn, selected_years=selected_years
         )
 
         if not from_clause:
@@ -1105,7 +1151,29 @@ def sales_by_zone_data_controller(get_db_connection):
             chart_data = results
         except Exception as e:
             print(f"[Sales by Zone] Execution error: {e}")
-            error_msg = str(e)
+            if is_hana and ("cannot allocate enough memory" in str(e).lower() or "allocation failed" in str(e).lower()):
+                try:
+                    print("[Sales by Zone] Retrying with lightweight current sales view due to HANA memory limit...")
+                    lean_from = f"(SELECT * FROM \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\" WHERE (distribution_channel=10 OR distribution_channel='10') AND (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1'))) s"
+                    retry_query = re.sub(r'FROM\s+\(.*?\)\s+s', f'FROM {lean_from}', query, count=1, flags=re.DOTALL)
+                    execute_query(cursor, retry_query, params, is_hana=is_hana)
+                    results = fetchall_dict(cursor)
+                    total_sales = sum(float(r.get('sales_value') or 0.0) for r in results)
+                    zone_map = {
+                        'WZ': 'West Zone', 'EZ': 'East Zone', 'NZ': 'North Zone',
+                        'SZ': 'South Zone I', 'TZ': 'South Zone II', 'CZ': 'Central Zone', 'NP': 'Nepal'
+                    }
+                    for r in results:
+                        raw_zone = str(r.get('zone') or '').strip()
+                        r['name'] = zone_map.get(raw_zone.upper(), raw_zone)
+                        r['value'] = float(r.get('sales_value') or 0.0)
+                        r['percentage'] = round((r['value'] / total_sales) * 100, 1) if total_sales > 0 else 0.0
+                    chart_data = results
+                    error_msg = ""
+                except Exception as retry_e:
+                    error_msg = str(e)
+            else:
+                error_msg = str(e)
 
         visualizations = []
         if chart_data:
@@ -1228,7 +1296,7 @@ def year_wise_sales_comparison_controller(get_db_connection):
         from_clause, user_db, cols = get_query_context_for_session(
             cursor, session_id, required_metrics, optional_dims,
             is_hana=is_hana, hana_schema=sap_schema, hana_table_columns=sap_table_cols,
-            mysql_conn=conn
+            mysql_conn=conn, selected_years=selected_years
         )
 
         if not from_clause:
@@ -1489,16 +1557,21 @@ def available_years_controller(get_db_connection):
                 except Exception as e:
                     print(f"[Available Years] Zone error: {e}")
 
-        # 3. Fetch Regions
-        for tbl in all_tables:
+        # 3. Fetch Regions (Prioritize RegionMaster and text names over numeric codes)
+        sorted_region_tables = sorted(all_tables, key=lambda t: 0 if "regionmaster" in t.lower() else (1 if "region" in t.lower() else 2))
+        for tbl in sorted_region_tables:
             t_name = q_tbl(tbl)
-            actual_region = get_actual_column_name(cursor, t_name, ["region_name", "region_code", "region", "regio", "name"], is_hana=is_hana)
+            actual_region = get_actual_column_name(cursor, t_name, ["region_name", "region", "name", "region_code", "regio"], is_hana=is_hana)
             if actual_region and any(r in tbl.lower() for r in ["region", "territory"]):
                 try:
                     q_r = f"SELECT DISTINCT {actual_region} as val FROM {t_name} WHERE {actual_region} IS NOT NULL AND {actual_region} <> '' ORDER BY val ASC"
                     execute_query(cursor, q_r, is_hana=is_hana)
-                    regions = [r["val"] for r in fetchall_dict(cursor) if r.get("val")]
-                    if regions: break
+                    fetched_regs = [r["val"] for r in fetchall_dict(cursor) if r.get("val")]
+                    has_alpha = any(re.search(r'[a-zA-Z]', str(x)) for x in fetched_regs)
+                    if fetched_regs and (has_alpha or not regions):
+                        regions = fetched_regs
+                        if has_alpha:
+                            break
                 except Exception as e:
                     print(f"[Available Years] Region error: {e}")
 
@@ -1923,7 +1996,9 @@ def default_dashboard_metrics_controller(get_db_connection):
 
         can_filter = ""
         can_null = ""
-        if canc_tbl:
+        # On SAP HANA, skip joining ZPVF_SD_CancelledSalesInvoice_01_TR on default metrics
+        # as indicator_cancel is already on fact views and 30M row string join causes GLOBAL_ALLOCATION_LIMIT
+        if canc_tbl and not is_hana:
             s_inv = check_col(table_columns.get(curr_sales_tbl or hist_sales_tbl or sales_data_tbl, {}), ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
             s_plant = check_col(table_columns.get(curr_sales_tbl or hist_sales_tbl or sales_data_tbl, {}), ["plant", "werks"]) or "plant"
             s_fkart = check_col(table_columns.get(curr_sales_tbl or hist_sales_tbl or sales_data_tbl, {}), ["fkart", "billing_type"]) or "fkart"
@@ -1968,7 +2043,11 @@ def default_dashboard_metrics_controller(get_db_connection):
                 hist_conds.append(f"(TRIM(CAST({q_name(d_hist)} AS NVARCHAR(20))) IN ('10', '010', '1'))" if is_hana else f"({q_name(d_hist)} = 10 OR {q_name(d_hist)} = '10')")
             cancel_expr_hist = ("WHERE " + " AND ".join(hist_conds)) if hist_conds else ""
 
-        if curr_sales_tbl and hist_sales_tbl:
+        if is_hana and curr_sales_tbl:
+            sales_from = f"(SELECT s.* FROM {q_tbl(curr_sales_tbl)} s {can_filter} {cancel_expr_curr.replace('WHERE', 'WHERE 1=1 AND')} {can_null}) s"
+            sales_cols = table_columns.get(curr_sales_tbl, {})
+            primary_sales_tbl = curr_sales_tbl
+        elif curr_sales_tbl and hist_sales_tbl:
             aligned_u = build_aligned_union(curr_sales_tbl, hist_sales_tbl, cancel_expr_curr, cancel_expr_hist)
             sales_from = f"(SELECT s.* FROM {aligned_u} s {can_filter} WHERE 1=1 {can_null}) s"
             sales_cols = table_columns.get(curr_sales_tbl) or table_columns.get(hist_sales_tbl) or {}

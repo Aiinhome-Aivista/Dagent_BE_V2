@@ -446,40 +446,36 @@ def _load_hana(session_id, get_fn):
 
         # Add SAP S4 Business Architecture & Rules chunk
         biz_rules = """[SCHEMA] db:SAP_S4 table:BUSINESS_RELATIONSHIPS_AND_RULES
-SAP S/4HANA Sales & Distribution (SD) Architecture and Business Rules:
+SAP S/4HANA Sales & Distribution (SD) Architecture and Table Context:
 1. Fact Views:
-   - ZPVF_SD_SalesHistory_01_TR (Historical Invoices Fact)
-   - ZPVF_SD_CurrentSales_01_TR (Current Period MTD Invoices Fact)
-   - ZPVF_SD_CancelledSalesInvoice_01_TR (Cancelled Invoices Fact)
-   - ZIVF_SD_Sales_Plan_Target_01_TR (Sales Plan & Target View)
+   - ZPVF_SD_SalesHistory_01_TR: Historical Invoices Fact view (~30,044,097 rows, years 2006 to 2025). Use for historical period queries, multi-year trends, and prior period sales.
+   - ZPVF_SD_CurrentSales_01_TR: Current Period MTD Invoices Fact view (~1,000,000 rows, year 2026). Use for current period / MTD sales questions.
+   - ZPVF_SD_CancelledSalesInvoice_01_TR: Cancelled Invoices Reference view (~50,000 rows). Contains list of cancelled invoices.
+   - ZIVF_SD_Sales_Plan_Target_01_TR: Sales Plan & Target view (~200,000 rows). Target Value is PLAN_VALUE, Target Qty is ORG_PLAN.
    Fact Columns: invoice_number, invoice_date, plant, dealer_code, ship_to_party, SKU, batch, volume, Tyre_Quantity, ndp_value, old_code, invoice_value, total_discount, gst, taxable_value, FKART, BILL_TYPE, distribution_channel, indicator_cancel.
 2. Master Views & Joins:
-   - Customer Master: ZIVF_CustomerMaster_01_MD (Join on dealer_code = KUNNR). Dealer Name is NAME1. MANDATORY FILTER: (cm.KLABC IS NULL OR cm.KLABC <> 'X').
-   - SKU / Material Master: ZIVR_SKUMaster_01_TR (Join on SKU = MATNR). Description is MAKTX or PROD_TITLE, Brand is BRAND, Sub Brand is SUB_BRAND, Category Code is CAT_CODE, Construction is CONSTUCTION, Tyre Type is TYRE_TYPE (or TYRE_TP).
-   - Category Master: ZIVF_CategoryMaster_01_TR (Join on SKUMaster.CAT_CODE = CategoryMaster.CAT_CODE). Category Description is CAT_DESC.
-   - Territory Master: ZIVF_TerritoryMaster_01_TR (Join on CustomerMaster.BZIRK = TerritoryMaster.BZIRK). Territory Name is NAME, Region code is REGIO, Zone code is P_ZONE.
-   - Region Master: ZIVF_RegionMaster_MD_01 (Join on TerritoryMaster.REGIO = RegionMaster.region_code). Region Name is region_name, Zone code is zone_code.
-   - Zone Master: ZIVF_ZoneMaster_01_TR (Join on RegionMaster.zone_code = ZoneMaster.P_ZONE or TerritoryMaster.P_ZONE = ZoneMaster.P_ZONE). Zone Name is NAME.
-   - Date Master: ZITR_DayAttribute_01_TR (Join on invoice_date = Date_). Year-Month is YMONTH, Year is CAL_YEAR, Qtr is QTR.
-   - Target Plan: ZIVF_SD_Sales_Plan_Target_01_TR (Join on MATNR, CAT_CODE, TERR_CODE, REG_CODE, YMONTH). Target Value is PLAN_VALUE, Target Qty is ORG_PLAN.
+   - Customer Master: ZIVF_CustomerMaster_01_MD (~69,104 rows). Join on fact.dealer_code = cm.KUNNR. Customer/Dealer Name is cm.NAME1. Mandatory filter: (cm.KLABC IS NULL OR cm.KLABC <> 'X').
+   - SKU / Material Master: ZIVR_SKUMaster_01_TR (~30,000 rows). Join on fact.SKU = sk.MATNR. Description is MAKTX or PROD_TITLE, Brand is BRAND, Sub Brand is SUB_BRAND, Category Code is CAT_CODE, Construction is CONSTUCTION, Tyre Type is TYRE_TYPE (or TYRE_TP: TRUCK, LCV, CAR, etc.).
+   - Category Master: ZIVF_CategoryMaster_01_TR. Join on sk.CAT_CODE = cat.CAT_CODE. Category Description is cat.CAT_DESC (TBR, PCR, TBB, etc.).
+   - Territory Master: ZIVF_TerritoryMaster_01_TR. Join on cm.BZIRK = tm.BZIRK. Territory Name is tm.NAME, Region code is tm.REGIO, Zone code is tm.P_ZONE.
+   - Region Master: ZIVF_RegionMaster_MD_01. Join on tm.REGIO = rm.region_code or cm.REGIO = rm.region_code. Region Name is rm.region_name (DELHI, MUMBAI, KOLKATA, etc.), Zone code is rm.zone_code.
+   - Zone Master: ZIVF_ZoneMaster_01_TR. Join on rm.zone_code = zm.P_ZONE or tm.P_ZONE = zm.P_ZONE. Zone Name is zm.NAME (NORTH, WEST, EAST, SOUTH, etc.).
+   - Date Master: ZITR_DayAttribute_01_TR. Join on fact.invoice_date = da.Date_. Year-Month is da.YMONTH, Year is da.CAL_YEAR, Qtr is da.QTR.
 3. Filtering & Exclusion Rules:
-   - Distribution Channel: ALWAYS filter distribution_channel = 10 (or '10').
-   - Cancelled Invoices Flag: ALWAYS filter (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1')).
-   - Exclude Cancelled Sales Invoices:
-     LEFT JOIN "SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
-       ON fact.invoice_number = can.invoice_number
-      AND fact.plant = can.plant
-      AND fact.FKART = can.FKART
-      AND (can.distribution_channel = 10 OR can.distribution_channel = '10')
-     WHERE can.invoice_number IS NULL
+   - Distribution Channel: ALWAYS filter (fact.distribution_channel = 10 OR fact.distribution_channel = '10').
+   - Cancelled Invoices Exclusion (CRITICAL FOR PERFORMANCE & MEMORY):
+     ALWAYS filter directly on the fact view:
+     AND (fact.indicator_cancel IS NULL OR fact.indicator_cancel NOT IN ('X', 'Y', '1'))
+     NOTE: Both CurrentSales and SalesHistory fact views contain the indicator_cancel column ('X' indicates cancelled).
+     DO NOT join ZPVF_SD_CancelledSalesInvoice_01_TR across 30M rows, as multi-column string join on 30M rows exhausts HANA memory (GLOBAL_ALLOCATION_LIMIT).
    - Customer Status: ALWAYS filter (cm.KLABC IS NULL OR cm.KLABC <> 'X') on ZIVF_CustomerMaster_01_MD (exclude deleted/test/scrap customers).
 4. Business Metrics:
-   - Sales / Revenue = SUM(invoice_value)
-   - Volume / Quantity = SUM(Tyre_Quantity) or SUM(volume)
-   - Net Sales = SUM(invoice_value) - SUM(COALESCE(total_discount, 0))
-   - Average Realization = SUM(invoice_value) / NULLIF(SUM(Tyre_Quantity), 0)
+   - Sales / Revenue = SUM(fact.invoice_value)
+   - Volume / Quantity = SUM(fact.Tyre_Quantity) or SUM(fact.volume)
+   - Net Sales = SUM(fact.invoice_value) - SUM(COALESCE(fact.total_discount, 0))
+   - Average Realization = SUM(fact.invoice_value) / NULLIF(SUM(fact.Tyre_Quantity), 0)
    - Planned Target Value = SUM(PLAN_VALUE), Planned Qty = SUM(ORG_PLAN)
-   - Target Achievement % = (SUM(invoice_value) / NULLIF(SUM(PLAN_VALUE), 0)) * 100
+   - Target Achievement % = (SUM(fact.invoice_value) / NULLIF(SUM(PLAN_VALUE), 0)) * 100
 """
         chunks.append(_chunk(biz_rules, db="SAP_S4", table="BUSINESS_RULES", kind="schema"))
 
@@ -1337,31 +1333,35 @@ SCHEMA & BUSINESS DEFINITIONS:
 2. MANDATORY FILTERS & BUSINESS RULES (CRITICAL):
    - Customer Master Filter: ALWAYS filter (cm.KLABC IS NULL OR cm.KLABC <> 'X') on "SAP_S4"."ZIVF_CustomerMaster_01_MD" to exclude test/scrap/non-eligible accounts.
    - Distribution Channel: ALWAYS filter (fact.distribution_channel = 10 OR fact.distribution_channel = '10') on sales fact views.
-   - Cancellation Check (TWO-LAYER GUARD):
-     1) Filter fact cancellation flag: AND (fact.indicator_cancel IS NULL OR fact.indicator_cancel NOT IN ('X', 'Y', '1'))
-     2) Cross-check with dataset 10 ("SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR"):
-        LEFT JOIN "SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
-          ON fact.invoice_number = can.invoice_number
-         AND fact.plant = can.plant
-         AND fact.FKART = can.FKART
-         AND (can.distribution_channel = 10 OR can.distribution_channel = '10')
-        WHERE can.invoice_number IS NULL
-        If an invoice exists in "ZPVF_SD_CancelledSalesInvoice_01_TR", it is cancelled and MUST NOT be counted.
+   - Cancellation Check (MEMORY-SAFE FILTER):
+     ALWAYS filter cancellation directly on the fact view:
+     AND (fact.indicator_cancel IS NULL OR fact.indicator_cancel NOT IN ('X', 'Y', '1'))
+     CRITICAL: DO NOT JOIN "SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR" on large sales queries! Both fact views already have the indicator_cancel column ('X' = cancelled). Joining 30M rows with CancelledSalesInvoice exhausts SAP HANA transient memory (GLOBAL_ALLOCATION_LIMIT).
    - Current Sales vs Historical Sales:
-     * If query is specifically about current period / MTD: Use "SAP_S4"."ZPVF_SD_CurrentSales_01_TR".
+     * If query is about current period / MTD: Use "SAP_S4"."ZPVF_SD_CurrentSales_01_TR".
      * If query is specifically about prior historical periods: Use "SAP_S4"."ZPVF_SD_SalesHistory_01_TR".
-     * If query spans full time, trend across months, or YoY: UNION ALL both datasets:
+     * If query spans full time, trend across months, or YoY: Only project needed columns in UNION ALL:
        (
-         SELECT distribution_channel, plant, invoice_number, invoice_date, indicator_cancel, dealer_code, ship_to_party, SKU, batch, volume, ndp_value, old_code, total_discount, FKART, gst, invoice_value, taxable_value, Tyre_Quantity
+         SELECT distribution_channel, plant, invoice_number, invoice_date, indicator_cancel, dealer_code, ship_to_party, SKU, invoice_value, Tyre_Quantity
          FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR"
          WHERE (distribution_channel = 10 OR distribution_channel = '10')
            AND (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1'))
          UNION ALL
-         SELECT distribution_channel, plant, invoice_number, invoice_date, indicator_cancel, dealer_code, ship_to_party, SKU, batch, volume, ndp_value, old_code, total_discount, FKART, gst, invoice_value, taxable_value, Tyre_Quantity
+         SELECT distribution_channel, plant, invoice_number, invoice_date, indicator_cancel, dealer_code, ship_to_party, SKU, invoice_value, Tyre_Quantity
          FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"
          WHERE (distribution_channel = 10 OR distribution_channel = '10')
            AND (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1'))
        ) fact
+   - Canonical Customer Ranking Query (e.g. Top 2 Customers by total sales):
+     SELECT cm.NAME1 AS customer_name, fact.dealer_code, SUM(fact.invoice_value) AS total_sales
+     FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" fact
+     JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON fact.dealer_code = cm.KUNNR
+     WHERE (fact.distribution_channel = 10 OR fact.distribution_channel = '10')
+       AND (fact.indicator_cancel IS NULL OR fact.indicator_cancel NOT IN ('X', 'Y', '1'))
+       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+     GROUP BY cm.NAME1, fact.dealer_code
+     ORDER BY total_sales DESC
+     LIMIT 2
 
 3. CORE METRICS:
    - Sales / Revenue: SUM(fact.invoice_value)
@@ -1375,7 +1375,9 @@ SCHEMA & BUSINESS DEFINITIONS:
 
 4. SYNTAX & FORMATTING (SAP HANA SQL):
    - Always qualify views with "SAP_S4"."VIEW_NAME".
-   - Use double quotes " for object names in SAP HANA SQL. NEVER use MySQL backticks `.
+   - Use double quotes ONLY around schema and view names, e.g. "SAP_S4"."ZPVF_SD_SalesHistory_01_TR".
+   - DO NOT put double quotes around column names (write fact.dealer_code, cm.NAME1, fact.invoice_value). In SAP HANA, double quotes on columns enforce case sensitivity and cause invalid column errors.
+   - NEVER use MySQL backticks `.
    - Date functions: YEAR(invoice_date), MONTH(invoice_date), TO_VARCHAR(invoice_date, 'YYYY-MM').
    - For limits: use LIMIT N at the end of the query.
    - For per-group rankings (e.g. top dealer per category/zone): use ROW_NUMBER() OVER (PARTITION BY ... ORDER BY SUM(...) DESC) AS rn.
@@ -2240,6 +2242,7 @@ def session_rag_chat_controller(get_connection_func):
 
     workspace_id = None
     sql_results = []
+    sql_query = ""
     system_prompt = SYS
     try:
         conn = get_connection_func()
@@ -2377,375 +2380,7 @@ def session_rag_chat_controller(get_connection_func):
         sql_sys = get_prompt(workspace_id, 'sql_generation')
         if not sql_sys or not sql_sys.strip():
             sql_sys = DEFAULT_SQL_SYS
-#         """You are a Senior Data Analyst, SQL Expert, and Business Intelligence Assistant.
 
-# PRIMARY OBJECTIVE
-
-# Generate SQL that computes answers from the FULL DATASET.
-
-# BUSINESS DEFINITIONS
-# - Dealer = Customer
-# - Sales = SUM(invoice_value)
-# - Revenue = SUM(invoice_value)
-# - Volume = SUM(qty)
-# - Net Sales = SUM(invoice_value) - SUM(total_discount)
-# - Invoice Count = COUNT(DISTINCT invoice_number)
-# - Product = Material
-# - Product Category = the `CATEGORY` column (Tyre, Tube, Flap, ...) — a PRODUCT attribute; join product ON invoice.Material = product.Material
-# - Construction / "tyre type" / "tube type" = the `CONSTRUCTION` column (RADIAL, BIAS, ...) — a PRODUCT attribute on the product table (join on Material)
-# - Vehicle / "vehicle type" / "vehicle category" = the `vehicle type` column (TRUCK, CAR, LCV, ...) — a PRODUCT attribute on the product table (join on Material). This is DIFFERENT from CATEGORY; never substitute one for the other.
-# - These three (CATEGORY, CONSTRUCTION, `vehicle type`) are PRODUCT attributes keyed by Material. They are NEVER on the customer/dealer table; do not join them on Customer.
-# - "category-wise" / "by category" / "product category wise" / "per category" => GROUP BY `CATEGORY`, NOT Material
-# - "product-wise" / "by product" => GROUP BY Material
-# - Top Dealer = Dealer ranked by Sales descending
-# - Worst Dealer = Dealer ranked by Sales ascending
-# - Best Performing Dealer = Dealer ranked by Sales descending
-# - Lowest Performing Dealer = Dealer ranked by Sales ascending
-# - Top Product = Product ranked by Sales descending
-# - Worst Product = Product ranked by Sales ascending
-# - Region Performance = SUM(invoice_value) grouped by region
-# - Zone Performance = SUM(invoice_value) grouped by zone
-# - Average Realization = SUM(invoice_value) / NULLIF(SUM(qty),0)
-
-# AUTHORITATIVE SCHEMA MAP PRECEDENCE
-# - If the user message contains an "AUTHORITATIVE SCHEMA MAP", a "GROUP-BY MAPPING",
-#   or a "HIERARCHY DRILL-DOWN" block, those are RESOLVED FROM THE REAL SCHEMA and
-#   OVERRIDE these generic definitions for table names, column ownership, joins,
-#   filters and group-by. Follow them exactly.
-# - FAN-OUT: a dimension table must be joined on its key so each fact row matches
-#   at most one dimension row. Joining a product attribute on the wrong key (e.g.
-#   Customer) multiplies rows and inflates SUM — never do it.
-# BUSINESS DEFINITIONS
-# - Dealer = Customer
-# - Sales = SUM(invoice_value)
-# - Revenue = SUM(invoice_value)
-# - Volume = SUM(qty)
-# - Net Sales = SUM(invoice_value) - SUM(total_discount)
-# - Invoice Count = COUNT(DISTINCT invoice_number)
-# - Product = Material
-# - Product Category ("Tyre", "Tube", "Flap") = ALWAYS LEFT JOIN `category_master` on `sku_master.category = category_master.category_code` and select `category_name`. Do NOT just select the category code from `sku_master`.
-# - Construction / "tyre type" / "tube type" ("RADIAL", "BIAS") = ALWAYS LEFT JOIN `construction_master` on `sku_master.construction = construction_master.construction_code` and select `construction_description`.
-# - Vehicle / "vehicle type" / "vehicle category" ("TRUCK", "CAR") = ALWAYS LEFT JOIN `tyre_type_master` on `sku_master.tyre_type = tyre_type_master.tyre_type_code` and select `tyre_type_name`. This is DIFFERENT from CATEGORY.
-# - These attributes are PRODUCT attributes keyed by Material (`sku_master`). First LEFT JOIN `sku_master` to fact, then LEFT JOIN these master tables to `sku_master`. Never join them directly on Customer.
-# - "category-wise" / "by category" / "product category wise" / "per category" => GROUP BY `CATEGORY`, NOT Material
-# - "product-wise" / "by product" => GROUP BY Material
-# - Top Dealer = Dealer ranked by Sales descending
-# - Worst Dealer = Dealer ranked by Sales ascending
-# - Best Performing Dealer = Dealer ranked by Sales descending
-# - Lowest Performing Dealer = Dealer ranked by Sales ascending
-# - Top Product = Product ranked by Sales descending
-# - Worst Product = Product ranked by Sales ascending
-# - Region Performance = SUM(invoice_value) grouped by region
-# - Zone Performance = SUM(invoice_value) grouped by zone
-# - Average Realization = SUM(invoice_value) / NULLIF(SUM(qty),0)
-
-
-
-# PERFORMER RESOLUTION
-
-# - The word "performer" does NOT imply Dealer.
-# - Determine the ranking entity ONLY from the user's wording.
-# - If the user explicitly says "dealer", rank dealers.
-# - If the user explicitly says "customer", rank customers.
-# - If the user explicitly says "product", rank products.
-# - If the user explicitly says "region", rank regions.
-# - If the user explicitly says "zone", rank zones.
-# - If the user only says "performer" without specifying an entity, default to Customer. Only use Dealer, Product, Region, Zone, etc. when the user explicitly mentions them.
-# - NEVER rewrite "performer" as "dealer" unless the user explicitly uses the word "dealer".
-
-# AUTHORITATIVE SCHEMA MAP PRECEDENCE
-# - If the user message contains an "AUTHORITATIVE SCHEMA MAP", a "GEOGRAPHY CHAIN",
-#   a "GROUP-BY MAPPING", or a "HIERARCHY DRILL-DOWN" block, those are RESOLVED
-#   FROM THE REAL SCHEMA and OVERRIDE these generic definitions for table names,
-#   column ownership, joins, filters and group-by. Follow them exactly.
-# - REGION / ZONE ARE NEVER A SINGLE JOIN: if the user asks about region or zone,
-#   you MUST follow the GEOGRAPHY CHAIN block exactly — it requires TWO joins
-#   (customer -> territory_master -> region_master). Never reference `region` or
-#   `zone` on `customer_master` or any alias of it (e.g. `cm.zone` is INVALID).
-# - FAN-OUT: a dimension table must be joined on its key so each fact row matches
-#   at most one dimension row. Joining a product attribute on the wrong key (e.g.
-#   Customer) multiplies rows and inflates SUM — never do it.
-
-
-# METRIC PRIORITY
-# - Whenever user asks: "Top Dealer", "Best Dealer", "Leading Dealer" -> Use: SUM(invoice_value)
-# - Whenever user asks: "Worst Dealer", "Lowest Dealer", "Poor Performing Dealer" -> Use: SUM(invoice_value)
-# - Never use: qty, taxable_value, gst, discount unless explicitly requested.
-
-# DATA RELIABILITY RULES
-
-# 1. Use schema information only to identify:
-
-#    * tables
-#    * columns
-#    * relationships
-
-# 1b. COLUMN OWNERSHIP IS NON-NEGOTIABLE. A "COLUMN LOCATION INDEX" is provided
-#    in the user message listing exactly which table owns each column. Before you
-#    write any column reference (`table`.`column`), verify that column appears in
-#    that table's list. NEVER reference a column on a table that does not own it
-#    (this causes MySQL error 1054). If a column you need lives on a different
-#    table, JOIN that table using one of the provided LIKELY JOIN KEYS. Do not
-#    assume a "natural"-sounding column (e.g. a product/customer attribute) lives
-#    on the fact/invoice table — check the index.
-
-# 2. Never use example values, retrieved rows, vector chunks, sample records, or context snippets to calculate business results.
-
-# 3. Every ranking, trend, comparison, aggregation, KPI, sales metric, customer metric, dealer metric, category metric, region metric, and performance metric MUST be computed using SQL.
-
-# 4. For Top N or Bottom N questions:
-
-# Return ONLY the ranking result unless the user explicitly asks for:
-# - monthwise analysis
-# - trend analysis
-# - yearly analysis
-# - time series analysis
-
-# Do not add monthly, yearly, trend, or detailed breakdowns unless explicitly requested.
-
-# 5. For monthwise analysis:
-#    Use the actual date column and aggregate by month before ranking.
-
-# 6. Never generate SQL that ranks monthly rows directly using:
-#    LIMIT N after GROUP BY month.
-
-# 7. If the question asks for Top N entities (e.g., dealers, customers) month-wise or trend:
-#    NEVER use `IN (SELECT ... LIMIT N)` because MySQL does not support LIMIT inside IN subqueries.
-#    Instead, you MUST use a JOIN with a derived table:
-   
-#    SELECT t.entity, DATE_FORMAT(STR_TO_DATE(t.date_col, '%Y-%m-%d'), '%Y-%m') as month, SUM(t.metric) as total_sales
-#    FROM `table` t
-#    JOIN (
-#        SELECT entity FROM `table`
-#        GROUP BY entity
-#        ORDER BY SUM(metric) DESC
-#        LIMIT 2
-#    ) as top_entities ON t.entity = top_entities.entity
-#    GROUP BY t.entity, month
-#    ORDER BY top_entities.total_sales DESC, month;
-# 7. If the question asks for Top N entities (e.g., dealers, customers) month-wise or trend:
-#    NEVER use `IN (SELECT ... LIMIT N)` because MySQL does not support LIMIT inside IN subqueries.
-#    Instead, you MUST use a LEFT JOIN with a derived table:
-   
-#    SELECT t.entity, DATE_FORMAT(STR_TO_DATE(t.date_col, '%Y-%m-%d'), '%Y-%m') as month, SUM(t.metric) as total_sales
-#    FROM `table` t
-#    LEFT JOIN (
-#        SELECT entity FROM `table`
-#        GROUP BY entity
-#        ORDER BY SUM(metric) DESC
-#        LIMIT N
-#    ) as top_entities ON t.entity = top_entities.entity
-#    GROUP BY t.entity, month
-#    ORDER BY top_entities.total_sales DESC, month;
-   
-#    Adjust the DATE_FORMAT and STR_TO_DATE depending on the actual date format in the table.
-
-# 8. Use:
-#    SUM()
-#    COUNT()
-#    AVG()
-#    MIN()
-#    MAX()
-#    GROUP BY
-#    ORDER BY
-#    HAVING
-# 8. Use:
-#    SUM()
-#    COUNT()
-#    AVG()
-#    MIN()
-#    MAX()
-#    GROUP BY (CRITICAL: Every non-aggregated column in the SELECT clause MUST be present in the GROUP BY clause to prevent `only_full_group_by` errors.)
-#    ORDER BY
-#    HAVING
-
-# 9. If SQL execution is possible:
-#    SQL results are always more authoritative than retrieved context.
-
-# 10. Never estimate.
-
-# 11. Never infer missing values.
-
-# 12. Never hallucinate business results.
-
-# 13. PRESERVE EXACT DECIMALS: Never round monetary values in SQL unless explicitly asked. Return the exact sum with decimals intact.
-# 13. PRESERVE EXACT DECIMALS: Never round monetary values in SQL unless explicitly asked. Return the exact sum with decimals intact.
-# 14. NEGATIVE VALUES: NEVER add `> 0` or `>= 0` filters to sales or invoice columns unless the user explicitly asks to "exclude returns" or "only show positive sales". If a dealer's total sales are negative (e.g. -19022.00), that is a valid exact figure and must be included.
-
-# COLUMN HYGIENE
-# - All numeric columns (sales, invoice_value, quantity, discount, tax) are strictly typed as DECIMAL or BIGINT in the database.
-# - DO NOT use CAST or REGEXP_REPLACE or REPLACE to clean numeric columns. Just use SUM(`col`).
-# - ONLY format strings if the column is explicitly a string format, but numeric columns are already typed.
-
-# PER-GROUP TOP-N — "CATEGORY-WISE", "PER", "EACH", "BY X", "X-WISE"
-
-# - "Top N customers per category", "category wise top N", "best N per region",
-#   "top N dealers for each zone" all mean: rank WITHIN each group and keep N rows
-#   from EVERY group. NEVER answer these with a single global ORDER BY ... LIMIT N
-#   (that returns only the N biggest pairs overall, not N per group).
-# - Use a window function partitioned by the group:
-#       WITH agg AS (
-#         SELECT `<group_col>` AS grp, `<entity_col>` AS entity,
-#                SUM(`<value_col>`) AS metric
-#         FROM `<fact>` JOIN `<dim>` ON ...
-#         GROUP BY `<group_col>`, `<entity_col>`
-#       ),
-#       ranked AS (
-#         SELECT grp, entity, metric,
-#                ROW_NUMBER() OVER (PARTITION BY grp ORDER BY metric DESC) AS rn
-#         FROM agg
-#       )
-#       SELECT grp, entity, metric FROM ranked WHERE rn <= N
-#       ORDER BY grp, metric DESC;
-# - Use a single global ORDER BY ... LIMIT N ONLY when the question has NO
-#   per-group qualifier (plain "top N customers").
-# - "Top N customers per category", "category wise top N", "best N per region",
-#   "top N dealers for each zone" all mean: rank WITHIN each group and keep N rows
-#   from EVERY group. NEVER answer these with a single global ORDER BY ... LIMIT N
-#   (that returns only the N biggest pairs overall, not N per group).
-# - Use a window function partitioned by the group:
-#       WITH agg AS (
-#         SELECT `<group_col>` AS grp, `<entity_col>` AS entity,
-#                SUM(`<value_col>`) AS metric
-#         FROM `<fact>` LEFT JOIN `<dim>` ON ...
-#         GROUP BY `<group_col>`, `<entity_col>`
-#       ),
-#       ranked AS (
-#         SELECT grp, entity, metric,
-#                ROW_NUMBER() OVER (PARTITION BY grp ORDER BY metric DESC) AS rn
-#         FROM agg
-#       )
-#       SELECT grp, entity, metric FROM ranked WHERE rn <= N
-#       ORDER BY grp, metric DESC;
-# - Use a single global ORDER BY ... LIMIT N ONLY when the question has NO
-#   per-group qualifier (plain "top N customers").
-
-# PLAIN TOP-N vs WINDOWED TOP-N
-# - A plain "top N" / "worst N" with NO per-group qualifier needs only
-#   `... GROUP BY entity ORDER BY metric DESC LIMIT N`. Do NOT use a window
-#   function or CTE for it — that adds a needless alias that often breaks.
-# - Use the window-function pattern ONLY for per-group ("X-wise") questions.
-
-# HIERARCHY DRILL-DOWN
-# - The product data has a hierarchy (e.g. CATEGORY -> CONSTRUCTION -> VEHICLE_TYPE
-#   -> ... -> MATERIAL), from broad to specific.
-# - When the user NAMES A VALUE at one level (e.g. "tyre", "radial", "truck") and
-#   asks for "top/worst N <something> of/within it" or any breakdown, treat the
-#   named value as a FILTER (WHERE that_level = 'value') and GROUP BY the NEXT
-#   level DOWN, ranking by the metric (default Sales = SUM(invoice_value)).
-#   Example: "top 3 performing tyre categories" =>
-#       WHERE `category` = 'Tyre'
-#       GROUP BY `construction`            -- the next level below CATEGORY
-#       ORDER BY SUM(`Invoice_Value`) DESC, `construction` ASC
-#       LIMIT 3
-#   Never GROUP BY the same level you filtered on (that returns just one row).
-# - If the user explicitly names the child level ("...constructions",
-#   "...vehicle types"), GROUP BY exactly that level.
-# - If a HIERARCHY DRILL-DOWN block is provided in the user message, follow it
-#   exactly (it tells you the filter column/value and the group-by level, both
-#   resolved to real tables). JOIN across tables via the LIKELY JOIN KEYS when the
-#   filter level and group level live on different tables.
-# JOINS AND MISSING DIMENSIONS (CRITICAL)
-# - ALWAYS use `LEFT JOIN` for ANY join to a dimension table (e.g., `customer_master`, `sku_master`, `category_master`, etc.). NEVER use an `INNER JOIN` or `JOIN` anywhere in the query when fetching dimension data, even when joining from a CTE!
-# - NEVER use an `INNER JOIN` (or plain `JOIN`) that might drop valid records just because the dimension data is missing.
-# - When selecting ANY name from a dimension table (whether inside a CTE or in the final MAIN query), you MUST wrap it in `COALESCE` to prevent nulls in the JSON output. 
-#   Example: `SELECT COALESCE(cm.Cname, 'N/A') AS dealer_name`
-# - SUPER CRITICAL BUG FIX: When grouping or selecting after a LEFT JOIN, ALWAYS use the foreign key from the FACT table (e.g., `sales_data.customer`), NEVER the primary key from the DIMENSION table (e.g., `customer_master.KUNNR`). Grouping by the dimension key will lump all unmatched records into a single NULL bucket! This applies to ALL dimension tables.
-
-# MULTI-LEVEL BREAKDOWN ("Top/Worst N along with their X-wise breakup")
-# ENTITY RESOLUTION FOR BREAKDOWN QUERIES
-
-# - In queries of the form:
-#   "Top/Bottom/Worst N performers along with <dimension>-wise sales breakup"
-
-#   the "<dimension>-wise" phrase specifies ONLY the breakdown dimension.
-
-# - NEVER infer the ranking entity from the breakdown dimension.
-
-# - "product category-wise", "product construction-wise", "vehicle-wise", "region-wise", etc. describe ONLY how to split the selected entities after ranking.
-# - EXCEPTION: If the user explicitly asks for "Top/Worst N <Entity> wise sales" WITHOUT another ranking entity (e.g., "worst 2 construction type wise sales"), it means you must rank the <Entity> itself. Just GROUP BY the <Entity>, ORDER BY sales, and LIMIT N. DO NOT use ROW_NUMBER() or PARTITION BY unless explicitly asked to find "per <Entity>".
-
-# - The ranking entity must be resolved independently:
-#     - dealer -> Dealer
-#     - customer -> Customer
-#     - product -> Product
-#     - region -> Region
-#     - zone -> Zone
-#     - performer -> Customer (default)
-
-# Example:
-# "Worst 2 performers along with their product construction wise sales breakup"
-
-# Correct interpretation:
-# 1. Rank Customers by SUM(invoice_value) ASC.
-# 2. Select the Bottom 2 Customers.
-# 3. Break down each selected Customer by Product Construction.
-
-# Incorrect interpretation:
-# Rank Products because "product construction" appears in the question.
-
-# - When asked to find the Top N or Worst N entities overall AND THEN show their breakdown (e.g., "worst 2 performers along with their product category wise sales breakup"):
-#   1. FIRST, create a CTE to calculate the total aggregate (SUM) per entity and LIMIT to Top/Worst N.
-#      Example: `WITH top_entities AS (SELECT entity, SUM(metric) as total FROM fact GROUP BY entity ORDER BY total DESC LIMIT N)`
-#   2. THEN, create a breakdown CTE that joins the first CTE back to the fact/dimensions. YOU MUST include the `total` from the first CTE in this second CTE so it can be used for sorting later.
-#      Example: `breakdown AS (SELECT wp.entity, wp.total, dim.category, SUM(fact.metric) as category_sales FROM top_entities wp LEFT JOIN fact ... GROUP BY wp.entity, wp.total, dim.category)`
-#   3. FINALLY, in the main query, select the columns from the breakdown CTE.
-#   4. CRITICAL: In the final main query, you MUST `ORDER BY` the `total` column (e.g. `ORDER BY breakdown.total DESC`) so that the overall Top N / Worst N sequence is preserved, followed by the category sales!
-#   5. NEVER rank individual unaggregated rows using ROW_NUMBER() without summing first.
-#   6. Prefer simple `ORDER BY ... LIMIT N` for direct Top/Worst queries. Avoid complex window functions like `ROW_NUMBER()` unless a nested breakdown is strictly required.
-#   7. CRITICAL: MySQL 8 supports `LIMIT` inside `WITH` CTEs. DO NOT comment out the `LIMIT N` clause inside the CTE. Use `LIMIT N` directly (e.g. `LIMIT 2` and NOT `-- LIMIT 2`).
-
-# HIERARCHY DRILL-DOWN
-# - The product data has a hierarchy (e.g. CATEGORY -> CONSTRUCTION -> VEHICLE_TYPE
-#   -> ... -> MATERIAL), from broad to specific.
-# - When the user NAMES A VALUE at one level (e.g. "tyre", "radial", "truck") and
-#   asks for "top/worst N <something> of/within it" or any breakdown, treat the
-#   named value as a FILTER (WHERE that_level = 'value') and GROUP BY the NEXT
-#   level DOWN, ranking by the metric (default Sales = SUM(invoice_value)).
-#   Example: "top 3 performing tyre categories" =>
-#       WHERE `category` = 'Tyre'
-#       GROUP BY `construction`            -- the next level below CATEGORY
-#       ORDER BY SUM(`Invoice_Value`) DESC, `construction` ASC
-#       LIMIT 3
-#   Never GROUP BY the same level you filtered on (that returns just one row).
-# - If the user explicitly names the child level ("...constructions",
-#   "...vehicle types"), GROUP BY exactly that level.
-# - If a HIERARCHY DRILL-DOWN block is provided in the user message, follow it
-#   exactly (it tells you the filter column/value and the group-by level, both
-#   resolved to real tables). JOIN across tables via the LIKELY JOIN KEYS when the
-#   filter level and group level live on different tables.
-
-# RESERVED WORDS — NEVER USE AS ALIASES
-# - `RANK`, `ROW_NUMBER`, `ORDER`, `GROUP`, `DESC`, `ASC`, `ROWS`, `RANGE`,
-#   `COUNT`, `SUM`, `OVER`, `PARTITION`, `DENSE_RANK`, `LAG`, `LEAD` are reserved
-#   in MySQL 8.0 and will cause error 1064 if used as a column alias.
-# - Name the row-number column `rn` (never `rank`). Backtick EVERY alias and
-#   identifier without exception.
-# DETERMINISTIC ORDERING — MANDATORY TIE-BREAKER
-# - Many entities can tie on the same total (e.g. several customers at 0 sales).
-#   ORDER BY the metric alone returns boundary rows in arbitrary order.
-# - EVERY ranking ORDER BY must append the entity key as a tie-breaker:
-#       ORDER BY total_sales DESC, `customer` ASC   -- top N
-#       ORDER BY total_sales ASC,  `customer` ASC   -- worst N
-# - Same inside windows: ROW_NUMBER() OVER (PARTITION BY grp ORDER BY metric DESC, `entity` ASC)
-
-# DIALECT RULES
-
-# 1. You MUST use valid MySQL syntax.
-# 2. Do NOT use PostgreSQL functions like DATE_TRUNC.
-# 3. For monthly grouping in MySQL, if the date is a string (e.g. 'DD-MM-YYYY'), parse it using STR_TO_DATE(date_col, '%d-%m-%Y') before grouping with DATE_FORMAT(..., '%Y-%m').
-# 4. ALWAYS use backticks ` for table and column names.
-
-# OUTPUT RULES
-
-# Return ONLY valid JSON:
-
-# {
-# "db": "",
-# "sql": "",
-# "reasoning": ""
-# }
-# """
         sql_user = f"Schemas available:\n{schema_context}\n\nOriginal Question: {question}\n\nCanonical Query (Structured Intent):\n{canonical_query_str}"
         sql_user += "\n\nCRITICAL FINAL RULE: NEVER SELECT or GROUP BY `customer_master.KUNNR` or any other dimension's Primary Key! You MUST SELECT and GROUP BY the Fact Table's Foreign Key (e.g. `sales_data.customer`) instead. Selecting dimension keys causes unmatched rows to lump together as NULLs."
         schema_grounding, col_to_tables = _build_schema_grounding(schema_chunks)
@@ -2928,6 +2563,13 @@ def session_rag_chat_controller(get_connection_func):
                                         run_query,
                                         flags=re.IGNORECASE
                                     )
+                                # In SAP HANA, double quotes on columns make them strictly case-sensitive.
+                                # Strip double quotes from table.column references (e.g. fact."invoice_number" -> fact.invoice_number)
+                                # so HANA matches them case-insensitively to SYS.VIEW_COLUMNS.
+                                run_query = re.sub(r'\b([a-zA-Z0-9_]+)\."([a-zA-Z0-9_]+)"', r'\1.\2', run_query)
+                                # Fix alias mismatches like C.INVOICE_NUMBER when alias is can or vice versa
+                                if 'can.' in run_query.lower() and 'c.' in run_query.lower():
+                                    run_query = re.sub(r'\bc\.', 'can.', run_query, flags=re.IGNORECASE)
 
                             cur_sql.execute(run_query)
                             rows = cur_sql.fetchall()
@@ -2956,6 +2598,19 @@ def session_rag_chat_controller(get_connection_func):
                         except Exception as ex:
                             agg_sql_error = str(ex)
                             print(f"[SQL_EXEC] Attempt {_attempt + 1} failed: {ex}")
+
+                            # Self-healing for HANA memory limits and column reference errors
+                            if is_hana and ("cannot allocate enough memory" in str(ex).lower() or "allocation failed" in str(ex).lower()):
+                                try:
+                                    print("[SQL_EXEC] HANA memory limit hit — attempting auto-repair without CancelledSalesInvoice join...")
+                                    repaired_sql = re.sub(r'LEFT\s+JOIN\s+.*?CancelledSalesInvoice.*?(?=WHERE|GROUP|ORDER|\n\s*WHERE|\Z)', ' ', sql_query, flags=re.IGNORECASE | re.DOTALL)
+                                    repaired_sql = re.sub(r'\b(?:can|c)\.[a-zA-Z0-9_]+\s*IS\s*NULL', '1=1', repaired_sql, flags=re.IGNORECASE)
+                                    if repaired_sql != sql_query:
+                                        sql_query = repaired_sql
+                                        continue
+                                except Exception as _heal_err:
+                                    print(f"[SQL_EXEC] Auto-heal attempt error: {_heal_err}")
+
                             if _attempt == 1:
                                 break
                             # Self-heal: send the error back to the model once.
@@ -2966,9 +2621,11 @@ def session_rag_chat_controller(get_connection_func):
                             )
                             if is_hana:
                                 repair_user += (
-                                    "Common fixes for SAP HANA: Use double quotes for view names in schema \"SAP_S4\". "
-                                    "Do NOT use backticks (`). Do NOT end query with a semicolon (;). "
-                                    "Ensure all non-aggregate columns are in GROUP BY. Filter customer master with (cm.KLABC IS NULL OR cm.KLABC <> 'X').\n\n"
+                                    "Common fixes for SAP HANA:\n"
+                                    "- Do NOT join 'ZPVF_SD_CancelledSalesInvoice_01_TR' if querying total sales from 'ZPVF_SD_SalesHistory_01_TR' (30M rows). Use: AND (fact.indicator_cancel IS NULL OR fact.indicator_cancel NOT IN ('X', 'Y', '1')).\n"
+                                    "- Do NOT put double quotes around column names; only quote schema \"SAP_S4\" and view names.\n"
+                                    "- Ensure column aliases match joined tables (e.g. do not reference C.INVOICE_NUMBER if table alias is 'can').\n"
+                                    "- Filter customer master with (cm.KLABC IS NULL OR cm.KLABC <> 'X').\n\n"
                                 )
                             else:
                                 repair_user += (
@@ -3058,6 +2715,7 @@ def session_rag_chat_controller(get_connection_func):
                 "datasets":    res.get("datasets",[]),
                 "source_note": res.get("source_note","")
             },
+            "sql_query": sql_query,
             "follow_up_questions": fuq,
             "chat_id": active_chat_id,
             "visit_number": actual_visit
@@ -3091,6 +2749,7 @@ def session_rag_chat_controller(get_connection_func):
                 "sections":     res.get("sections",[]),
                 "key_findings": res.get("key_findings",[])
             },
+            "sql_query": sql_query,
             "follow_up_questions": fuq,
             "chat_id": active_chat_id,
             "visit_number": actual_visit
@@ -3193,10 +2852,11 @@ def session_rag_chat_controller(get_connection_func):
         "status":              "success",
         "statusCode":          200,
         "answer":              clean_answer,
+        "sql_query":           sql_query,
         "follow_up_questions": fuq,
-        "visualizations": visualizations,
-        "chat_id": active_chat_id,
-        "visit_number": actual_visit
+        "visualizations":      visualizations,
+        "chat_id":             active_chat_id,
+        "visit_number":        actual_visit
     }), 200
 
 
