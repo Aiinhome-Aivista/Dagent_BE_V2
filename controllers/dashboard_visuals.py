@@ -935,7 +935,24 @@ def tyre_sales_data_controller(get_db_connection):
 
         # Construction Filter
         if actual_construction and selected_constructions:
-            valid_constructions = [str(c).strip() for c in selected_constructions if c and str(c).strip().lower() != "all"]
+            label_to_id = {
+                "bias": "1",
+                "radial": "2",
+                "tubeless bias": "3",
+                "tubeless radial": "4",
+                "radial (tube type)": "5",
+                "radial (tubeless)": "6",
+                "solid / otr": "7"
+            }
+            valid_constructions = []
+            for c in selected_constructions:
+                if not c or str(c).strip().lower() == "all":
+                    continue
+                s_c = str(c).strip()
+                if s_c.lower() in label_to_id:
+                    valid_constructions.append(label_to_id[s_c.lower()])
+                else:
+                    valid_constructions.append(s_c)
             if valid_constructions:
                 placeholders = ",".join(["%s"] * len(valid_constructions))
                 where_clauses.append(f"{actual_construction} IN ({placeholders})")
@@ -1404,8 +1421,19 @@ def sales_by_zone_data_controller(get_db_connection):
                 params.append(product_type)
                 
         if construction_type and str(construction_type).lower() != 'all' and actual_const:
+            label_to_id = {
+                "bias": "1",
+                "radial": "2",
+                "tubeless bias": "3",
+                "tubeless radial": "4",
+                "radial (tube type)": "5",
+                "radial (tubeless)": "6",
+                "solid / otr": "7"
+            }
+            c_val = str(construction_type).strip()
+            c_val = label_to_id.get(c_val.lower(), c_val)
             where_clauses.append(f"{actual_const} = %s")
-            params.append(construction_type)
+            params.append(c_val)
 
         if vehicle_type and str(vehicle_type).lower() != 'all' and actual_tyre:
             if "catm" in from_clause:
@@ -1919,6 +1947,15 @@ def available_years_controller(get_db_connection):
                     print(f"Error fetching customer types from {t_name}: {e}")
 
         # 5. Fetch Construction Types (SAP SKUMaster has CONSTUCTION)
+        construction_labels = {
+            1: "Bias",
+            2: "Radial",
+            3: "Tubeless Bias",
+            4: "Tubeless Radial",
+            5: "Radial (Tube Type)",
+            6: "Radial (Tubeless)",
+            7: "Solid / OTR"
+        }
         for tbl in tables:
             t_name = f"`{user_db}`.`{tbl}`"
             actual_construction_type = get_actual_column_name(cursor, t_name, ["constuction", "construction_type", "construction"])
@@ -1932,8 +1969,17 @@ def available_years_controller(get_db_connection):
                             WHERE {actual_construction_type} IS NOT NULL AND {actual_construction_type} <> ''
                             ORDER BY val ASC
                         """)
-                        construction_types = [r["val"] for r in cursor.fetchall() if r["val"]]
-                        if construction_types:
+                        res = []
+                        for r in cursor.fetchall():
+                            raw_val = r["val"]
+                            try:
+                                val_int = int(raw_val)
+                                lbl = construction_labels.get(val_int, f"Type {raw_val}")
+                            except (ValueError, TypeError):
+                                lbl = str(raw_val)
+                            res.append({"value": raw_val, "label": lbl})
+                        if res:
+                            construction_types = res
                             break
                 except Exception as e:
                     print(f"Error fetching construction types from {t_name}: {e}")
