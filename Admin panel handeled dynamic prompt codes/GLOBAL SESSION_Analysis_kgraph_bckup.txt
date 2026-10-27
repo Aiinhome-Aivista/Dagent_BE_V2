@@ -335,13 +335,272 @@ def _fetch_web_data(session_id: str, topics: list, conn) -> list:
         if cursor: cursor.close()
     return results
 
+def _dynamic_inspect_and_aggregate_database(ext_cur, tables: list) -> dict:
+    """
+    100% Generic & Dynamic Master/Transaction profiling and entity resolution.
+    Works for ANY domain (Healthcare, Ports, Logistics, Finance, Sales, Inventory, Custom):
+    1. Dynamically detects Master/Dimension tables (has candidate ID key + descriptive Name/Title/Description).
+    2. Builds ID -> Real Entity Name mapping dictionaries.
+    3. Dynamically detects Transaction/Fact tables (has additive measures, timestamps, and foreign keys).
+    4. Automatically aggregates transaction data using real master entity names.
+    5. Computes exact totals, averages, mins, maxes, categorical breakdowns, and time trends.
+    """
+    profile = {
+        "master_mappings": {},      # { table_name: { str(id): str(name) } }
+        "master_info": {},          # { table_name: { "id_col": str, "name_col": str } }
+        "verified_aggregates": [],  # Human-readable exact calculation strings
+        "table_stats": {}           # { table_name: { "numeric": {...}, "dates": {...}, "rows": int } }
+    }
+
+    numeric_types = ['int', 'decimal', 'float', 'double', 'numeric', 'bigint', 'smallint', 'tinyint']
+    date_types = ['date', 'datetime', 'timestamp']
+
+    # Known non-additive ID/Code patterns to avoid summing as meaningful metrics
+    ID_PATTERN = re.compile(r'(_id|_code|_key|_num|_no|id|code|uuid|kunnr|matnr|phone|zip|postal|year|month|day)$', re.IGNORECASE)
+    NAME_PATTERN = re.compile(r'(name|title|desc|description|label|cname|maktx|party|customer|vendor|vessel|doctor|patient|item|product|account)', re.IGNORECASE)
+
+    table_meta = {}
+
+    # Step A: Profile every table structure
+    for t in tables:
+        if t == 'workspace_files':
+            continue
+        try:
+            ext_cur.execute(f"SHOW COLUMNS FROM `{t}`")
+            cols_info = ext_cur.fetchall()
+            
+            ext_cur.execute(f"SELECT COUNT(*) as cnt FROM `{t}`")
+            row_cnt = (ext_cur.fetchone() or {}).get("cnt", 0)
+
+            numeric_cols = []
+            measure_cols = []
+            id_cols = []
+            name_cols = []
+            date_cols = []
+            text_cols = []
+
+            for c in cols_info:
+                col_name = c["Field"]
+                col_type = (c.get("Type") or "").lower()
+
+                is_num = any(nt in col_type for nt in numeric_types)
+                is_dt = any(dt in col_type for dt in date_types)
+
+                if is_num:
+                    numeric_cols.append(col_name)
+                    if not ID_PATTERN.search(col_name):
+                        measure_cols.append(col_name)
+                    else:
+                        id_cols.append(col_name)
+                elif is_dt:
+                    date_cols.append(col_name)
+                else:
+                    text_cols.append(col_name)
+                    if ID_PATTERN.search(col_name):
+                        id_cols.append(col_name)
+                    if NAME_PATTERN.search(col_name):
+                        name_cols.append(col_name)
+
+            table_meta[t] = {
+                "row_cnt": row_cnt,
+                "cols_info": cols_info,
+                "numeric_cols": numeric_cols,
+                "measure_cols": measure_cols,
+                "id_cols": id_cols,
+                "name_cols": name_cols,
+                "date_cols": date_cols,
+                "text_cols": text_cols
+            }
+        except Exception as e:
+            print(f"[DynamicProfiler] table {t} meta error: {e}")
+
+    # Step B: Identify Master / Dimension Tables & Build Entity Dictionaries
+    for t, meta in table_meta.items():
+        t_lower = t.lower()
+        is_named_master = any(k in t_lower for k in ['master', 'dim', 'lookup', 'type', 'cat'])
+        has_id_and_name = len(meta["id_cols"]) > 0 and len(meta["name_cols"]) > 0
+        is_small_entity = meta["row_cnt"] <= 5000 and (has_id_and_name or is_named_master)
+
+        if is_named_master or has_id_and_name or is_small_entity:
+            # Pick best candidate ID and Name column
+            id_col = meta["id_cols"][0] if meta["id_cols"] else (meta["cols_info"][0]["Field"] if meta["cols_info"] else None)
+            name_col = meta["name_cols"][0] if meta["name_cols"] else None
+
+            if not name_col:
+                # Fallback to first non-id text column
+                candidates = [c for c in meta["text_cols"] if c != id_col]
+                if candidates:
+                    name_col = candidates[0]
+
+            if id_col and name_col and id_col != name_col:
+                try:
+                    ext_cur.execute(f"SELECT `{id_col}`, `{name_col}` FROM `{t}` WHERE `{id_col}` IS NOT NULL LIMIT 300")
+                    rows = ext_cur.fetchall()
+                    mapping = {}
+                    for r in rows:
+                        k = str(r[id_col]).strip()
+                        v = str(r[name_col]).strip()
+                        if k and v:
+                            mapping[k] = v
+
+                    if mapping:
+                        profile["master_mappings"][t] = mapping
+                        profile["master_info"][t] = {"id_col": id_col, "name_col": name_col}
+                        print(f"[DynamicProfiler] Detected Master Table '{t}': mapped {len(mapping)} entities via `{id_col}` -> `{name_col}`")
+                except Exception as me:
+                    print(f"[DynamicProfiler] mapping fetch error on {t}: {me}")
+
+    # Step C: Compute Verified Aggregations for Fact / Transaction Tables
+    for t, meta in table_meta.items():
+        row_cnt = meta["row_cnt"]
+        if row_cnt == 0:
+            continue
+
+        table_verified = [f"Table `{t}` (Total Verified Rows: {row_cnt}):"]
+
+        # 1. Global Measure Summaries (SUM, AVG, MIN, MAX)
+        for m_col in meta["measure_cols"][:4]:
+            try:
+                ext_cur.execute(f"SELECT SUM(`{m_col}`) as sum_val, AVG(`{m_col}`) as avg_val, MIN(`{m_col}`) as min_val, MAX(`{m_col}`) as max_val FROM `{t}`")
+                res = ext_cur.fetchone()
+                if res and res.get("sum_val") is not None:
+                    sum_v = round(float(res["sum_val"]), 2)
+                    avg_v = round(float(res["avg_val"]), 2) if res["avg_val"] is not None else 0
+                    min_v = round(float(res["min_val"]), 2) if res["min_val"] is not None else 0
+                    max_v = round(float(res["max_val"]), 2) if res["max_val"] is not None else 0
+                    table_verified.append(f"  • Metric `{m_col}`: Total SUM = {sum_v:,.2f}, Average = {avg_v:,.2f}, Range = [{min_v:,.2f} to {max_v:,.2f}]")
+            except Exception as se:
+                print(f"[DynamicProfiler] sum error `{t}`.`{m_col}`: {se}")
+
+        # 2. Foreign Key Join to Master Tables -> Group By REAL Entity Name
+        primary_measure = meta["measure_cols"][0] if meta["measure_cols"] else None
+
+        for col in (meta["id_cols"] + meta["text_cols"]):
+            col_lower = col.lower()
+            matched_master = None
+
+            for m_tbl, m_info in profile["master_info"].items():
+                m_tbl_clean = re.sub(r'(_master|master|dim_|_dim|tbl_)', '', m_tbl.lower())
+                m_id_col = m_info["id_col"].lower()
+
+                if col_lower == m_id_col or col_lower == f"{m_tbl_clean}_id" or col_lower == f"{m_tbl_clean}_code" or (m_tbl_clean in col_lower and ("id" in col_lower or "code" in col_lower or "party" in col_lower or "cust" in col_lower)):
+                    matched_master = m_tbl
+                    break
+
+            if matched_master and matched_master in profile["master_mappings"]:
+                m_map = profile["master_mappings"][matched_master]
+                try:
+                    if primary_measure:
+                        ext_cur.execute(f"""
+                            SELECT `{col}` as fk_val, COUNT(*) as cnt, SUM(`{primary_measure}`) as total_m
+                            FROM `{t}`
+                            WHERE `{col}` IS NOT NULL
+                            GROUP BY `{col}`
+                            ORDER BY total_m DESC
+                            LIMIT 10
+                        """)
+                    else:
+                        ext_cur.execute(f"""
+                            SELECT `{col}` as fk_val, COUNT(*) as cnt
+                            FROM `{t}`
+                            WHERE `{col}` IS NOT NULL
+                            GROUP BY `{col}`
+                            ORDER BY cnt DESC
+                            LIMIT 10
+                        """)
+                    grp_rows = ext_cur.fetchall()
+                    if grp_rows:
+                        table_verified.append(f"  • Breakdown by Verified Master '{matched_master}' (via `{col}`):")
+                        for gr in grp_rows:
+                            fk_str = str(gr.get("fk_val")).strip()
+                            resolved_name = m_map.get(fk_str, f"Entity_{fk_str}")
+                            if primary_measure:
+                                tot_val = round(float(gr.get("total_m") or 0), 2)
+                                table_verified.append(f"      - '{resolved_name}': {tot_val:,.2f} (Transactions/Count: {gr['cnt']})")
+                            else:
+                                table_verified.append(f"      - '{resolved_name}': Count = {gr['cnt']}")
+                except Exception as ge:
+                    print(f"[DynamicProfiler] group join error on `{t}`.`{col}`: {ge}")
+
+        # 3. Categorical Breakdown (for text columns with moderate cardinality)
+        for cat_col in meta["text_cols"][:3]:
+            if ID_PATTERN.search(cat_col):
+                continue
+            try:
+                ext_cur.execute(f"SELECT COUNT(DISTINCT `{cat_col}`) as u_cnt FROM `{t}`")
+                u_res = ext_cur.fetchone() or {}
+                u_cnt = u_res.get("u_cnt", 0)
+
+                if 1 < u_cnt <= 20:
+                    if primary_measure:
+                        ext_cur.execute(f"""
+                            SELECT `{cat_col}` as val, COUNT(*) as cnt, SUM(`{primary_measure}`) as total_m
+                            FROM `{t}`
+                            WHERE `{cat_col}` IS NOT NULL AND TRIM(`{cat_col}`) != ''
+                            GROUP BY `{cat_col}`
+                            ORDER BY total_m DESC
+                            LIMIT 8
+                        """)
+                    else:
+                        ext_cur.execute(f"""
+                            SELECT `{cat_col}` as val, COUNT(*) as cnt
+                            FROM `{t}`
+                            WHERE `{cat_col}` IS NOT NULL AND TRIM(`{cat_col}`) != ''
+                            GROUP BY `{cat_col}`
+                            ORDER BY cnt DESC
+                            LIMIT 8
+                        """)
+                    cat_rows = ext_cur.fetchall()
+                    if cat_rows:
+                        table_verified.append(f"  • Category Breakdown by `{cat_col}`:")
+                        for cr in cat_rows:
+                            c_val = str(cr.get("val")).strip()
+                            if primary_measure:
+                                c_tot = round(float(cr.get("total_m") or 0), 2)
+                                table_verified.append(f"      - '{c_val}': {c_tot:,.2f} (Count: {cr['cnt']})")
+                            else:
+                                table_verified.append(f"      - '{c_val}': Count = {cr['cnt']}")
+            except Exception as ce:
+                print(f"[DynamicProfiler] cat breakdown error on `{t}`.`{cat_col}`: {ce}")
+
+        # 4. Time Trend (Date columns)
+        if meta["date_cols"]:
+            d_col = meta["date_cols"][0]
+            try:
+                ext_cur.execute(f"SELECT MIN(`{d_col}`) as min_d, MAX(`{d_col}`) as max_d FROM `{t}`")
+                d_range = ext_cur.fetchone() or {}
+                if d_range.get("min_d"):
+                    table_verified.append(f"  • Date Timeline `{d_col}`: From {d_range['min_d']} to {d_range['max_d']}")
+
+                if primary_measure:
+                    ext_cur.execute(f"""
+                        SELECT DATE_FORMAT(`{d_col}`, '%Y-%m') as period, SUM(`{primary_measure}`) as tot_val, COUNT(*) as cnt
+                        FROM `{t}`
+                        WHERE `{d_col}` IS NOT NULL
+                        GROUP BY period
+                        ORDER BY period ASC
+                        LIMIT 12
+                    """)
+                    t_rows = ext_cur.fetchall()
+                    if t_rows:
+                        trend_items = [f"{tr['period']}: {round(float(tr.get('tot_val') or 0), 2):,.2f}" for tr in t_rows if tr.get('period')]
+                        table_verified.append(f"  • Monthly Trend ({primary_measure}): " + ", ".join(trend_items))
+            except Exception as de:
+                print(f"[DynamicProfiler] date trend error on `{t}`: {de}")
+
+        if len(table_verified) > 1:
+            profile["verified_aggregates"].append("\n".join(table_verified))
+
+    return profile
+
+
 def _fetch_db_data(session_id: str, databaseses: list, conn) -> list:
     """
-    For each requested database:
-      1. Get new_user_db from external_db_sync_log
-      2. Connect to new_user_db and read all tables (up to MAX_ROWS each)
+    Generic dynamic database fetcher:
+    - Reads tables and sample data.
+    - Dynamically detects Master and Transaction tables.
+    - Performs verified SQL aggregations and entity name resolutions.
     """
-
     if not databaseses:
         return []
 
@@ -350,7 +609,6 @@ def _fetch_db_data(session_id: str, databaseses: list, conn) -> list:
 
     try:
         cursor = conn.cursor(dictionary=True)
-
         placeholders = ",".join(["%s"] * len(databaseses))
 
         cursor.execute(f"""
@@ -363,24 +621,19 @@ def _fetch_db_data(session_id: str, databaseses: list, conn) -> list:
         """, [session_id] + databaseses)
 
         rows = cursor.fetchall()
-
         db_map = {r["external_database"]: r["new_user_db"] for r in rows}
-
         print(f"[Analysis] DB MAP -> {db_map}")
 
     except Exception as e:
         print(f"[Analysis] db_map error: {e}")
         return []
-
     finally:
         if cursor:
             cursor.close()
 
-    # We need to query each unique new_user_db only once, otherwise if multiple files map to the same workspace database (e.g. document uploads), we'll duplicate the data.
     unique_new_dbs = list(set(db_map.values()))
 
     for new_db in unique_new_dbs:
-        # Find which external_databases map to this new_db to list as the source
         mapped_ext_dbs = [ext for ext, ndb in db_map.items() if ndb == new_db]
         display_name_str = ", ".join(mapped_ext_dbs)
 
@@ -388,16 +641,15 @@ def _fetch_db_data(session_id: str, databaseses: list, conn) -> list:
             "source_type": "database",
             "external_database": display_name_str,
             "new_user_db": new_db,
-            "tables": []
+            "tables": [],
+            "dynamic_profile": {}
         }
 
         ext_conn = None
         ext_cur = None
 
         try:
-
             print(f"[Analysis] Connecting DB -> {new_db}")
-
             ext_conn = mysql.connector.connect(
                 host=MYSQL_CONFIG["host"],
                 port=MYSQL_CONFIG["port"],
@@ -409,20 +661,20 @@ def _fetch_db_data(session_id: str, databaseses: list, conn) -> list:
 
             ext_cur = ext_conn.cursor(dictionary=True)
 
-            # Fetch tables
+            # Fetch table list
             ext_cur.execute("SHOW TABLES")
             tables_raw = ext_cur.fetchall()
-
             tables = [list(r.values())[0] for r in tables_raw]
 
             print(f"[Analysis] Tables in {new_db} -> {tables}")
 
+            # Run 100% generic master & transaction dynamic profiling
+            dyn_profile = _dynamic_inspect_and_aggregate_database(ext_cur, tables)
+            db_result["dynamic_profile"] = dyn_profile
+
             for t in tables:
-
                 print(f"[Analysis] Reading table -> {t}")
-
                 try:
-
                     if t == 'workspace_files':
                         ext_cur.execute(f"SELECT * FROM `{t}` ORDER BY id DESC LIMIT %s", (MAX_ROWS,))
                     else:
@@ -430,38 +682,18 @@ def _fetch_db_data(session_id: str, databaseses: list, conn) -> list:
                     rows = ext_cur.fetchall()
 
                     row_count = len(rows)
-
-                    if row_count > 0:
-                        cols = list(rows[0].keys())
-                    else:
-                        cols = []
+                    cols = list(rows[0].keys()) if row_count > 0 else []
 
                     # Column statistics
                     col_stats = {}
-
                     if row_count > 0:
-
                         for col in cols:
-
-                            vals = []
-
-                            for r in rows:
-                                val = r.get(col)
-
-                                if val is None:
-                                    continue
-
-                                val_str = str(val).strip()
-
-                                if val_str:
-                                    vals.append(val_str)
-
+                            vals = [str(r.get(col)).strip() for r in rows if r.get(col) is not None and str(r.get(col)).strip()]
                             distinct_vals = list(dict.fromkeys(vals))
-
                             col_stats[col] = {
                                 "total_values": len(vals),
                                 "distinct_values": len(distinct_vals),
-                                "sample": distinct_vals[:10]
+                                "sample": distinct_vals[:8]
                             }
 
                     if t == 'workspace_files':
@@ -473,13 +705,11 @@ def _fetch_db_data(session_id: str, databaseses: list, conn) -> list:
                                 else:
                                     file_data = r.get('file_data') or {}
                                     
-                                # Grab the file name to use as the display name for the db node
                                 file_name = r.get('file_name', 'Document')
                                 db_result["display_name"] = file_name
                                     
                                 structured = file_data.get('structured_content')
                                 if structured:
-                                    # Add Paragraphs as a virtual table
                                     paragraphs = structured.get('paragraphs', [])
                                     if paragraphs:
                                         db_result["tables"].append({
@@ -489,33 +719,18 @@ def _fetch_db_data(session_id: str, databaseses: list, conn) -> list:
                                             "column_stats": {},
                                             "sample_rows": paragraphs[:5]
                                         })
-                                    # Add each PDF table as a virtual table
                                     for idx, vtable in enumerate(structured.get('tables', [])):
                                         vname = vtable.get('table_name', f"PDF_Table_{idx+1}")
                                         vcols = vtable.get('headers', [])
-                                        
-                                        seen_cols = {}
-                                        dedup_cols = []
-                                        for c in vcols:
-                                            base = str(c).strip() if c else "Column"
-                                            if base in seen_cols:
-                                                seen_cols[base] += 1
-                                                dedup_cols.append(f"{base} ({seen_cols[base]})")
-                                            else:
-                                                seen_cols[base] = 1
-                                                dedup_cols.append(base)
-
                                         sample_vrows = []
                                         for vrow in vtable.get('rows', [])[:5]:
-                                            row_dict = {}
-                                            for i, col in enumerate(dedup_cols):
-                                                row_dict[col] = vrow[i] if i < len(vrow) else ""
+                                            row_dict = {vcols[i]: vrow[i] for i in range(min(len(vcols), len(vrow)))}
                                             sample_vrows.append(row_dict)
                                             
                                         db_result["tables"].append({
                                             "table_name": vname,
                                             "row_count": len(vtable.get('rows', [])),
-                                            "columns": dedup_cols,
+                                            "columns": vcols,
                                             "column_stats": {},
                                             "sample_rows": sample_vrows
                                         })
@@ -537,25 +752,16 @@ def _fetch_db_data(session_id: str, databaseses: list, conn) -> list:
             print(f"[Analysis] connect {new_db} error -> {db_error}")
 
         finally:
-
             if ext_cur:
-                try:
-                    ext_cur.close()
-                except:
-                    pass
-
+                try: ext_cur.close()
+                except: pass
             if ext_conn:
-                try:
-                    ext_conn.close()
-                except:
-                    pass
+                try: ext_conn.close()
+                except: pass
 
         results.append(db_result)
 
     return results
-
-
-
 
 
 # ══════════════════════════════════════════════════════
@@ -565,6 +771,44 @@ def _fetch_db_data(session_id: str, databaseses: list, conn) -> list:
 def _build_context(web_data: list, db_data: list) -> str:
     parts = []
 
+    # 1. Master Entity Mappings (Top Priority: ensures LLM resolves IDs to Real Entity Names)
+    master_mappings_text = []
+    for d in db_data:
+        dyn = d.get("dynamic_profile", {})
+        mappings = dyn.get("master_mappings", {})
+        for m_tbl, m_dict in mappings.items():
+            sample_entries = [f"ID '{k}' -> '{v}'" for k, v in list(m_dict.items())[:25]]
+            master_mappings_text.append(f"Master Table `{m_tbl}` (Total Entities: {len(m_dict)}):\n  " + "\n  ".join(sample_entries))
+
+    if master_mappings_text:
+        parts.append(
+            "=======================================================================\n"
+            "=== 1. VERIFIED MASTER ENTITY MAPPINGS (MANDATORY TO USE IN CHART LABELS) ===\n"
+            "=======================================================================\n"
+            "CRITICAL: If a foreign key refers to any of these entities, ALWAYS use the\n"
+            "descriptive Name from this mapping. NEVER output 'Part 1', 'Party 1', or 'Category 1'!\n\n"
+            + "\n\n".join(master_mappings_text)
+        )
+
+    # 2. Verified Aggregations & Metrics (Exact numbers for KPIs and Charts)
+    verified_aggs = []
+    for d in db_data:
+        dyn = d.get("dynamic_profile", {})
+        aggs = dyn.get("verified_aggregates", [])
+        if aggs:
+            verified_aggs.extend(aggs)
+
+    if verified_aggs:
+        parts.append(
+            "=======================================================================\n"
+            "=== 2. VERIFIED REAL AGGREGATIONS & METRICS (USE EXACT FIGURES FOR KPIS & CHARTS) ===\n"
+            "=======================================================================\n"
+            "Use these verified database aggregations as the single source of truth for all\n"
+            "KPI values, sums, totals, rankings, category breakdowns, and chart labels:\n\n"
+            + "\n\n".join(verified_aggs)
+        )
+
+    # 3. Web Data (if any)
     for w in web_data:
         lines = [f"=== WEB TOPIC: {w['topic']} ({w['result_count']} results) ==="]
         for item in w["items"]:
@@ -574,22 +818,19 @@ def _build_context(web_data: list, db_data: list) -> str:
                 lines.append(f"  Brief : {item['brief'][:300]}")
         parts.append("\n".join(lines))
 
+    # 4. Database Schema and Sample Rows
     for d in db_data:
-        lines = [f"=== DATABASE: {d['external_database']} (stored as: {d['new_user_db']}) ==="]
+        lines = [f"=== DATABASE SCHEMA: {d['external_database']} (stored as: {d['new_user_db']}) ==="]
         for tbl in d["tables"]:
             lines.append(f"\n  Table: {tbl['table_name']} ({tbl['row_count']} rows)")
             lines.append(f"  Columns: {', '.join(tbl['columns'])}")
-            # Column stats
-            for col, stats in tbl["column_stats"].items():
+            for col, stats in tbl.get("column_stats", {}).items():
                 lines.append(
-                    f"    {col}: {stats['distinct_values']} distinct values — "
-                    f"sample: {', '.join(str(v) for v in stats['sample'][:8])}"
+                    f"    {col}: {stats['distinct_values']} distinct values — sample: {', '.join(str(v) for v in stats['sample'][:6])}"
                 )
-            # Sample rows
             lines.append(f"  Sample rows (up to 5):")
-            for i, row in enumerate(tbl["sample_rows"], 1):
-                r_str = " | ".join(f"{k}:{v}" for k,v in row.items()
-                                   if v is not None and str(v).strip())
+            for i, row in enumerate(tbl.get("sample_rows", []), 1):
+                r_str = " | ".join(f"{k}:{v}" for k, v in row.items() if v is not None and str(v).strip())
                 lines.append(f"    Row{i}: {r_str}")
         parts.append("\n".join(lines))
 
@@ -600,119 +841,143 @@ def _build_context(web_data: list, db_data: list) -> str:
 
 
 # ══════════════════════════════════════════════════════
-# MISTRAL
+# UNIVERSAL DATA ANALYST & CHART ENGINE (MISTRAL / LLM)
 # ══════════════════════════════════════════════════════
 
 def _call_mistral(context: str, topics: list, databaseses: list) -> dict:
     source_desc = []
-    if topics:    source_desc.append(f"web topics: {', '.join(topics)}")
-    if databaseses: source_desc.append(f"databaseses: {', '.join(databaseses)}")
+    if topics:      source_desc.append(f"web topics: {', '.join(topics)}")
+    if databaseses: source_desc.append(f"databases: {', '.join(databaseses)}")
 
-    system = """You are a Generic Data Analysis and Visualization Engine.
+    system = """You are an expert Universal Data Analyst, KPI Designer, and Chart Recommendation Engine.
 
-Analyze the provided dataset dynamically. Do not assume any fixed domain, column names, business logic, or visualization type.
+Your task is to analyze any type of structured or semi-structured dataset and generate meaningful, dynamic KPIs, charts, trends, comparisons, and actionable insights based strictly on the data provided.
 
-STEP 1 — PROFILE THE DATA
-First identify:
-- Column names and data types
-- Numeric, categorical, date/time, identifier, text, percentage and currency fields
-- Missing values and duplicate records
-- Possible dimensions and measures
-- Time granularity if date/time fields exist
-- Relationships between columns
-- Whether columns represent Budget, Actual, Target, Forecast, Cost, Revenue, Quantity, etc.
+The dataset may belong to ANY domain (Hospital & healthcare, Dock/Port/Vessel/Cargo, Logistics & Transportation, Finance & Billing, Sales & Retail, Inventory & Procurement, HR & Payroll, Education, Manufacturing, Utilities, or Any Custom Business Domain).
 
-Do not infer a business meaning unless it is reasonably supported by the column name and data.
+## 1. CORE PRINCIPLES
+1. Inspect the actual dataset before deciding which KPIs and charts to create.
+2. Do not assume a particular industry, schema, table name, or business process.
+3. Use actual table names, column names, category values, entity names, dates, and numerical values from the supplied context.
+4. Never invent data, labels, category names, totals, percentages, dates, or business facts.
+5. STRICT RULE ON REAL LABELS & ENTITY NAMES:
+   - NEVER use placeholder labels such as "Party 1", "Party 2", "Part 1", "Part 2", "Category 1", "Category 2", "Hospital A", "Vessel 1".
+   - If a transaction table contains IDs or foreign keys (e.g. party_id, customer_id, vendor_id, vessel_id, patient_id), ALWAYS look up the real name in the supplied "VERIFIED MASTER ENTITY MAPPINGS" or verified breakdown and use the real entity name (e.g. "Tata Steel", "Apex Logistics", "Apollo Clinic", "MV Everest").
+   - If no name mapping exists, use the exact ID from the data (e.g. "ID-104"), but NEVER invent a numbered placeholder like "Party 1".
+6. Select KPIs and charts according to the available fields, their meanings, data quality, and analytical usefulness. Return fewer high-quality KPIs rather than generating misleading metrics.
+7. Use the supplied VERIFIED REAL AGGREGATIONS & METRICS as the single source of truth for exact totals, sums, rankings, and ratios. Do not invent or estimate numbers.
 
-STEP 2 — DETECT DATA PATTERNS & FINANCIAL REPORTS
-Before generating any visualization, determine which patterns are actually present.
-For annual financial reports, first detect available financial dimensions and measures.
+## 2. DYNAMIC KPI GENERATION
+Generate 4 to 8 highly relevant KPIs supported by the dataset:
+- Volume: total transactions, patients, admissions, cargo tonnage, shipments, orders, or records.
+- Financial: total revenue, total expense, balance, average order value, billed amounts.
+- Operational: completion rate, turnaround duration, active entities, processing speed.
+- Distribution: top contributor entity, top category, highest volume period.
+For each KPI provide: title, exact value, unit, description, formula, and trend ("up", "down", or "neutral").
 
-Rules:
-1. Budget + Actual → grouped bar + variance KPI.
-2. Category + amount → ranked bar.
-3. Income components → pie/donut when few categories.
-4. Multiple financial years → trend chart (Line/Bar).
-5. Positive/negative variance → diverging bar chart.
-6. Top/Bottom values (e.g., Top 5 Expense Items, Top 5 Over/Under Budget) → horizontal bar.
-7. Two meaningful numeric measures → Correlation/scatter.
+## 3. DYNAMIC CHART SELECTION
+Select chart types based on the analytical question and available fields:
+- "bar": comparisons across actual categories, entities, departments, vessels, products, or parties.
+- "line": changes over time when date/time fields exist.
+- "pie": simple part-to-whole comparisons with few (<= 6) mutually exclusive categories.
+For every chart:
+- Every item in "labels" MUST be a REAL source entity name or category (e.g. "ABC Logistics", "XYZ Corp"), NEVER a placeholder.
+- Every number in "datasets" MUST match the verified data or source aggregations.
 
-STEP 3 — GENERATE KPIs DYNAMICALLY
-Generate only KPIs supported by the dataset.
-IMPORTANT: Generate AT LEAST 6 to 8 highly relevant KPIs if the data supports it! Do not limit yourself to just 2 or 3.
-For financial reports, by default, generate only data-supported KPIs such as:
-Total Income, Total Expenditure, Budget vs Actual, Variance %, Total CAM / CAM Rate, Electricity Cost, Savings / Surplus (if data exists), Highest Expense Category, Highest Variance Category.
-Never assume a KPI exists unless the required fields are present.
-
-STEP 4 — SELECT VISUALIZATIONS
-Do NOT automatically create every possible chart.
-IMPORTANT: Generate AT LEAST 4 to 6 meaningful charts if the data supports it! Create multiple charts to provide a comprehensive analysis.
-For financial reports, use Default Charts / Graphs if data is available:
-- Budget vs Actual → Grouped Bar
-- Income vs Expenditure → Bar
-- Expense Category Breakdown → Bar
-- Variance % by Category → Diverging Bar
-- Income Source Contribution → Donut/Pie (if few categories)
-- Year-wise Trend → Line/Bar (if multiple FY available)
-- Top 5 Expense Items / Top 5 Over/Under Budget Items → Horizontal Bar
-Never generate a chart unless required fields are present. Avoid duplicate or redundant charts.
-
-STEP 5 — DATA ACCURACY & MATH LOGIC
-- Use only values present in the dataset. Do not invent, estimate, or fabricate missing values.
-- NEVER hallucinate mathematical comparisons or trends.
-- Double-check calculations (percentages, multiples). For example, a jump from 7.3M to 8.5M is a ~16.4% increase, NOT an 11x increase.
-- Ensure trend descriptions strictly match the actual values (e.g., if costs go from 7.8M to 6.6M to 6.3M, describe it as a "steady decline", NOT "significant increase followed by sharp decline").
-- Identify the lowest/highest values accurately (e.g., if 2025-26 is 63.35 lakh and 2022-23 is 78.76 lakh, 2025-26 is the lowest).
-
-STEP 6 — INSIGHTS
-Provide concise insights based strictly on the available data.
-Insights may include: Highest/lowest values, Increasing/decreasing trends, Significant variance, Top/bottom categories, Period-over-period changes, Target achievement, Major contributors.
-
-STEP 7 — OUTPUT
-Respond ONLY in valid JSON containing three keys: "report", "kpis", and "charts".
-Your report text must be written as ONE continuous plain text — like a textbook chapter. Mix paragraphs and bullet points naturally. Minimum 15-20 lines of content. Use actual values, names, and numbers from the data. Never be vague or generic."""
-
-    user = f"""
-Analyze the following data ({'; '.join(source_desc)}):
-
-{context}
-
-Based on the data, return ONLY this JSON structure:
-{{
-  "report": "TITLE: <descriptive title here>\\n\\n<Opening paragraph — 3 to 4 sentences introducing what data was analyzed, how many sources, key highlights.>\\n\\n<Second paragraph — describe the main data sources, table names, row counts, column names found.>\\n\\n• <Bullet: specific fact with actual value from data>\\n• <Bullet: another specific metric or count>\\n• <Bullet: notable user/record/entry found>\\n• <Bullet: pattern or trend observed>\\n• <Bullet: another important data point>\\n\\n<Third paragraph — deeper analysis: relationships between tables, user activity, data patterns.>\\n\\n• <Bullet: cross-table insight>\\n• <Bullet: most active user or top record>\\n• <Bullet: date range or time pattern>\\n• <Bullet: data distribution observation>\\n• <Bullet: anomaly or interesting finding>\\n\\n<Fourth paragraph — data quality and completeness observations.>\\n\\n• <Bullet: data quality note>\\n• <Bullet: missing or null value observation>\\n\\n<Fifth paragraph — recommendations and conclusions based on the data.>\\n\\n• <Bullet: actionable recommendation>\\n• <Bullet: another recommendation>\\n• <Bullet: conclusion>",
+## 4. OUTPUT FORMAT
+Respond ONLY in valid JSON matching this exact structure:
+{
+  "report": "TITLE: <Descriptive Business Title>\\n\\n<Opening paragraph — 3 to 4 sentences introducing the dataset analyzed, primary business domain, scope, and key takeaways.>\\n\\n<Second paragraph — analysis of key entities, tables, row counts, and main volume metrics.>\\n\\n• <Bullet: specific metric with actual verified value>\\n• <Bullet: top entity or category with exact metric>\\n• <Bullet: key operational or financial observation>\\n• <Bullet: notable distribution or pattern>\\n\\n<Third paragraph — deeper cross-table insights, relationship analysis, and trend observations.>\\n\\n• <Bullet: cross-table insight using real entity names>\\n• <Bullet: timeline or growth trend observed>\\n• <Bullet: anomaly or operational bottleneck>\\n\\n<Fourth paragraph — data completeness and quality notes.>\\n\\n• <Bullet: data quality observation or null handling>\\n\\n<Fifth paragraph — actionable recommendations based strictly on data.>\\n\\n• <Bullet: data-backed actionable recommendation>\\n• <Bullet: strategic conclusion>",
+  
+  "dataset_overview": {
+    "domain": "<Inferred domain: Healthcare, Maritime, Logistics, Finance, Sales, Retail, or Custom>",
+    "data_scope": "<Complete, partial, or sampled>",
+    "key_tables": ["<table1>", "<table2>"],
+    "key_dimensions": ["<dimension1>", "<dimension2>"],
+    "key_measures": ["<measure1>", "<measure2>"],
+    "data_quality_notes": ["<note1>"]
+  },
   
   "kpis": [
-    {{
-      "title": "<Name of the Metric (e.g., Total Users, Average Price)>",
-      "value": "<Actual numeric value extracted from data>",
-      "description": "<Short explanation of this KPI>",
+    {
+      "title": "<Meaningful Metric Title>",
+      "value": "<Exact verified numeric value with commas/formatting>",
+      "unit": "<Unit, e.g. INR, USD, MT, units, or empty>",
+      "description": "<What this metric measures>",
+      "formula": "<Calculation formula or source aggregation>",
       "trend": "up"
-    }}
+    }
   ],
   
   "charts": [
-    {{
-      "chart_type": "<bar or pie or line>",
-      "title": "<Descriptive title for the chart>",
-      "description": "<What this chart represents>",
-      "labels": ["<Category 1>", "<Category 2>", "<Category 3>"],
+    {
+      "chart_type": "bar",
+      "title": "<Descriptive Chart Title>",
+      "description": "<What this chart communicates>",
+      "x_axis": { "label": "<Dimension Name>", "field": "<column_name>" },
+      "y_axis": { "label": "<Measure Name>", "field": "<column_name>", "aggregation": "SUM" },
+      "labels": ["<Real Entity Name A>", "<Real Entity Name B>", "<Real Entity Name C>"],
       "datasets": [
-        {{
-          "label": "<Metric Name (e.g., Count, Total Amount)>",
-          "data": [1, 2, 3]
-        }}
+        {
+          "label": "<Measure Label>",
+          "data": [12000, 8500, 4200]
+        }
       ]
-    }}
+    }
+  ],
+  
+  "insights": [
+    {
+      "title": "<Evidence-based observation>",
+      "description": "<Explanation grounded in actual data>",
+      "supporting_metrics": ["<metric>"]
+    }
+  ],
+  
+  "limitations": [
+    "<Any limitation observed in data scope or missing fields>"
   ]
-}}
-"""
+}"""
+
+    user = f"""Analyze the provided dataset ({'; '.join(source_desc)}):
+
+{context}
+
+Generate the dynamic report, KPIs, and charts. Adhere strictly to the real entity names and verified aggregations. Return ONLY the JSON object."""
+
     try:
         from model.llm_client import call_llm_chat
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        text = call_llm_chat(messages, json_mode=True, temperature=0.2, scenario="analysis")
-        return json.loads(text)
+        text = call_llm_chat(messages, json_mode=True, temperature=0.1, scenario="analysis")
+        
+        # Clean potential markdown JSON block formatting from LLM output
+        clean_str = text.strip()
+        if clean_str.startswith("```json"):
+            clean_str = clean_str[7:]
+        elif clean_str.startswith("```"):
+            clean_str = clean_str[3:]
+        if clean_str.endswith("```"):
+            clean_str = clean_str[:-3]
+        clean_str = clean_str.strip()
+
+        parsed = json.loads(clean_str)
+
+        # Ensure 'report' is always a formatted string for frontend display
+        if "report" in parsed and isinstance(parsed["report"], dict):
+            parsed["report"] = json.dumps(parsed["report"], ensure_ascii=False, indent=2)
+        elif "report" not in parsed or not parsed["report"]:
+            # Auto-construct markdown report from insights and kpis if missing
+            lines = [f"TITLE: Dataset Analysis & KPI Report\n"]
+            lines.append("### Executive Summary")
+            lines.append("Analysis completed using verified database metrics and real entity mappings.\n")
+            lines.append("### Key Insights")
+            for ins in parsed.get("insights", []):
+                lines.append(f"• **{ins.get('title', 'Insight')}**: {ins.get('description', '')}")
+            parsed["report"] = "\n".join(lines)
+
+        return parsed
     except Exception as e:
-        print(f"[Mistral] {e}")
+        print(f"[Mistral Universal Analysis] {e}")
         return None
 
 
