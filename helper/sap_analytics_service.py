@@ -6,10 +6,66 @@ Eliminates the need to create Stored Procedures in production SAP S/4HANA schema
 and works when table data is not replicated to MySQL.
 """
 
+import re
 import json
 import calendar
 from datetime import datetime
 from database.hana_metadata_service import TARGET_SCHEMA, get_hana_connection_from_credential
+
+_HANA_VIEW_MAP_CACHE = {}
+
+def get_hana_schema_views(cursor, schema):
+    """Fetches all view and table names in schema and maps UPPER(name) -> actual name."""
+    global _HANA_VIEW_MAP_CACHE
+    if schema in _HANA_VIEW_MAP_CACHE:
+        return _HANA_VIEW_MAP_CACHE[schema]
+    
+    tbl_map = {
+        "ZIVF_CUSTOMERMASTER_01_MD": "ZIVF_CustomerMaster_01_MD",
+        "ZIVR_SKUMASTER_01_TR": "ZIVR_SKUMaster_01_TR",
+        "ZIVF_CATEGORYMASTER_01_TR": "ZIVF_CategoryMaster_01_TR",
+        "ZITR_DAYATTRIBUTE_01_TR": "ZITR_DayAttribute_01_TR",
+        "ZIVF_TERRITORYMASTER_01_TR": "ZIVF_TerritoryMaster_01_TR",
+        "ZPVF_SD_SALESHISTORY_01_TR": "ZPVF_SD_SalesHistory_01_TR",
+        "ZPVF_SD_CURRENTSALES_01_TR": "ZPVF_SD_CurrentSales_01_TR",
+        "ZIVF_ZONEMASTER_01_TR": "ZIVF_ZoneMaster_01_TR",
+        "ZIVF_REGIONMASTER_MD_01": "ZIVF_RegionMaster_MD_01",
+        "ZPVF_SD_CANCELLEDSALESINVOICE_01_TR": "ZPVF_SD_CancelledSalesInvoice_01_TR",
+        "ZIVF_SD_SALES_PLAN_TARGET_01_TR": "ZIVF_SD_Sales_Plan_Target_01_TR"
+    }
+    try:
+        cursor.execute("SELECT VIEW_NAME FROM SYS.VIEWS WHERE SCHEMA_NAME = ?", (schema,))
+        for r in cursor.fetchall():
+            if r and r[0]:
+                tbl_map[str(r[0]).upper()] = str(r[0])
+        cursor.execute("SELECT TABLE_NAME FROM SYS.TABLES WHERE SCHEMA_NAME = ?", (schema,))
+        for r in cursor.fetchall():
+            if r and r[0]:
+                tbl_map[str(r[0]).upper()] = str(r[0])
+    except Exception as e:
+        print(f"[SAP-Analytics] Notice checking SYS.VIEWS for schema {schema}: {e}")
+        
+    _HANA_VIEW_MAP_CACHE[schema] = tbl_map
+    return tbl_map
+
+def sanitize_and_execute_hana(cursor, schema, sql, params=None):
+    """
+    Substitutes any "{schema}"."VIEW" with the actual casing from SYS.VIEWS
+    and executes the query.
+    """
+    tbl_map = get_hana_schema_views(cursor, schema)
+    
+    def _repl(match):
+        sch = match.group(1)
+        tbl_raw = match.group(2)
+        actual = tbl_map.get(tbl_raw.upper(), tbl_raw)
+        return f'"{sch}"."{actual}"'
+
+    clean_sql = re.sub(r'"([^"]+)"\."([^"]+)"', _repl, sql)
+    if params:
+        cursor.execute(clean_sql, params)
+    else:
+        cursor.execute(clean_sql)
 
 
 def _prepare_mysql_workspace(cur, session_id):
@@ -138,16 +194,16 @@ def detect_sales_dates(cursor, schema, year=None, month=None, day=None):
     Auto-detects the latest valid sales date from SAP HANA views if year/month/day are not specified.
     """
     if not year or year == 0:
-        cursor.execute(f"""
+        sanitize_and_execute_hana(cursor, schema, f"""
             SELECT MAX(s.INVOICE_DATE)
             FROM (
                 SELECT INVOICE_DATE, INDICATOR_CANCEL, DISTRIBUTION_CHANNEL, INVOICE_NUMBER, PLANT, FKART 
-                FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR"
+                FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
                 UNION ALL
                 SELECT INVOICE_DATE, INDICATOR_CANCEL, DISTRIBUTION_CHANNEL, INVOICE_NUMBER, PLANT, FKART 
-                FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR"
+                FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
             ) s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART 
                   AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE s.INVOICE_DATE IS NOT NULL 
@@ -211,8 +267,8 @@ def query_domestic_sales_value_achievements_hana(cursor, schema, year, month, da
                 ELSE '4 Wheelers'
             END AS report_name,
             SUM(COALESCE(NULLIF(tgt.REV_PLAN_VAL, 0), NULLIF(tgt.PLAN_VALUE, 0), 0)) / 1000000 AS Target
-        FROM "{schema}"."ZIVF_SD_SALES_PLAN_TARGET_01_TR" tgt
-        LEFT JOIN "{schema}"."ZIVF_CATEGORYMASTER_01_TR" cat 
+        FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat 
           ON (tgt.CAT_CODE = cat.CAT_CODE OR tgt.MATNR = cat.MATNR)
         WHERE tgt.YMONTH = ?
         GROUP BY 
@@ -263,22 +319,22 @@ def query_domestic_sales_value_achievements_hana(cursor, schema, year, month, da
                 0 AS Sale_For_Day
             FROM (
                 SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE 
-                FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR" s
-                LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+                FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+                LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
                   ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
                 WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
                   AND can.INVOICE_NUMBER IS NULL
                 UNION ALL
                 SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE 
-                FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR" s
-                LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+                FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+                LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
                   ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
                 WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
                   AND can.INVOICE_NUMBER IS NULL
             ) sh
-            LEFT JOIN "{schema}"."ZIVR_SKUMASTER_01_TR" sm ON (sh.SKU = sm.MATNR)
-            LEFT JOIN "{schema}"."ZIVF_CATEGORYMASTER_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE OR sh.SKU = cat.MATNR)
-            LEFT JOIN "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cm ON (sh.DEALER_CODE = cm.KUNNR)
+            LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sm ON (sh.SKU = sm.MATNR)
+            LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE OR sh.SKU = cat.MATNR)
+            LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (sh.DEALER_CODE = cm.KUNNR)
             WHERE (sh.DISTRIBUTION_CHANNEL = 10 OR sh.DISTRIBUTION_CHANNEL = '10')
               AND (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
             GROUP BY 
@@ -312,22 +368,22 @@ def query_domestic_sales_value_achievements_hana(cursor, schema, year, month, da
                 SUM(CASE WHEN cs.INVOICE_DATE = TO_DATE(?, 'YYYY-MM-DD') THEN COALESCE(NULLIF(cs.NDP_VALUE, 0), NULLIF(cs.TAXABLE_VALUE, 0), cs.INVOICE_VALUE, 0) ELSE 0 END) / 1000000 AS Sale_For_Day
             FROM (
                 SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE 
-                FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR" s
-                LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+                FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+                LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
                   ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
                 WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
                   AND can.INVOICE_NUMBER IS NULL
                 UNION ALL
                 SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE 
-                FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR" s
-                LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+                FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+                LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
                   ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
                 WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
                   AND can.INVOICE_NUMBER IS NULL
             ) cs
-            LEFT JOIN "{schema}"."ZIVR_SKUMASTER_01_TR" sm ON (cs.SKU = sm.MATNR)
-            LEFT JOIN "{schema}"."ZIVF_CATEGORYMASTER_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE OR cs.SKU = cat.MATNR)
-            LEFT JOIN "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cm ON (cs.DEALER_CODE = cm.KUNNR)
+            LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sm ON (cs.SKU = sm.MATNR)
+            LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE OR cs.SKU = cat.MATNR)
+            LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (cs.DEALER_CODE = cm.KUNNR)
             WHERE (cs.DISTRIBUTION_CHANNEL = 10 OR cs.DISTRIBUTION_CHANNEL = '10')
               AND (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
             GROUP BY 
@@ -374,20 +430,20 @@ def query_domestic_sales_value_achievements_hana(cursor, schema, year, month, da
                 0 AS Sale_For_Day
             FROM (
                 SELECT s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DEALER_CODE
-                FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR" s
-                LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+                FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+                LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
                   ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
                 WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
                   AND can.INVOICE_NUMBER IS NULL
                 UNION ALL
                 SELECT s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DEALER_CODE
-                FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR" s
-                LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+                FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+                LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
                   ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
                 WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
                   AND can.INVOICE_NUMBER IS NULL
             ) sh
-            LEFT JOIN "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cm ON (sh.DEALER_CODE = cm.KUNNR)
+            LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (sh.DEALER_CODE = cm.KUNNR)
             WHERE sh.DISTRIBUTION_CHANNEL IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF')
               AND (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
             GROUP BY 
@@ -409,20 +465,20 @@ def query_domestic_sales_value_achievements_hana(cursor, schema, year, month, da
                 SUM(CASE WHEN cs.INVOICE_DATE = TO_DATE(?, 'YYYY-MM-DD') THEN COALESCE(NULLIF(cs.NDP_VALUE, 0), NULLIF(cs.TAXABLE_VALUE, 0), cs.INVOICE_VALUE, 0) ELSE 0 END) / 1000000 AS Sale_For_Day
             FROM (
                 SELECT s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DEALER_CODE
-                FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR" s
-                LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+                FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+                LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
                   ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
                 WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
                   AND can.INVOICE_NUMBER IS NULL
                 UNION ALL
                 SELECT s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DEALER_CODE
-                FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR" s
-                LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+                FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+                LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
                   ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
                 WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
                   AND can.INVOICE_NUMBER IS NULL
             ) cs
-            LEFT JOIN "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cm ON (cs.DEALER_CODE = cm.KUNNR)
+            LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (cs.DEALER_CODE = cm.KUNNR)
             WHERE cs.DISTRIBUTION_CHANNEL IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF')
               AND (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
             GROUP BY 
@@ -504,7 +560,7 @@ def query_domestic_sales_value_achievements_hana(cursor, schema, year, month, da
         curr_to
     )
 
-    cursor.execute(hana_sql, params)
+    sanitize_and_execute_hana(cursor, schema, hana_sql, params)
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, r)) for r in cursor.fetchall()]
 
@@ -553,22 +609,22 @@ def query_sales_numbers_hana(cursor, schema, year, month, day):
             COALESCE(cm.KLABC, '')                    AS cls
         FROM (
             SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.TYRE_QUANTITY, s.VOLUME, s.INDICATOR_CANCEL 
-            FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND can.INVOICE_NUMBER IS NULL
             UNION ALL
             SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.TYRE_QUANTITY, s.VOLUME, s.INDICATOR_CANCEL 
-            FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND can.INVOICE_NUMBER IS NULL
         ) sh
-        LEFT JOIN "{schema}"."ZIVR_SKUMASTER_01_TR" sm ON (sm.MATNR = sh.SKU)
-        LEFT JOIN "{schema}"."ZIVF_CATEGORYMASTER_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE OR sh.SKU = cat.MATNR)
-        LEFT JOIN "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cm ON (cm.KUNNR = sh.DEALER_CODE)
+        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sm ON (sm.MATNR = sh.SKU)
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE OR sh.SKU = cat.MATNR)
+        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (cm.KUNNR = sh.DEALER_CODE)
         WHERE (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
           AND (
             (sh.INVOICE_DATE BETWEEN TO_DATE(?, 'YYYY-MM-DD') AND TO_DATE(?, 'YYYY-MM-DD'))
@@ -590,22 +646,22 @@ def query_sales_numbers_hana(cursor, schema, year, month, day):
             COALESCE(cm.KLABC, '')                    AS cls
         FROM (
             SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.TYRE_QUANTITY, s.VOLUME, s.INDICATOR_CANCEL 
-            FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND can.INVOICE_NUMBER IS NULL
             UNION ALL
             SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.TYRE_QUANTITY, s.VOLUME, s.INDICATOR_CANCEL 
-            FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND can.INVOICE_NUMBER IS NULL
         ) cs
-        LEFT JOIN "{schema}"."ZIVR_SKUMASTER_01_TR" sm ON (sm.MATNR = cs.SKU)
-        LEFT JOIN "{schema}"."ZIVF_CATEGORYMASTER_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE OR cs.SKU = cat.MATNR)
-        LEFT JOIN "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cm ON (cm.KUNNR = cs.DEALER_CODE)
+        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sm ON (sm.MATNR = cs.SKU)
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE OR cs.SKU = cat.MATNR)
+        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (cm.KUNNR = cs.DEALER_CODE)
         WHERE (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
           AND cs.INVOICE_DATE BETWEEN TO_DATE(?, 'YYYY-MM-DD') AND TO_DATE(?, 'YYYY-MM-DD')
     ),
@@ -694,7 +750,7 @@ def query_sales_numbers_hana(cursor, schema, year, month, day):
         curr_to
     )
 
-    cursor.execute(hana_sql, params)
+    sanitize_and_execute_hana(cursor, schema, hana_sql, params)
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, r)) for r in cursor.fetchall()]
 
@@ -718,8 +774,8 @@ def query_sales_report_by_values_hana(cursor, schema, year, month, day):
     ymonth_str = f"{year}{str(month).zfill(2)}"
 
     # Remaining working days in month
-    cursor.execute(f"""
-        SELECT COUNT(*) FROM "{schema}"."ZITR_DAYATTRIBUTE_01_TR"
+    sanitize_and_execute_hana(cursor, schema, f"""
+        SELECT COUNT(*) FROM "{schema}"."ZITR_DayAttribute_01_TR"
         WHERE "DATE_" > TO_DATE(?, 'YYYY-MM-DD') 
           AND "DATE_" <= TO_DATE(?, 'YYYY-MM-DD')
           AND ("WRK_DAY" IS NULL OR "WRK_DAY" NOT IN ('W', 'H', 'w', 'h'))
@@ -748,28 +804,28 @@ def query_sales_report_by_values_hana(cursor, schema, year, month, day):
             COALESCE(NULLIF(sh.NDP_VALUE, 0), NULLIF(sh.TAXABLE_VALUE, 0), sh.INVOICE_VALUE, 0) AS ndp_value
         FROM (
             SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
               AND can.INVOICE_NUMBER IS NULL
             UNION ALL
             SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
               AND can.INVOICE_NUMBER IS NULL
         ) sh
-        LEFT JOIN "{schema}"."ZIVR_SKUMASTER_01_TR" sm ON (sh.SKU = sm.MATNR)
-        LEFT JOIN "{schema}"."ZIVF_CATEGORYMASTER_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE OR sh.SKU = cat.MATNR)
-        LEFT JOIN "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cm ON (sh.DEALER_CODE = cm.KUNNR)
-        LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_plant ON (sh.PLANT = tm_plant.WERKS)
-        LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
-        LEFT JOIN "{schema}"."ZIVF_REGIONMASTER_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
-        LEFT JOIN "{schema}"."ZIVF_ZONEMASTER_01_TR" zm ON (zm.P_ZONE = COALESCE(
+        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sm ON (sh.SKU = sm.MATNR)
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE OR sh.SKU = cat.MATNR)
+        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (sh.DEALER_CODE = cm.KUNNR)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (sh.PLANT = tm_plant.WERKS)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
+        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
+        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(
             NULLIF(TRIM(tm_plant.P_ZONE), ''),
             NULLIF(TRIM(tm_bzirk.P_ZONE), ''),
             NULLIF(TRIM(rm.ZONE_CODE), ''),
@@ -804,28 +860,28 @@ def query_sales_report_by_values_hana(cursor, schema, year, month, day):
             COALESCE(NULLIF(cs.NDP_VALUE, 0), NULLIF(cs.TAXABLE_VALUE, 0), cs.INVOICE_VALUE, 0) AS ndp_value
         FROM (
             SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
               AND can.INVOICE_NUMBER IS NULL
             UNION ALL
             SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
               AND can.INVOICE_NUMBER IS NULL
         ) cs
-        LEFT JOIN "{schema}"."ZIVR_SKUMASTER_01_TR" sm ON (cs.SKU = sm.MATNR)
-        LEFT JOIN "{schema}"."ZIVF_CATEGORYMASTER_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE OR cs.SKU = cat.MATNR)
-        LEFT JOIN "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cm ON (cs.DEALER_CODE = cm.KUNNR)
-        LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
-        LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
-        LEFT JOIN "{schema}"."ZIVF_REGIONMASTER_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
-        LEFT JOIN "{schema}"."ZIVF_ZONEMASTER_01_TR" zm ON (zm.P_ZONE = COALESCE(
+        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sm ON (cs.SKU = sm.MATNR)
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE OR cs.SKU = cat.MATNR)
+        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (cs.DEALER_CODE = cm.KUNNR)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
+        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
+        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(
             NULLIF(TRIM(tm_plant.P_ZONE), ''),
             NULLIF(TRIM(tm_bzirk.P_ZONE), ''),
             NULLIF(TRIM(rm.ZONE_CODE), ''),
@@ -856,7 +912,7 @@ def query_sales_report_by_values_hana(cursor, schema, year, month, day):
             CASE P_ZONE
                 WHEN 'EZ' THEN 1 WHEN 'NZ' THEN 2 WHEN 'CZ' THEN 3 WHEN 'WZ' THEN 4 WHEN 'SZ' THEN 5 WHEN 'TZ' THEN 6 WHEN 'NP' THEN 7 ELSE 8
             END AS Sort_Order
-        FROM "{schema}"."ZIVF_ZONEMASTER_01_TR" WHERE NAME IS NOT NULL AND TRIM(NAME) != ''
+        FROM "{schema}"."ZIVF_ZoneMaster_01_TR" WHERE NAME IS NOT NULL AND TRIM(NAME) != ''
     ),
     agg_target AS (
         SELECT 
@@ -873,11 +929,11 @@ def query_sales_report_by_values_hana(cursor, schema, year, month, day):
                       OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%2W%'
                       OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%3W%')
                      THEN COALESCE(NULLIF(tgt.REV_PLAN_VAL, 0), NULLIF(tgt.PLAN_VALUE, 0), 0) ELSE 0 END) / 10000000 AS Tgt_4W
-        FROM "{schema}"."ZIVF_SD_SALES_PLAN_TARGET_01_TR" tgt
-        LEFT JOIN "{schema}"."ZIVF_CATEGORYMASTER_01_TR" cat ON (tgt.CAT_CODE = cat.CAT_CODE OR tgt.MATNR = cat.MATNR)
-        LEFT JOIN "{schema}"."ZIVF_REGIONMASTER_MD_01" rm ON (tgt.REG_CODE = rm.REGION_CODE)
-        LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm ON (tgt.TERR_CODE = tm.BZIRK)
-        LEFT JOIN "{schema}"."ZIVF_ZONEMASTER_01_TR" zm ON (zm.P_ZONE = COALESCE(NULLIF(TRIM(rm.ZONE_CODE), ''), NULLIF(TRIM(tm.P_ZONE), '')))
+        FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (tgt.CAT_CODE = cat.CAT_CODE OR tgt.MATNR = cat.MATNR)
+        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (tgt.REG_CODE = rm.REGION_CODE)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm ON (tgt.TERR_CODE = tm.BZIRK)
+        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(NULLIF(TRIM(rm.ZONE_CODE), ''), NULLIF(TRIM(tm.P_ZONE), '')))
         WHERE tgt.YMONTH = ?
           AND zm.NAME IS NOT NULL
         GROUP BY zm.NAME
@@ -974,7 +1030,7 @@ def query_sales_report_by_values_hana(cursor, schema, year, month, day):
         v_remaining_days
     )
 
-    cursor.execute(hana_sql, params)
+    sanitize_and_execute_hana(cursor, schema, hana_sql, params)
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, r)) for r in cursor.fetchall()]
 
@@ -1026,28 +1082,28 @@ def query_sales_summary_in_no_and_values_hana(cursor, schema, year, month, day):
             SUM(CASE WHEN UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) IN ('MOTOR') OR cat.CAT_CODE IN ('B1') OR UPPER(TRIM(COALESCE(sm.TYRE_TYPE, ''))) IN ('MOTOR CYCLE', 'MOTORCYCLE', 'MC') THEN COALESCE(NULLIF(cs.TYRE_QUANTITY, 0), NULLIF(cs.VOLUME, 0), 0) ELSE 0 END) AS "Motor"
         FROM (
             SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.TYRE_QUANTITY, s.VOLUME, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
               AND can.INVOICE_NUMBER IS NULL
             UNION ALL
             SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.TYRE_QUANTITY, s.VOLUME, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
               AND can.INVOICE_NUMBER IS NULL
         ) cs
-        LEFT JOIN "{schema}"."ZIVR_SKUMASTER_01_TR" sm ON (cs.SKU = sm.MATNR)
-        LEFT JOIN "{schema}"."ZIVF_CATEGORYMASTER_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE OR cs.SKU = cat.MATNR)
-        LEFT JOIN "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cust ON (cust.KUNNR = cs.DEALER_CODE)
-        LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
-        LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_bzirk ON (cust.BZIRK = tm_bzirk.BZIRK)
-        LEFT JOIN "{schema}"."ZIVF_REGIONMASTER_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cust.REGIO)), '')))
-        LEFT JOIN "{schema}"."ZIVF_ZONEMASTER_01_TR" zm ON (zm.P_ZONE = COALESCE(
+        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sm ON (cs.SKU = sm.MATNR)
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE OR cs.SKU = cat.MATNR)
+        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cust ON (cust.KUNNR = cs.DEALER_CODE)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cust.BZIRK = tm_bzirk.BZIRK)
+        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cust.REGIO)), '')))
+        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(
             NULLIF(TRIM(tm_plant.P_ZONE), ''),
             NULLIF(TRIM(tm_bzirk.P_ZONE), ''),
             NULLIF(TRIM(rm.ZONE_CODE), ''),
@@ -1072,7 +1128,7 @@ def query_sales_summary_in_no_and_values_hana(cursor, schema, year, month, day):
             CASE P_ZONE
                 WHEN 'EZ' THEN 1 WHEN 'NZ' THEN 2 WHEN 'CZ' THEN 3 WHEN 'WZ' THEN 4 WHEN 'SZ' THEN 5 WHEN 'TZ' THEN 6 WHEN 'NP' THEN 7 ELSE 8
             END AS Sort_Order
-        FROM "{schema}"."ZIVF_ZONEMASTER_01_TR" WHERE NAME IS NOT NULL AND TRIM(NAME) != ''
+        FROM "{schema}"."ZIVF_ZoneMaster_01_TR" WHERE NAME IS NOT NULL AND TRIM(NAME) != ''
     ),
     final_data AS (
         SELECT 
@@ -1219,7 +1275,7 @@ def query_sales_summary_in_no_and_values_hana(cursor, schema, year, month, day):
     """
 
     params = (curr_from, curr_to)
-    cursor.execute(hana_sql, params)
+    sanitize_and_execute_hana(cursor, schema, hana_sql, params)
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, r)) for r in cursor.fetchall()]
 
@@ -1238,26 +1294,26 @@ def query_sales_revenue_by_zone_hana(cursor, schema, zone=None):
             0 AS "achievValuePct"
         FROM (
             SELECT s.DEALER_CODE, s.PLANT, s.INVOICE_VALUE, s.TAXABLE_VALUE, s.NDP_VALUE, s.INDICATOR_CANCEL, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
               AND can.INVOICE_NUMBER IS NULL
             UNION ALL
             SELECT s.DEALER_CODE, s.PLANT, s.INVOICE_VALUE, s.TAXABLE_VALUE, s.NDP_VALUE, s.INDICATOR_CANCEL, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
               AND can.INVOICE_NUMBER IS NULL
         ) cs
-        LEFT JOIN "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cust ON (cs.DEALER_CODE = cust.KUNNR)
-        LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
-        LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_bzirk ON (cust.BZIRK = tm_bzirk.BZIRK)
-        LEFT JOIN "{schema}"."ZIVF_REGIONMASTER_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cust.REGIO)), '')))
-        LEFT JOIN "{schema}"."ZIVF_ZONEMASTER_01_TR" zm ON (zm.P_ZONE = COALESCE(
+        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cust ON (cs.DEALER_CODE = cust.KUNNR)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cust.BZIRK = tm_bzirk.BZIRK)
+        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cust.REGIO)), '')))
+        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(
             NULLIF(TRIM(tm_plant.P_ZONE), ''),
             NULLIF(TRIM(tm_bzirk.P_ZONE), ''),
             NULLIF(TRIM(rm.ZONE_CODE), ''),
@@ -1277,7 +1333,7 @@ def query_sales_revenue_by_zone_hana(cursor, schema, zone=None):
         GROUP BY zm.NAME
         ORDER BY "saleValueCr" DESC
         """
-        cursor.execute(hana_sql)
+        sanitize_and_execute_hana(cursor, schema, hana_sql)
     else:
         hana_sql = f"""
         SELECT 
@@ -1287,26 +1343,26 @@ def query_sales_revenue_by_zone_hana(cursor, schema, zone=None):
             0 AS "achievValuePct"
         FROM (
             SELECT s.DEALER_CODE, s.PLANT, s.INVOICE_VALUE, s.TAXABLE_VALUE, s.NDP_VALUE, s.INDICATOR_CANCEL, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
               AND can.INVOICE_NUMBER IS NULL
             UNION ALL
             SELECT s.DEALER_CODE, s.PLANT, s.INVOICE_VALUE, s.TAXABLE_VALUE, s.NDP_VALUE, s.INDICATOR_CANCEL, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
               AND can.INVOICE_NUMBER IS NULL
         ) cs
-        LEFT JOIN "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cust ON (cs.DEALER_CODE = cust.KUNNR)
-        LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
-        LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_bzirk ON (cust.BZIRK = tm_bzirk.BZIRK)
-        LEFT JOIN "{schema}"."ZIVF_REGIONMASTER_MD_01" rm ON (TRIM(rm.REGION_CODE) = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cust.REGIO)), '')))
-        LEFT JOIN "{schema}"."ZIVF_ZONEMASTER_01_TR" zm ON (zm.P_ZONE = COALESCE(
+        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cust ON (cs.DEALER_CODE = cust.KUNNR)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cust.BZIRK = tm_bzirk.BZIRK)
+        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (TRIM(rm.REGION_CODE) = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cust.REGIO)), '')))
+        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(
             NULLIF(TRIM(tm_plant.P_ZONE), ''),
             NULLIF(TRIM(tm_bzirk.P_ZONE), ''),
             NULLIF(TRIM(rm.ZONE_CODE), ''),
@@ -1336,7 +1392,7 @@ def query_sales_revenue_by_zone_hana(cursor, schema, zone=None):
         GROUP BY COALESCE(NULLIF(TRIM(rm.REGION_NAME), ''), NULLIF(TRIM(tm_plant.NAME), ''), NULLIF(TRIM(tm_bzirk.NAME), ''), 'Other Region')
         ORDER BY "saleValueCr" DESC
         """
-        cursor.execute(hana_sql, (zone, zone, zone, zone, zone, zone, zone, zone, zone, zone, zone))
+        sanitize_and_execute_hana(cursor, schema, hana_sql, (zone, zone, zone, zone, zone, zone, zone, zone, zone, zone, zone))
 
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, r)) for r in cursor.fetchall()]
@@ -1362,26 +1418,26 @@ def query_sales_by_account_category_hana(cursor, schema, zone=None):
             COALESCE(cs.NDP_VALUE, cs.TAXABLE_VALUE, cs.INVOICE_VALUE, 0) AS invoice_value
         FROM (
             SELECT s.DEALER_CODE, s.PLANT, s.INVOICE_VALUE, s.TAXABLE_VALUE, s.NDP_VALUE, s.INDICATOR_CANCEL, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
               AND can.INVOICE_NUMBER IS NULL
             UNION ALL
             SELECT s.DEALER_CODE, s.PLANT, s.INVOICE_VALUE, s.TAXABLE_VALUE, s.NDP_VALUE, s.INDICATOR_CANCEL, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR" s
-            LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+            LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
               ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
             WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
               AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
               AND can.INVOICE_NUMBER IS NULL
         ) cs
-        LEFT JOIN "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cm ON (cs.DEALER_CODE = cm.KUNNR)
-        LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
-        LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
-        LEFT JOIN "{schema}"."ZIVF_REGIONMASTER_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
-        LEFT JOIN "{schema}"."ZIVF_ZONEMASTER_01_TR" zm ON (zm.P_ZONE = COALESCE(
+        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (cs.DEALER_CODE = cm.KUNNR)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
+        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
+        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(
             NULLIF(TRIM(tm_plant.P_ZONE), ''),
             NULLIF(TRIM(tm_bzirk.P_ZONE), ''),
             NULLIF(TRIM(rm.ZONE_CODE), ''),
@@ -1414,7 +1470,7 @@ def query_sales_by_account_category_hana(cursor, schema, zone=None):
     ORDER BY "valCr" DESC
     """
 
-    cursor.execute(hana_sql, (zone, zone, zone, zone, zone, zone, zone, zone))
+    sanitize_and_execute_hana(cursor, schema, hana_sql, (zone, zone, zone, zone, zone, zone, zone, zone))
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, r)) for r in cursor.fetchall()]
 
@@ -1424,14 +1480,14 @@ def query_sales_by_account_category_hana(cursor, schema, zone=None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def query_non_billed_accounts_pct_hana(cursor, schema, zone=None):
-    cursor.execute(f"""
+    sanitize_and_execute_hana(cursor, schema, f"""
         SELECT YEAR(MAX(s.INVOICE_DATE)), MONTH(MAX(s.INVOICE_DATE))
         FROM (
-            SELECT INVOICE_DATE, INDICATOR_CANCEL, DISTRIBUTION_CHANNEL, INVOICE_NUMBER, PLANT, FKART FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR"
+            SELECT INVOICE_DATE, INDICATOR_CANCEL, DISTRIBUTION_CHANNEL, INVOICE_NUMBER, PLANT, FKART FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
             UNION ALL
-            SELECT INVOICE_DATE, INDICATOR_CANCEL, DISTRIBUTION_CHANNEL, INVOICE_NUMBER, PLANT, FKART FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR"
+            SELECT INVOICE_DATE, INDICATOR_CANCEL, DISTRIBUTION_CHANNEL, INVOICE_NUMBER, PLANT, FKART FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
         ) s
-        LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+        LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
           ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
         WHERE s.INVOICE_DATE IS NOT NULL 
           AND (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
@@ -1446,11 +1502,11 @@ def query_non_billed_accounts_pct_hana(cursor, schema, zone=None):
     WITH current_month_sales AS (
         SELECT DISTINCT s.DEALER_CODE
         FROM (
-            SELECT DEALER_CODE, INVOICE_DATE, INDICATOR_CANCEL, DISTRIBUTION_CHANNEL, INVOICE_NUMBER, PLANT, FKART FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR"
+            SELECT DEALER_CODE, INVOICE_DATE, INDICATOR_CANCEL, DISTRIBUTION_CHANNEL, INVOICE_NUMBER, PLANT, FKART FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
             UNION ALL
-            SELECT DEALER_CODE, INVOICE_DATE, INDICATOR_CANCEL, DISTRIBUTION_CHANNEL, INVOICE_NUMBER, PLANT, FKART FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR"
+            SELECT DEALER_CODE, INVOICE_DATE, INDICATOR_CANCEL, DISTRIBUTION_CHANNEL, INVOICE_NUMBER, PLANT, FKART FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
         ) s
-        LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+        LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
           ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
         WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
           AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
@@ -1469,12 +1525,12 @@ def query_non_billed_accounts_pct_hana(cursor, schema, zone=None):
             ELSE 'Other'
         END AS "category_name",
         ROUND((COUNT(DISTINCT CASE WHEN cms.DEALER_CODE IS NULL THEN cm.KUNNR END) / NULLIF(COUNT(DISTINCT cm.KUNNR), 0)) * 100, 2) AS "nonBilledPct"
-    FROM "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cm
+    FROM "{schema}"."ZIVF_CustomerMaster_01_MD" cm
     LEFT JOIN current_month_sales cms ON (cm.KUNNR = cms.DEALER_CODE)
-    LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_plant ON (cm.VWERK = tm_plant.WERKS)
-    LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
-    LEFT JOIN "{schema}"."ZIVF_REGIONMASTER_MD_01" rm ON (TRIM(rm.REGION_CODE) = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
-    LEFT JOIN "{schema}"."ZIVF_ZONEMASTER_01_TR" zm ON (
+    LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cm.VWERK = tm_plant.WERKS)
+    LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
+    LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (TRIM(rm.REGION_CODE) = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
+    LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (
         zm.P_ZONE = COALESCE(NULLIF(TRIM(tm_plant.P_ZONE), ''), NULLIF(TRIM(tm_bzirk.P_ZONE), ''), NULLIF(TRIM(rm.ZONE_CODE), ''))
     )
     WHERE (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
@@ -1493,7 +1549,7 @@ def query_non_billed_accounts_pct_hana(cursor, schema, zone=None):
         END
     """
 
-    cursor.execute(hana_sql, (v_act_year, v_act_month, zone, zone, zone, zone, zone, zone, zone, zone))
+    sanitize_and_execute_hana(cursor, schema, hana_sql, (v_act_year, v_act_month, zone, zone, zone, zone, zone, zone, zone, zone))
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, r)) for r in cursor.fetchall()]
 
@@ -1505,11 +1561,11 @@ def query_non_billed_accounts_pct_hana(cursor, schema, zone=None):
 def query_overdue_pct_hana(cursor, schema, zone=None):
     hana_sql = f"""
     SELECT COUNT(*) 
-    FROM "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cm
-    LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_plant ON (cm.VWERK = tm_plant.WERKS)
-    LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
-    LEFT JOIN "{schema}"."ZIVF_REGIONMASTER_MD_01" rm ON (TRIM(rm.REGION_CODE) = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
-    LEFT JOIN "{schema}"."ZIVF_ZONEMASTER_01_TR" zm ON (
+    FROM "{schema}"."ZIVF_CustomerMaster_01_MD" cm
+    LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cm.VWERK = tm_plant.WERKS)
+    LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
+    LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (TRIM(rm.REGION_CODE) = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
+    LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (
         zm.P_ZONE = COALESCE(NULLIF(TRIM(tm_plant.P_ZONE), ''), NULLIF(TRIM(tm_bzirk.P_ZONE), ''), NULLIF(TRIM(rm.ZONE_CODE), ''))
     )
     WHERE (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
@@ -1517,7 +1573,7 @@ def query_overdue_pct_hana(cursor, schema, zone=None):
            OR zm.NAME = ? OR zm.P_ZONE = ?
            OR UPPER(TRIM(zm.NAME)) = UPPER(TRIM(?)) OR UPPER(TRIM(zm.P_ZONE)) = UPPER(TRIM(?)))
     """
-    cursor.execute(hana_sql, (zone, zone, zone, zone, zone, zone, zone, zone))
+    sanitize_and_execute_hana(cursor, schema, hana_sql, (zone, zone, zone, zone, zone, zone, zone, zone))
     v_cnt = cursor.fetchone()[0] or 0
 
     return [
@@ -1545,11 +1601,11 @@ def query_exposure_pct_hana(cursor, schema, zone=None):
                 ELSE 'Other'
             END AS name,
             COUNT(DISTINCT cm.KUNNR) AS cnt
-        FROM "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cm
-        LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_plant ON (cm.VWERK = tm_plant.WERKS)
-        LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
-        LEFT JOIN "{schema}"."ZIVF_REGIONMASTER_MD_01" rm ON (TRIM(rm.REGION_CODE) = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
-        LEFT JOIN "{schema}"."ZIVF_ZONEMASTER_01_TR" zm ON (
+        FROM "{schema}"."ZIVF_CustomerMaster_01_MD" cm
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cm.VWERK = tm_plant.WERKS)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
+        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (TRIM(rm.REGION_CODE) = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
+        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (
             zm.P_ZONE = COALESCE(NULLIF(TRIM(tm_plant.P_ZONE), ''), NULLIF(TRIM(tm_bzirk.P_ZONE), ''), NULLIF(TRIM(rm.ZONE_CODE), ''))
         )
         WHERE (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
@@ -1576,7 +1632,7 @@ def query_exposure_pct_hana(cursor, schema, zone=None):
     FROM cat_counts c
     ORDER BY "value" DESC
     """
-    cursor.execute(hana_sql, (zone, zone, zone, zone, zone, zone, zone, zone))
+    sanitize_and_execute_hana(cursor, schema, hana_sql, (zone, zone, zone, zone, zone, zone, zone, zone))
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, r)) for r in cursor.fetchall()]
 
@@ -1592,28 +1648,28 @@ def query_category_sales_hana(cursor, schema, zone=None):
         ROUND(SUM(COALESCE(cs.NDP_VALUE, cs.TAXABLE_VALUE, cs.INVOICE_VALUE, 0)) / 10000000, 2) AS "total_sales_cr"
     FROM (
         SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_VALUE, s.TAXABLE_VALUE, s.NDP_VALUE, s.INDICATOR_CANCEL, s.DISTRIBUTION_CHANNEL 
-        FROM "{schema}"."ZPVF_SD_CURRENTSALES_01_TR" s
-        LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+        FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+        LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
           ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
         WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
           AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
           AND can.INVOICE_NUMBER IS NULL
         UNION ALL
         SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_VALUE, s.TAXABLE_VALUE, s.NDP_VALUE, s.INDICATOR_CANCEL, s.DISTRIBUTION_CHANNEL 
-        FROM "{schema}"."ZPVF_SD_SALESHISTORY_01_TR" s
-        LEFT JOIN "{schema}"."ZPVF_SD_CANCELLEDSALESINVOICE_01_TR" can
+        FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+        LEFT JOIN "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
           ON (s.INVOICE_NUMBER = can.INVOICE_NUMBER AND s.PLANT = can.PLANT AND s.FKART = can.FKART AND (can.DISTRIBUTION_CHANNEL = 10 OR can.DISTRIBUTION_CHANNEL = '10'))
         WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
           AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
           AND can.INVOICE_NUMBER IS NULL
     ) cs
-    LEFT JOIN "{schema}"."ZIVR_SKUMASTER_01_TR" sku ON (cs.SKU = sku.MATNR)
-    LEFT JOIN "{schema}"."ZIVF_CATEGORYMASTER_01_TR" cat ON (sku.CAT_CODE = cat.CAT_CODE OR cs.SKU = cat.MATNR)
-    LEFT JOIN "{schema}"."ZIVF_CUSTOMERMASTER_01_MD" cust ON (cs.DEALER_CODE = cust.KUNNR)
-    LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
-    LEFT JOIN "{schema}"."ZIVF_TERRITORYMASTER_01_TR" tm_bzirk ON (cust.BZIRK = tm_bzirk.BZIRK)
-    LEFT JOIN "{schema}"."ZIVF_REGIONMASTER_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cust.REGIO)), '')))
-    LEFT JOIN "{schema}"."ZIVF_ZONEMASTER_01_TR" zm ON (zm.P_ZONE = COALESCE(
+    LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sku ON (cs.SKU = sku.MATNR)
+    LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (sku.CAT_CODE = cat.CAT_CODE OR cs.SKU = cat.MATNR)
+    LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cust ON (cs.DEALER_CODE = cust.KUNNR)
+    LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
+    LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cust.BZIRK = tm_bzirk.BZIRK)
+    LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cust.REGIO)), '')))
+    LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(
         NULLIF(TRIM(tm_plant.P_ZONE), ''),
         NULLIF(TRIM(tm_bzirk.P_ZONE), ''),
         NULLIF(TRIM(rm.ZONE_CODE), ''),
@@ -1636,7 +1692,7 @@ def query_category_sales_hana(cursor, schema, zone=None):
     HAVING SUM(COALESCE(cs.NDP_VALUE, cs.TAXABLE_VALUE, cs.INVOICE_VALUE, 0)) > 0
     ORDER BY "total_sales_cr" DESC
     """
-    cursor.execute(hana_sql, (zone, zone, zone, zone, zone, zone, zone, zone))
+    sanitize_and_execute_hana(cursor, schema, hana_sql, (zone, zone, zone, zone, zone, zone, zone, zone))
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, r)) for r in cursor.fetchall()]
 
