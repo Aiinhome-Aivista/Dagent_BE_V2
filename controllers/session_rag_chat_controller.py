@@ -1355,12 +1355,14 @@ SCHEMA & BUSINESS DEFINITIONS:
 3. QUERY SIMPLICITY & PERFORMANCE RULES:
    - KEEP QUERIES AS SIMPLE AND DIRECT AS POSSIBLE.
    - For general sales questions, current period, top customers/dealers, or latest performance:
-     Query DIRECTLY from "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact.
-     DO NOT write complex 31M-row UNION ALL queries unless the user specifically asks for multi-year historical trends or all-time data. Querying CurrentSales directly is clean, instant, and completely avoids memory limit errors!
-   - Always filter fact."distribution_channel" = '10' (as string literal).
+     Query DIRECTLY from "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact (or "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" for historical data).
+     DO NOT write complex 31M-row UNION ALL queries unless the user specifically asks for multi-year historical trends or all-time data. Querying fact tables directly is clean, instant, and completely avoids memory limit errors!
+   - Distribution channel: If the user explicitly asks for a distribution channel or dealer channel, filter fact."distribution_channel" = '10' (as string literal). If not mentioned in the query, DO NOT filter by distribution channel so all valid sales are included!
    - Cancellation check: AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1')).
      DO NOT join ZPVF_SD_CancelledSalesInvoice_01_TR.
-   - Customer filter: AND (cm.KLABC IS NULL OR cm.KLABC <> 'X') on ZIVF_CustomerMaster_01_MD.
+   - Customer Master Join:
+     ALWAYS use LEFT JOIN for Customer Master ("SAP_S4"."ZIVF_CustomerMaster_01_MD") with COALESCE(cm.NAME1, fact."dealer_code") AS customer_name so missing customer master entries never drop transaction rows!
+     Customer filter: AND (cm.KUNNR IS NULL OR cm.KLABC IS NULL OR cm.KLABC <> 'X') on ZIVF_CustomerMaster_01_MD.
    - TARGET VS ACTUAL / PLAN ACHIEVEMENT RULES:
      Target view is at monthly planning grain (TERR_CODE, REG_CODE, YMONTH) and does NOT have dealer_code or daily dates.
      NEVER join Sales Fact directly to Target Fact with an INNER/LEFT JOIN — this causes Cartesian product and duplicates numbers!
@@ -1371,13 +1373,12 @@ SCHEMA & BUSINESS DEFINITIONS:
 
 4. CANONICAL EXAMPLES:
    - Top 2 Customers by Total Sales:
-     SELECT cm.NAME1 AS customer_name, fact."dealer_code" AS customer_code, SUM(fact."invoice_value") AS total_sales
+     SELECT COALESCE(cm.NAME1, fact."dealer_code") AS customer_name, fact."dealer_code" AS customer_code, SUM(fact."invoice_value") AS total_sales
      FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
-     JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON fact."dealer_code" = cm.KUNNR
-     WHERE fact."distribution_channel" = '10'
-       AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
-       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
-     GROUP BY cm.NAME1, fact."dealer_code"
+     LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON fact."dealer_code" = cm.KUNNR
+     WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
+       AND (cm.KUNNR IS NULL OR cm.KLABC IS NULL OR cm.KLABC <> 'X')
+     GROUP BY COALESCE(cm.NAME1, fact."dealer_code"), fact."dealer_code"
      ORDER BY total_sales DESC
      LIMIT 2
 
@@ -2731,6 +2732,64 @@ def session_rag_chat_controller(get_connection_func):
                                 else:
                                     sql_results = [dict(r) for r in rows]
 
+                            # ── SMART 0-ROW FALLBACK (SAP HANA) ──
+                            if is_hana and not sql_results:
+                                print("[SQL_EXEC] 0 rows returned from SAP HANA query. Attempting smart fallbacks...")
+                                
+                                # Fallback 1: If CurrentSales view returned 0 rows, try SalesHistory view
+                                if "ZPVF_SD_CurrentSales_01_TR" in run_query:
+                                    print("[SQL_EXEC] Fallback 1: Retrying on SalesHistory view instead of CurrentSales...")
+                                    alt_query = run_query.replace("ZPVF_SD_CurrentSales_01_TR", "ZPVF_SD_SalesHistory_01_TR")
+                                    try:
+                                        cur_sql.execute(alt_query)
+                                        h_rows = cur_sql.fetchall()
+                                        if h_rows:
+                                            cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
+                                            sql_results = [dict(zip(cols, r)) for r in h_rows]
+                                            run_query = alt_query
+                                            sql_query = alt_query
+                                            print(f"[SQL_EXEC] SalesHistory fallback SUCCESS! Returned {len(sql_results)} rows.")
+                                    except Exception as h_ex:
+                                        print(f"[SQL_EXEC] SalesHistory fallback error: {h_ex}")
+
+                                # Fallback 2: If still 0 rows, check if distribution_channel = '10' is filtering out all records
+                                if not sql_results and "distribution_channel" in run_query:
+                                    if not re.search(r'\b(?:channel\s*10|dist(?:ribution)?\s*channel)\b', question, re.I):
+                                        print("[SQL_EXEC] Fallback 2: Relaxing distribution_channel = '10' constraint...")
+                                        relaxed_q = re.sub(r'(?:AND\s+)?(?:[a-zA-Z0-9_]+\.)?\"?distribution_channel\"?\s*=\s*\'?10\'?\s*(?:AND\s+)?', ' ', run_query, flags=re.IGNORECASE)
+                                        relaxed_q = re.sub(r'WHERE\s+(?:AND\s+)+', 'WHERE ', relaxed_q, flags=re.IGNORECASE)
+                                        relaxed_q = re.sub(r'WHERE\s*(GROUP|ORDER|\Z)', r'\1', relaxed_q, flags=re.IGNORECASE)
+                                        try:
+                                            cur_sql.execute(relaxed_q)
+                                            rel_rows = cur_sql.fetchall()
+                                            if rel_rows:
+                                                cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
+                                                sql_results = [dict(zip(cols, r)) for r in rel_rows]
+                                                run_query = relaxed_q
+                                                sql_query = relaxed_q
+                                                print(f"[SQL_EXEC] Relaxed channel filter SUCCESS! Returned {len(sql_results)} rows.")
+                                        except Exception as rel_e:
+                                            print(f"[SQL_EXEC] Relaxed filter error: {rel_e}")
+
+                                # Fallback 3: If still 0 rows, check if CustomerMaster join or KLABC is dropping unmatched rows
+                                if not sql_results and "ZIVF_CustomerMaster_01_MD" in run_query:
+                                    print("[SQL_EXEC] Fallback 3: Trying LEFT JOIN on CustomerMaster without KLABC filter...")
+                                    cust_q = re.sub(r'\bJOIN\s+(\"?SAP_S4\"?\.)?\"?ZIVF_CustomerMaster_01_MD\"?', r'LEFT JOIN \1"ZIVF_CustomerMaster_01_MD"', run_query, flags=re.IGNORECASE)
+                                    cust_q = re.sub(r'(?:AND\s+)?\(?\s*(?:cm\.)?KLABC\s*IS\s*NULL\s*OR\s*(?:cm\.)?KLABC\s*<>\s*\'X\'\s*\)?\s*(?:AND\s+)?', ' ', cust_q, flags=re.IGNORECASE)
+                                    cust_q = re.sub(r'WHERE\s+(?:AND\s+)+', 'WHERE ', cust_q, flags=re.IGNORECASE)
+                                    cust_q = re.sub(r'WHERE\s*(GROUP|ORDER|\Z)', r'\1', cust_q, flags=re.IGNORECASE)
+                                    try:
+                                        cur_sql.execute(cust_q)
+                                        c_rows = cur_sql.fetchall()
+                                        if c_rows:
+                                            cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
+                                            sql_results = [dict(zip(cols, r)) for r in c_rows]
+                                            run_query = cust_q
+                                            sql_query = cust_q
+                                            print(f"[SQL_EXEC] CustomerMaster LEFT JOIN SUCCESS! Returned {len(sql_results)} rows.")
+                                    except Exception as c_e:
+                                        print(f"[SQL_EXEC] CustomerMaster fallback error: {c_e}")
+
                             # Convert Decimal, Date, and non-serializable objects
                             import decimal
                             for row in sql_results:
@@ -2772,10 +2831,10 @@ def session_rag_chat_controller(get_connection_func):
                             if is_hana:
                                 repair_user += (
                                     "Common fixes for SAP HANA:\n"
-                                    "- For current / general questions, query directly from \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\" to avoid scanning 30M rows.\n"
+                                    "- For current period / MTD questions, query directly from \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\". For general / historical questions, query \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\".\n"
                                     "- Fact view columns are case-sensitive and must be double-quoted: fact.\"dealer_code\", fact.\"invoice_value\", fact.\"Tyre_Quantity\", fact.\"distribution_channel\".\n"
-                                    "- Customer master: join fact.\"dealer_code\" = cm.KUNNR, filter (cm.KLABC IS NULL OR cm.KLABC <> 'X'), select cm.NAME1.\n"
-                                    "- Distribution channel: filter fact.\"distribution_channel\" = '10' (string literal).\n"
+                                    "- Customer master: ALWAYS use LEFT JOIN fact.\"dealer_code\" = cm.KUNNR and select COALESCE(cm.NAME1, fact.\"dealer_code\") AS customer_name.\n"
+                                    "- Filter fact.\"distribution_channel\" = '10' ONLY IF explicitly requested by the user.\n"
                                     "- Do NOT join 'ZPVF_SD_CancelledSalesInvoice_01_TR'. Use: AND (fact.\"indicator_cancel\" IS NULL OR fact.\"indicator_cancel\" NOT IN ('X', 'Y', '1')).\n\n"
                                 )
                             else:
