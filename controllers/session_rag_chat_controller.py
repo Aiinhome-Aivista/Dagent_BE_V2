@@ -2636,7 +2636,8 @@ def session_rag_chat_controller(get_connection_func):
                                     run_query = run_query.replace('`', '"')
                                 # Replace any HDI container / user schema prefix like "SAP_S4#AI_BI_EXT" with "SAP_S4"
                                 run_query = re.sub(r'\"?SAP_S4#[a-zA-Z0-9_]+\"?', '"SAP_S4"', run_query, flags=re.IGNORECASE)
-                                # Ensure SAP_S4 schema prefix on SAP views if unqualified
+
+                                # Ensure SAP_S4 schema prefix on SAP views safely without duplicate quoting
                                 for sap_v in [
                                     "ZPVF_SD_CurrentSales_01_TR", "ZPVF_SD_SalesHistory_01_TR",
                                     "ZPVF_SD_CancelledSalesInvoice_01_TR", "ZIVF_SD_Sales_Plan_Target_01_TR",
@@ -2645,7 +2646,7 @@ def session_rag_chat_controller(get_connection_func):
                                     "ZIVF_RegionMaster_MD_01", "ZIVF_ZoneMaster_01_TR", "ZITR_DayAttribute_01_TR"
                                 ]:
                                     run_query = re.sub(
-                                        rf'(?<!SAP_S4\.)(?<!\"SAP_S4\"\.)\b("?{sap_v}"?)\b',
+                                        rf'(?:\"?SAP_S4\"?\.)?\"?{sap_v}\"?(?!\w)',
                                         rf'"SAP_S4"."{sap_v}"',
                                         run_query,
                                         flags=re.IGNORECASE
@@ -2685,10 +2686,25 @@ def session_rag_chat_controller(get_connection_func):
                                 }
 
                                 for u_col, exact_col in sap_col_map.items():
-                                    # Match alias.col or alias."col" (e.g. fact.dealer_code or fact."DEALER_CODE")
-                                    run_query = re.sub(rf'\b([a-zA-Z0-9_]+)\."?{u_col}"?\b', rf'\1.{exact_col}', run_query, flags=re.IGNORECASE)
-                                    # Match standalone col when preceded by whitespace/comma/parenthesis
-                                    run_query = re.sub(rf'(?<![a-zA-Z0-9_".])\b{u_col}\b(?![a-zA-Z0-9_"])', exact_col, run_query, flags=re.IGNORECASE)
+                                    # Match alias."col" or alias.col cleanly
+                                    run_query = re.sub(
+                                        rf'\b([a-zA-Z0-9_]+)\.\"?{u_col}\"?(?!\w)',
+                                        rf'\1.{exact_col}',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+                                    # Match standalone "col" or col
+                                    run_query = re.sub(
+                                        rf'(?<![a-zA-Z0-9_".])\"?{u_col}\"?(?![a-zA-Z0-9_"])',
+                                        exact_col,
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+
+                                # Collapse any accidental double-quotes: ""col"" -> "col"
+                                run_query = re.sub(r'\"\"+', '"', run_query)
+                                # Collapse any duplicated schema: "SAP_S4"."SAP_S4". -> "SAP_S4".
+                                run_query = re.sub(r'(?:\"SAP_S4\"\.)+', '"SAP_S4".', run_query, flags=re.IGNORECASE)
 
                                 # Standardize distribution_channel filter to string '10' (avoid implicit type conversion on NVARCHAR)
                                 run_query = re.sub(r'\"distribution_channel\"\s*=\s*10\b', r'"distribution_channel" = \'10\'', run_query)
@@ -2700,6 +2716,8 @@ def session_rag_chat_controller(get_connection_func):
                                 # Fix alias mismatches like C.INVOICE_NUMBER when alias is can or vice versa
                                 if 'can.' in run_query.lower() and 'c.' in run_query.lower():
                                     run_query = re.sub(r'\bc\.', 'can.', run_query, flags=re.IGNORECASE)
+
+                                print(f"[SQL_EXEC] Executing on SAP HANA:\n{run_query}")
 
                             cur_sql.execute(run_query)
                             rows = cur_sql.fetchall()
