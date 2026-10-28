@@ -454,7 +454,7 @@ SAP S/4HANA Sales & Distribution (SD) Architecture and Table Context:
    - ZIVF_SD_Sales_Plan_Target_01_TR: Sales Plan & Target view (~200,000 rows). Target Value is PLAN_VALUE (or REV_PLAN_VAL), Target Qty is ORG_PLAN (or REV_PLAN).
    CRITICAL SAP HANA CASING FOR FACT COLUMNS (MUST USE DOUBLE QUOTES):
    "invoice_number", "invoice_date", "plant", "dealer_code", "ship_to_party", "SKU", "batch", "volume", "Tyre_Quantity", "ndp_value", "old_code", "invoice_value", "total_discount", "gst", "taxable_value", "FKART", "BILL_TYPE", "distribution_channel", "indicator_cancel".
-   - Customer Master: ZIVF_CustomerMaster_01_MD (~69,104 rows, columns UPPERCASE). Join on (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0')). Customer Name is COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"). Mandatory filter: (cm.KUNNR IS NULL OR cm.KLABC IS NULL OR cm.KLABC <> 'X'). (NOTE: SAP KUNNR often has 10-digit leading zeros '0001234567' while fact."dealer_code" is '1234567'. LTRIM matches them perfectly).
+   - Customer Master: ZIVF_CustomerMaster_01_MD (~69,104 rows, columns UPPERCASE). When ranking or listing customers/dealers (Top N, Worst N, Dealers), ALWAYS use JOIN (INNER JOIN) on (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0')) to guarantee valid registered customer names. Customer Name is COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"). Filter: (cm.KLABC IS NULL OR cm.KLABC <> 'X'). Do NOT use cm.KUNNR IS NULL in ranking queries. (NOTE: SAP KUNNR often has 10-digit leading zeros '0001234567' while fact."dealer_code" is '1234567'. LTRIM matches them perfectly).
    - SKU / Material Master: ZIVR_SKUMaster_01_TR (~30,000 rows, columns UPPERCASE). Join on fact."SKU" = sk.MATNR. Description is sk.MAKTX or sk.PROD_TITLE, Brand is sk.BRAND, Sub Brand is sk.SUB_BRAND, Category Code is sk.CAT_CODE, Construction is sk.CONSTUCTION, Tyre Type is sk.TYRE_TYPE (or sk.TYRE_TP: TRUCK, LCV, CAR, etc.).
    - Category Master: ZIVF_CategoryMaster_01_TR (columns UPPERCASE). Join on sk.CAT_CODE = cat.CAT_CODE. Category Description is cat.CAT_DESC (Tyre, Tube, Flap).
    - Territory Master: ZIVF_TerritoryMaster_01_TR (columns UPPERCASE). Join on cm.BZIRK = tm.BZIRK. Territory Name is tm.NAME, Region code is tm.REGIO, Zone code is tm.P_ZONE.
@@ -1367,10 +1367,12 @@ SCHEMA & BUSINESS DEFINITIONS:
      YOU MUST JOIN THE CORRESPONDING MASTER TABLE TO FETCH THE HUMAN-READABLE NAME/DESCRIPTION.
      NEVER return only bare codes/IDs (e.g. dealer_code, MATNR, BZIRK, region_code, zone_code) without their descriptive name!
      * Customer/Dealer Join:
-       ALWAYS use LEFT JOIN for Customer Master ("SAP_S4"."ZIVF_CustomerMaster_01_MD") with:
+       When ranking or listing customers/dealers (Top N, Worst N, Performers):
+       ALWAYS use JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm (INNER JOIN):
        ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
        SELECT: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name, fact."dealer_code" AS customer_code
-       Filter: AND (cm.KUNNR IS NULL OR cm.KLABC IS NULL OR cm.KLABC <> 'X')
+       Filter: AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+       (CRITICAL: Using JOIN guarantees every customer returned has a verified profile and name. Never allow 'cm.KUNNR IS NULL' in ranking queries, as it pulls unprofiled orphan accounting adjustments like 102425).
      * SKU / Product: JOIN "SAP_S4"."ZIVR_SKUMaster_01_TR" sk ON fact."SKU" = sk.MATNR
        SELECT: COALESCE(sk.MAKTX, sk.PROD_TITLE, fact."SKU") AS product_name, fact."SKU" AS sku_code
      * Category: JOIN "SAP_S4"."ZIVF_CategoryMaster_01_TR" cat ON sk.CAT_CODE = cat.CAT_CODE
@@ -1390,19 +1392,33 @@ SCHEMA & BUSINESS DEFINITIONS:
      * Outer Query: Join CTEs on territory/region/month, calculate % Value ((actual_sales / target_sales) * 100) and % Qty ((actual_qty / target_qty) * 100).
 
 4. CANONICAL EXAMPLES:
-   - Entity Ranking (Top N / Bottom N / Worst N Performers):
+   - Top 2 Customers by Total Sales:
      SELECT 
        COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name, 
        fact."dealer_code" AS customer_code, 
        SUM(fact."invoice_value") AS total_sales
      FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
-     LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
+     JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
        ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
      WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
-       AND (cm.KUNNR IS NULL OR cm.KLABC IS NULL OR cm.KLABC <> 'X')
+       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
      GROUP BY COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code"
-     ORDER BY total_sales DESC -- (use total_sales ASC for worst / bottom performers)
-     LIMIT 5 -- (use requested count, e.g. LIMIT 2, 5, 10)
+     ORDER BY total_sales DESC
+     LIMIT 2
+
+   - Worst 2 Customers / Lowest Performers:
+     SELECT 
+       COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name, 
+       fact."dealer_code" AS customer_code, 
+       SUM(fact."invoice_value") AS total_sales
+     FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
+     JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
+       ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+     WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
+       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+     GROUP BY COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code"
+     ORDER BY total_sales ASC
+     LIMIT 2
 
    - Sales by Brand & Tyre Category:
      SELECT sk.BRAND, sk.TYRE_TYPE, SUM(fact."invoice_value") AS total_sales, SUM(fact."Tyre_Quantity") AS total_qty
@@ -1500,11 +1516,11 @@ SCHEMA & BUSINESS DEFINITIONS:
          ROW_NUMBER() OVER (PARTITION BY da.YMONTH ORDER BY SUM(fact."Tyre_Quantity") DESC) AS rn
        FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
        JOIN "SAP_S4"."ZIVR_SKUMaster_01_TR" sk ON fact."SKU" = sk.MATNR
-       LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
+       JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
          ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
        JOIN "SAP_S4"."ZITR_DayAttribute_01_TR" da ON fact."invoice_date" = da."Date_"
        WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
-         AND (cm.KUNNR IS NULL OR cm.KLABC IS NULL OR cm.KLABC <> 'X')
+         AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
        GROUP BY da.YMONTH, COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code"
      )
      SELECT month, dealer_name, dealer_code, total_quantity, total_sales
@@ -1588,14 +1604,16 @@ DEEP ANALYSIS PROTOCOL:
 5. If SQL Results exist, ignore any conflicting retrieved chunks.
 6. Do NOT include "(source:...)" or "[source:...]" tags in the answer text.
 7. {followup_ins}
+8. ENTITY NAMES & CODES: When discussing entities (customers, dealers, products, territories), ALWAYS present the verified name alongside the code (e.g. "Alok Enterprises (Customer Code: 102425)"). NEVER refer to an entity solely by its numeric code if a customer_name, dealer_name, or product_name is available in the SQL results.
 
 VISUALIZATION RULES:
 If the question involves comparison, distribution, ranking, trends, or category breakdown, generate up to 3 visualizations in the "visualizations" array.
+CRITICAL: For entity rankings/breakdowns (customers, dealers, products, categories), ALWAYS use the human-readable entity name (e.g. "customer_name", "product_name") as the xKey and display label in charts, NOT bare numeric codes! Ensure both name and code are present in each data object.
 Supported types:
 1. Table:
    {"type":"table", "title":"...", "columns":[{"key":"colKey","label":"Col Label"}], "data":[{"colKey":"value"}]}
 2. Bar Chart:
-   {"type":"bar_chart", "title":"...", "xKey":"category", "yKey":"value", "data":[{"category":"A","value":100}]}
+   {"type":"bar_chart", "title":"...", "xKey":"customer_name", "yKey":"total_sales", "data":[{"customer_name":"ABC Enterprises","customer_code":"102425","total_sales":100}]}
 3. Line Chart (for trends over time):
    {"type":"line_chart", "title":"...", "xKey":"month", "yKey":"value", "seriesKey":"series", "data":[{"series":"Radial","month":"Jan","value":100}]}
 
@@ -2801,6 +2819,28 @@ def session_rag_chat_controller(get_connection_func):
                                     flags=re.IGNORECASE
                                 )
 
+                                # For ranking queries (Top N / Worst N customers), upgrade LEFT JOIN to JOIN on Customer Master
+                                # so unprofiled internal codes without customer names (e.g. 102425) are excluded
+                                if re.search(r'ORDER\s+BY\s+.*?(?:total_sales|total_qty|invoice_value)', run_query, re.I) and "customermaster" in run_query.lower():
+                                    run_query = re.sub(
+                                        r'\bLEFT\s+JOIN\s+(\"?SAP_S4\"?\.)?\"?ZIVF_CustomerMaster_01_MD\"?',
+                                        r'JOIN \1"ZIVF_CustomerMaster_01_MD"',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+                                    run_query = re.sub(
+                                        r'(?:cm\.)?\"?KUNNR\"?\s*IS\s*NULL\s*OR\s*',
+                                        '',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+                                    run_query = re.sub(
+                                        r'\s*OR\s*(?:cm\.)?\"?KUNNR\"?\s*IS\s*NULL\b',
+                                        '',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+
                                 print(f"[SQL_EXEC] Executing on SAP HANA:\n{run_query}")
 
                             cur_sql.execute(run_query)
@@ -2856,22 +2896,24 @@ def session_rag_chat_controller(get_connection_func):
 
                                 # Fallback 3: If still 0 rows, check if CustomerMaster join or KLABC is dropping unmatched rows
                                 if not sql_results and "ZIVF_CustomerMaster_01_MD" in run_query:
-                                    print("[SQL_EXEC] Fallback 3: Trying LEFT JOIN on CustomerMaster without KLABC filter...")
-                                    cust_q = re.sub(r'\bJOIN\s+(\"?SAP_S4\"?\.)?\"?ZIVF_CustomerMaster_01_MD\"?', r'LEFT JOIN \1"ZIVF_CustomerMaster_01_MD"', run_query, flags=re.IGNORECASE)
-                                    cust_q = re.sub(r'(?:AND\s+)?\(?\s*(?:cm\.)?KLABC\s*IS\s*NULL\s*OR\s*(?:cm\.)?KLABC\s*<>\s*\'X\'\s*\)?\s*(?:AND\s+)?', ' ', cust_q, flags=re.IGNORECASE)
-                                    cust_q = re.sub(r'WHERE\s+(?:AND\s+)+', 'WHERE ', cust_q, flags=re.IGNORECASE)
-                                    cust_q = re.sub(r'WHERE\s*(GROUP|ORDER|\Z)', r'\1', cust_q, flags=re.IGNORECASE)
-                                    try:
-                                        cur_sql.execute(cust_q)
-                                        c_rows = cur_sql.fetchall()
-                                        if c_rows:
-                                            cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
-                                            sql_results = [dict(zip(cols, r)) for r in c_rows]
-                                            run_query = cust_q
-                                            sql_query = cust_q
-                                            print(f"[SQL_EXEC] CustomerMaster LEFT JOIN SUCCESS! Returned {len(sql_results)} rows.")
-                                    except Exception as c_e:
-                                        print(f"[SQL_EXEC] CustomerMaster fallback error: {c_e}")
+                                    is_ranking = bool(re.search(r'ORDER\s+BY\s+.*?(?:total_sales|total_qty|invoice_value)', run_query, re.I))
+                                    if not is_ranking:
+                                        print("[SQL_EXEC] Fallback 3: Trying LEFT JOIN on CustomerMaster without KLABC filter...")
+                                        cust_q = re.sub(r'\bJOIN\s+(\"?SAP_S4\"?\.)?\"?ZIVF_CustomerMaster_01_MD\"?', r'LEFT JOIN \1"ZIVF_CustomerMaster_01_MD"', run_query, flags=re.IGNORECASE)
+                                        cust_q = re.sub(r'(?:AND\s+)?\(?\s*(?:cm\.)?KLABC\s*IS\s*NULL\s*OR\s*(?:cm\.)?KLABC\s*<>\s*\'X\'\s*\)?\s*(?:AND\s+)?', ' ', cust_q, flags=re.IGNORECASE)
+                                        cust_q = re.sub(r'WHERE\s+(?:AND\s+)+', 'WHERE ', cust_q, flags=re.IGNORECASE)
+                                        cust_q = re.sub(r'WHERE\s*(GROUP|ORDER|\Z)', r'\1', cust_q, flags=re.IGNORECASE)
+                                        try:
+                                            cur_sql.execute(cust_q)
+                                            c_rows = cur_sql.fetchall()
+                                            if c_rows:
+                                                cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
+                                                sql_results = [dict(zip(cols, r)) for r in c_rows]
+                                                run_query = cust_q
+                                                sql_query = cust_q
+                                                print(f"[SQL_EXEC] CustomerMaster LEFT JOIN SUCCESS! Returned {len(sql_results)} rows.")
+                                        except Exception as c_e:
+                                            print(f"[SQL_EXEC] CustomerMaster fallback error: {c_e}")
 
                             # Convert Decimal, Date, and non-serializable objects
                             import decimal
@@ -2916,7 +2958,7 @@ def session_rag_chat_controller(get_connection_func):
                                     "Common fixes for SAP HANA:\n"
                                     "- For current period / MTD questions, query directly from \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\". For general / historical questions, query \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\".\n"
                                     "- Fact view columns are case-sensitive and must be double-quoted: fact.\"dealer_code\", fact.\"invoice_value\", fact.\"Tyre_Quantity\", fact.\"distribution_channel\".\n"
-                                    "- Customer master: ALWAYS use LEFT JOIN ON (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')) and select COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact.\"dealer_code\") AS customer_name.\n"
+                                    "- Customer master: For rankings (Top/Worst N), ALWAYS use JOIN (INNER JOIN) on \"SAP_S4\".\"ZIVF_CustomerMaster_01_MD\" cm ON (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')) and select COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact.\"dealer_code\") AS customer_name. NEVER allow cm.KUNNR IS NULL in ranking queries.\n"
                                     "- Filter fact.\"distribution_channel\" = '10' ONLY IF explicitly requested by the user.\n"
                                     "- Do NOT join 'ZPVF_SD_CancelledSalesInvoice_01_TR'. Use: AND (fact.\"indicator_cancel\" IS NULL OR fact.\"indicator_cancel\" NOT IN ('X', 'Y', '1')).\n\n"
                                 )
