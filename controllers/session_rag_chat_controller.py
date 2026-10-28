@@ -454,8 +454,7 @@ SAP S/4HANA Sales & Distribution (SD) Architecture and Table Context:
    - ZIVF_SD_Sales_Plan_Target_01_TR: Sales Plan & Target view (~200,000 rows). Target Value is PLAN_VALUE (or REV_PLAN_VAL), Target Qty is ORG_PLAN (or REV_PLAN).
    CRITICAL SAP HANA CASING FOR FACT COLUMNS (MUST USE DOUBLE QUOTES):
    "invoice_number", "invoice_date", "plant", "dealer_code", "ship_to_party", "SKU", "batch", "volume", "Tyre_Quantity", "ndp_value", "old_code", "invoice_value", "total_discount", "gst", "taxable_value", "FKART", "BILL_TYPE", "distribution_channel", "indicator_cancel".
-2. Master Views & Joins:
-   - Customer Master: ZIVF_CustomerMaster_01_MD (~69,104 rows, columns UPPERCASE). Join on fact."dealer_code" = cm.KUNNR. Customer Name is cm.NAME1. Mandatory filter: (cm.KLABC IS NULL OR cm.KLABC <> 'X').
+   - Customer Master: ZIVF_CustomerMaster_01_MD (~69,104 rows, columns UPPERCASE). Join on (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0')). Customer Name is COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"). Mandatory filter: (cm.KUNNR IS NULL OR cm.KLABC IS NULL OR cm.KLABC <> 'X'). (NOTE: SAP KUNNR often has 10-digit leading zeros '0001234567' while fact."dealer_code" is '1234567'. LTRIM matches them perfectly).
    - SKU / Material Master: ZIVR_SKUMaster_01_TR (~30,000 rows, columns UPPERCASE). Join on fact."SKU" = sk.MATNR. Description is sk.MAKTX or sk.PROD_TITLE, Brand is sk.BRAND, Sub Brand is sk.SUB_BRAND, Category Code is sk.CAT_CODE, Construction is sk.CONSTUCTION, Tyre Type is sk.TYRE_TYPE (or sk.TYRE_TP: TRUCK, LCV, CAR, etc.).
    - Category Master: ZIVF_CategoryMaster_01_TR (columns UPPERCASE). Join on sk.CAT_CODE = cat.CAT_CODE. Category Description is cat.CAT_DESC (Tyre, Tube, Flap).
    - Territory Master: ZIVF_TerritoryMaster_01_TR (columns UPPERCASE). Join on cm.BZIRK = tm.BZIRK. Territory Name is tm.NAME, Region code is tm.REGIO, Zone code is tm.P_ZONE.
@@ -1323,10 +1322,13 @@ SCHEMA & BUSINESS DEFINITIONS:
      * "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR" (Sales Plan & Target View: Target Revenue = PLAN_VALUE or REV_PLAN_VAL, Target Qty = ORG_PLAN or REV_PLAN)
    
    - Master Views & Primary Join Keys:
-     * Customer Master: "SAP_S4"."ZIVF_CustomerMaster_01_MD" (JOIN: fact."dealer_code" = cm.KUNNR)
-       Customer Name: cm.NAME1. Mandatory Filter: (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+     * Customer Master: "SAP_S4"."ZIVF_CustomerMaster_01_MD"
+       JOIN: (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+       Customer Name: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name
+       Mandatory Filter: (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+       (CRITICAL: In SAP S/4HANA, KUNNR is 10 digits with leading zeros '0001105923' while dealer_code in facts is '1105923'. LTRIM matches them reliably. Also fallback to BNAME if NAME1 is empty).
      * SKU / Material Master: "SAP_S4"."ZIVR_SKUMaster_01_TR" (JOIN: fact."SKU" = sk.MATNR)
-       Product Name: sk.MAKTX or sk.PROD_TITLE, Brand: sk.BRAND, Sub Brand: sk.SUB_BRAND, Category Code: sk.CAT_CODE
+       Product Name: COALESCE(sk.MAKTX, sk.PROD_TITLE, fact."SKU") AS product_name, Brand: sk.BRAND, Sub Brand: sk.SUB_BRAND, Category Code: sk.CAT_CODE
        Construction: sk.CONSTUCTION (Radial, Bias), Tyre Type: sk.TYRE_TYPE (TRUCK, LCV, CAR, 3W, SCV, FARM, OTR)
      * Category Master: "SAP_S4"."ZIVF_CategoryMaster_01_TR" (JOIN: sk.CAT_CODE = cat.CAT_CODE)
        Category Name: cat.CAT_DESC (Tyre, Tube, Flap)
@@ -1360,9 +1362,25 @@ SCHEMA & BUSINESS DEFINITIONS:
    - Distribution channel: If the user explicitly asks for a distribution channel or dealer channel, filter fact."distribution_channel" = '10' (as string literal). If not mentioned in the query, DO NOT filter by distribution channel so all valid sales are included!
    - Cancellation check: AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1')).
      DO NOT join ZPVF_SD_CancelledSalesInvoice_01_TR.
-   - Customer Master Join:
-     ALWAYS use LEFT JOIN for Customer Master ("SAP_S4"."ZIVF_CustomerMaster_01_MD") with COALESCE(cm.NAME1, fact."dealer_code") AS customer_name so missing customer master entries never drop transaction rows!
-     Customer filter: AND (cm.KUNNR IS NULL OR cm.KLABC IS NULL OR cm.KLABC <> 'X') on ZIVF_CustomerMaster_01_MD.
+   - MASTER TABLES & DESCRIPTIVE NAMES / DESCRIPTIONS MANDATE:
+     Whenever the user query asks for Customers, Dealers, Products, Materials, SKUs, Categories, Territories, Regions, or Zones:
+     YOU MUST JOIN THE CORRESPONDING MASTER TABLE TO FETCH THE HUMAN-READABLE NAME/DESCRIPTION.
+     NEVER return only bare codes/IDs (e.g. dealer_code, MATNR, BZIRK, region_code, zone_code) without their descriptive name!
+     * Customer/Dealer Join:
+       ALWAYS use LEFT JOIN for Customer Master ("SAP_S4"."ZIVF_CustomerMaster_01_MD") with:
+       ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+       SELECT: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name, fact."dealer_code" AS customer_code
+       Filter: AND (cm.KUNNR IS NULL OR cm.KLABC IS NULL OR cm.KLABC <> 'X')
+     * SKU / Product: JOIN "SAP_S4"."ZIVR_SKUMaster_01_TR" sk ON fact."SKU" = sk.MATNR
+       SELECT: COALESCE(sk.MAKTX, sk.PROD_TITLE, fact."SKU") AS product_name, fact."SKU" AS sku_code
+     * Category: JOIN "SAP_S4"."ZIVF_CategoryMaster_01_TR" cat ON sk.CAT_CODE = cat.CAT_CODE
+       SELECT: cat.CAT_DESC AS category_name
+     * Territory: JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
+       SELECT: tm.NAME AS territory_name, tm.BZIRK AS territory_code
+     * Region: JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON tm.REGIO = rm."region_code"
+       SELECT: rm."region_name", rm."region_code"
+     * Zone: JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" zm ON tm.P_ZONE = zm.P_ZONE (or rm."zone_code" = zm.P_ZONE)
+       SELECT: zm.NAME AS zone_name
    - TARGET VS ACTUAL / PLAN ACHIEVEMENT RULES:
      Target view is at monthly planning grain (TERR_CODE, REG_CODE, YMONTH) and does NOT have dealer_code or daily dates.
      NEVER join Sales Fact directly to Target Fact with an INNER/LEFT JOIN — this causes Cartesian product and duplicates numbers!
@@ -1373,12 +1391,16 @@ SCHEMA & BUSINESS DEFINITIONS:
 
 4. CANONICAL EXAMPLES:
    - Top 2 Customers by Total Sales:
-     SELECT COALESCE(cm.NAME1, fact."dealer_code") AS customer_name, fact."dealer_code" AS customer_code, SUM(fact."invoice_value") AS total_sales
+     SELECT 
+       COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name, 
+       fact."dealer_code" AS customer_code, 
+       SUM(fact."invoice_value") AS total_sales
      FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
-     LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON fact."dealer_code" = cm.KUNNR
+     LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
+       ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
      WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
        AND (cm.KUNNR IS NULL OR cm.KLABC IS NULL OR cm.KLABC <> 'X')
-     GROUP BY COALESCE(cm.NAME1, fact."dealer_code"), fact."dealer_code"
+     GROUP BY COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code"
      ORDER BY total_sales DESC
      LIMIT 2
 
@@ -1394,7 +1416,8 @@ SCHEMA & BUSINESS DEFINITIONS:
    - Sales by Region & Zone:
      SELECT zm.NAME AS zone_name, rm."region_name", SUM(fact."invoice_value") AS total_sales
      FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
-     JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON fact."dealer_code" = cm.KUNNR
+     JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
+       ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
      JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
      JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON tm.REGIO = rm."region_code"
      JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" zm ON tm.P_ZONE = zm.P_ZONE
@@ -1414,7 +1437,8 @@ SCHEMA & BUSINESS DEFINITIONS:
          SUM(fact."Tyre_Quantity") AS actual_qty,
          SUM(fact."invoice_value") AS actual_sales
        FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
-       JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON fact."dealer_code" = cm.KUNNR
+       JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
+         ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
        JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
        JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON tm.REGIO = rm."region_code"
        JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" zm ON tm.P_ZONE = zm.P_ZONE
@@ -1925,7 +1949,7 @@ def _build_business_map(table_cols, workspace_id):
             "label":    "customer",
             "fact_key": "dealer_code",
             "dim_key":  "KUNNR",
-            "owns":     ["NAME1", "BZIRK", "REGIO", "KLABC", "DLR_CATG", "Customer", "Cname"],
+            "owns":     ["NAME1", "BNAME", "BZIRK", "REGIO", "KLABC", "DLR_CATG", "Customer", "Cname"],
         },
         {
             "label":    "territory",
@@ -1948,12 +1972,15 @@ def _build_business_map(table_cols, workspace_id):
     ]
     PRODUCT_HIERARCHY = ["CAT_DESC", "CONSTUCTION", "TYRE_TYPE", "BRAND", "MAKTX", "CATEGORY", "CONSTRUCTION", "vehicle type"]
     COLUMN_SYNONYMS = {
-        "product category": "CAT_DESC", "category": "CAT_DESC", "categories": "CAT_DESC",
+        "product category": "CAT_DESC", "category": "CAT_DESC", "categories": "CAT_DESC", "category name": "CAT_DESC",
         "construction": "CONSTUCTION", "tyre type": "CONSTUCTION", "tire type": "CONSTUCTION",
         "radial": "CONSTUCTION", "bias": "CONSTUCTION",
-        "brand": "BRAND", "product": "MAKTX", "material": "MATNR", "sku": "SKU",
-        "region": "region_name", "zone": "P_ZONE", "territory": "NAME",
-        "dealer": "NAME1", "customer": "NAME1", "dealer code": "dealer_code", "customer code": "KUNNR",
+        "brand": "BRAND", "product": "MAKTX", "product name": "MAKTX", "product description": "MAKTX",
+        "material": "MATNR", "material description": "MAKTX", "sku": "SKU",
+        "region": "region_name", "region name": "region_name", "zone": "P_ZONE", "zone name": "NAME",
+        "territory": "NAME", "territory name": "NAME",
+        "dealer": "NAME1", "customer": "NAME1", "dealer name": "NAME1", "customer name": "NAME1",
+        "dealer code": "dealer_code", "customer code": "KUNNR",
         "month": "YMONTH", "year": "CAL_YEAR", "quarter": "QTR",
         "sales": "invoice_value", "revenue": "invoice_value", "volume": "Tyre_Quantity",
     }
@@ -2141,12 +2168,12 @@ def _build_geography_prompt(table_cols):
         ) if s4_tgt else ""
         return (
             f"\n\nSAP S/4HANA GEOGRAPHY CHAIN (MANDATORY):\n"
-            f"- Customer Master: \"SAP_S4\".\"{s4_cust}\" cm (fact.dealer_code = cm.KUNNR, FILTER: (cm.KLABC IS NULL OR cm.KLABC <> 'X'))\n"
+            f"- Customer Master: \"SAP_S4\".\"{s4_cust}\" cm (JOIN: (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')), Customer Name: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact.\"dealer_code\"), FILTER: (cm.KLABC IS NULL OR cm.KLABC <> 'X'))\n"
             f"- Territory Master: JOIN \"SAP_S4\".\"{s4_terr}\" tm ON cm.BZIRK = tm.BZIRK (Territory Name: tm.NAME, Region code: tm.REGIO, Zone code: tm.P_ZONE)\n"
             f"{reg_join}"
             f"{zone_join}"
             f"{tgt_hint}"
-            f"Reference columns ONLY on their owning view: Territory name is tm.NAME, Region name is rm.\"region_name\", Zone name is zm.NAME."
+            f"Reference columns ONLY on their owning view: Customer name is cm.NAME1 (fallback cm.BNAME), Territory name is tm.NAME, Region name is rm.\"region_name\", Zone name is zm.NAME."
         )
 
     g = GEOGRAPHY_CHAIN
@@ -2470,7 +2497,19 @@ def session_rag_chat_controller(get_connection_func):
             sql_sys = DEFAULT_SQL_SYS
 
         sql_user = f"Schemas available:\n{schema_context}\n\nOriginal Question: {question}\n\nCanonical Query (Structured Intent):\n{canonical_query_str}"
-        sql_user += "\n\nCRITICAL FINAL RULE: NEVER SELECT or GROUP BY `customer_master.KUNNR` or any other dimension's Primary Key! You MUST SELECT and GROUP BY the Fact Table's Foreign Key (e.g. `sales_data.customer`) instead. Selecting dimension keys causes unmatched rows to lump together as NULLs."
+        if "SAP_S4" in schema_context or "ZPVF_" in schema_context:
+            sql_user += (
+                "\n\nCRITICAL MANDATE FOR NAMES & DESCRIPTIONS:\n"
+                "When the question asks for customers, products, categories, territories, regions, or zones, "
+                "you MUST join the corresponding Master table to the point and SELECT the human-readable NAME / DESCRIPTION:\n"
+                "- For Customer Name: ALWAYS join (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')) and SELECT COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact.\"dealer_code\") AS customer_name, fact.\"dealer_code\" AS customer_code.\n"
+                "- For Product/SKU: Join fact.\"SKU\" = sk.MATNR and SELECT COALESCE(sk.MAKTX, sk.PROD_TITLE, fact.\"SKU\") AS product_name, fact.\"SKU\" AS sku_code, sk.BRAND.\n"
+                "- For Category: Join sk.CAT_CODE = cat.CAT_CODE and SELECT cat.CAT_DESC AS category_name.\n"
+                "- For Territory/Region/Zone: SELECT tm.NAME AS territory_name, rm.\"region_name\", zm.NAME AS zone_name.\n"
+                "NEVER return bare numeric codes without the descriptive master name/title!"
+            )
+        else:
+            sql_user += "\n\nCRITICAL FINAL RULE: NEVER SELECT or GROUP BY `customer_master.KUNNR` or any other dimension's Primary Key! You MUST SELECT and GROUP BY the Fact Table's Foreign Key (e.g. `sales_data.customer`) instead. Selecting dimension keys causes unmatched rows to lump together as NULLs."
         schema_grounding, col_to_tables = _build_schema_grounding(schema_chunks)
         table_cols_map = _parse_schema_chunks(schema_chunks)
         if schema_grounding:
@@ -2714,9 +2753,28 @@ def session_rag_chat_controller(get_connection_func):
                                 # Ensure subquery alias has AS keyword for strict HANA parser: ") fact" -> ") AS fact"
                                 run_query = re.sub(r'\)\s+(fact|sub|cs|sh|t)\b', r') AS \1', run_query, flags=re.IGNORECASE)
 
-                                # Fix alias mismatches like C.INVOICE_NUMBER when alias is can or vice versa
-                                if 'can.' in run_query.lower() and 'c.' in run_query.lower():
-                                    run_query = re.sub(r'\bc\.', 'can.', run_query, flags=re.IGNORECASE)
+                                # Auto-heal Customer Master join on leading zeros if LTRIM was omitted by LLM
+                                if ("cm.kunnr" in run_query.lower() or "zivf_customermaster_01_md" in run_query.lower()) and "ltrim" not in run_query.lower():
+                                    run_query = re.sub(
+                                        r'(?:fact\.)?\"?dealer_code\"?\s*=\s*(?:cm\.)?\"?KUNNR\"?',
+                                        r'(fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", \'0\') = LTRIM(cm.KUNNR, \'0\'))',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+                                    run_query = re.sub(
+                                        r'(?:cm\.)?\"?KUNNR\"?\s*=\s*(?:fact\.)?\"?dealer_code\"?',
+                                        r'(fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", \'0\') = LTRIM(cm.KUNNR, \'0\'))',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+
+                                # Auto-heal single-column COALESCE(cm.NAME1, fact."dealer_code") to include BNAME fallback
+                                run_query = re.sub(
+                                    r'COALESCE\s*\(\s*(?:cm\.)?\"?NAME1\"?\s*,\s*(?:fact\.)?\"?dealer_code\"?\s*\)',
+                                    r'COALESCE(NULLIF(TRIM(cm.NAME1), \'\'), NULLIF(TRIM(cm.BNAME), \'\'), fact."dealer_code")',
+                                    run_query,
+                                    flags=re.IGNORECASE
+                                )
 
                                 print(f"[SQL_EXEC] Executing on SAP HANA:\n{run_query}")
 
@@ -2833,7 +2891,7 @@ def session_rag_chat_controller(get_connection_func):
                                     "Common fixes for SAP HANA:\n"
                                     "- For current period / MTD questions, query directly from \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\". For general / historical questions, query \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\".\n"
                                     "- Fact view columns are case-sensitive and must be double-quoted: fact.\"dealer_code\", fact.\"invoice_value\", fact.\"Tyre_Quantity\", fact.\"distribution_channel\".\n"
-                                    "- Customer master: ALWAYS use LEFT JOIN fact.\"dealer_code\" = cm.KUNNR and select COALESCE(cm.NAME1, fact.\"dealer_code\") AS customer_name.\n"
+                                    "- Customer master: ALWAYS use LEFT JOIN ON (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')) and select COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact.\"dealer_code\") AS customer_name.\n"
                                     "- Filter fact.\"distribution_channel\" = '10' ONLY IF explicitly requested by the user.\n"
                                     "- Do NOT join 'ZPVF_SD_CancelledSalesInvoice_01_TR'. Use: AND (fact.\"indicator_cancel\" IS NULL OR fact.\"indicator_cancel\" NOT IN ('X', 'Y', '1')).\n\n"
                                 )
