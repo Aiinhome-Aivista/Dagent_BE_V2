@@ -1487,6 +1487,31 @@ SCHEMA & BUSINESS DEFINITIONS:
      GROUP BY da.CAL_YEAR, da.YMONTH
      ORDER BY da.CAL_YEAR, da.YMONTH
 
+   - Top N Per Month / Category (e.g. Top 2 Dealers Month-wise):
+     NEVER use 'LIMIT 2 BY month' (ClickHouse syntax invalid in SAP HANA).
+     ALWAYS use standard SQL window function ROW_NUMBER() OVER (PARTITION BY ...):
+     WITH ranked_dealers AS (
+       SELECT 
+         da.YMONTH AS month,
+         COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS dealer_name,
+         fact."dealer_code" AS dealer_code,
+         SUM(fact."Tyre_Quantity") AS total_quantity,
+         SUM(fact."invoice_value") AS total_sales,
+         ROW_NUMBER() OVER (PARTITION BY da.YMONTH ORDER BY SUM(fact."Tyre_Quantity") DESC) AS rn
+       FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
+       JOIN "SAP_S4"."ZIVR_SKUMaster_01_TR" sk ON fact."SKU" = sk.MATNR
+       LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
+         ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+       JOIN "SAP_S4"."ZITR_DayAttribute_01_TR" da ON fact."invoice_date" = da."Date_"
+       WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
+         AND (cm.KUNNR IS NULL OR cm.KLABC IS NULL OR cm.KLABC <> 'X')
+       GROUP BY da.YMONTH, COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code"
+     )
+     SELECT month, dealer_name, dealer_code, total_quantity, total_sales
+     FROM ranked_dealers
+     WHERE rn <= 2
+     ORDER BY month DESC, rn ASC
+
 5. OUTPUT FORMAT:
    Return valid JSON only:
    {
@@ -1936,7 +1961,7 @@ def _build_business_map(table_cols, workspace_id):
     from database.prompt_loader import get_prompt
     
     # Defaults (Fallback if no config found)
-    FACT_TABLE_HINTS = ["invoice", "sales", "saleshistory", "currentsales", "zpvf_sd_saleshistory_01_tr", "zpvf_sd_currentsales_01_tr"]
+    FACT_TABLE_HINTS = ["currentsales", "zpvf_sd_currentsales_01_tr", "invoice", "sales", "saleshistory", "zpvf_sd_saleshistory_01_tr"]
     MEASURE_COLUMN   = "invoice_value"
     DIMENSIONS = [
         {
