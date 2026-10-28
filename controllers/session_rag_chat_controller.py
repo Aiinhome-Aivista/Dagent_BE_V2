@@ -451,7 +451,7 @@ SAP S/4HANA Sales & Distribution (SD) Architecture and Table Context:
    - ZPVF_SD_SalesHistory_01_TR: Historical Invoices Fact view (~30,044,097 rows, years 2006 to 2025). Use for historical period queries, multi-year trends, and prior period sales.
    - ZPVF_SD_CurrentSales_01_TR: Current Period MTD Invoices Fact view (~1,000,000 rows, year 2026). Use for current period / MTD sales questions, top customers, and general sales analysis.
    - ZPVF_SD_CancelledSalesInvoice_01_TR: Cancelled Invoices Reference view (~50,000 rows). Contains list of cancelled invoices.
-   - ZIVF_SD_Sales_Plan_Target_01_TR: Sales Plan & Target view (~200,000 rows). Target Value is PLAN_VALUE, Target Qty is ORG_PLAN.
+   - ZIVF_SD_Sales_Plan_Target_01_TR: Sales Plan & Target view (~200,000 rows). Target Value is PLAN_VALUE (or REV_PLAN_VAL), Target Qty is ORG_PLAN (or REV_PLAN).
    CRITICAL SAP HANA CASING FOR FACT COLUMNS (MUST USE DOUBLE QUOTES):
    "invoice_number", "invoice_date", "plant", "dealer_code", "ship_to_party", "SKU", "batch", "volume", "Tyre_Quantity", "ndp_value", "old_code", "invoice_value", "total_discount", "gst", "taxable_value", "FKART", "BILL_TYPE", "distribution_channel", "indicator_cancel".
 2. Master Views & Joins:
@@ -462,6 +462,13 @@ SAP S/4HANA Sales & Distribution (SD) Architecture and Table Context:
    - Region Master: ZIVF_RegionMaster_MD_01 (columns LOWERCASE). Join on tm.REGIO = rm."region_code" or cm.REGIO = rm."region_code". Region Name is rm."region_name", Zone code is rm."zone_code".
    - Zone Master: ZIVF_ZoneMaster_01_TR (columns UPPERCASE). Join on rm."zone_code" = zm.P_ZONE or tm.P_ZONE = zm.P_ZONE. Zone Name is zm.NAME (NORTH, WEST, EAST, SOUTH, etc.).
    - Date Master: ZITR_DayAttribute_01_TR. Join on fact."invoice_date" = da."Date_". Year-Month is da.YMONTH, Year is da.CAL_YEAR, Qtr is da.QTR.
+   - Sales Plan & Target Joins (ZIVF_SD_Sales_Plan_Target_01_TR):
+     * Territory: tgt.TERR_CODE = tm.BZIRK
+     * Region: tgt.REG_CODE = rm."region_code"
+     * Date/Period: tgt.YMONTH = da.YMONTH
+     * Product/SKU: tgt.MATNR = sk.MATNR
+     * Category: tgt.CAT_CODE = cat.CAT_CODE
+     * Target vs Actual Architecture: DO NOT directly join Sales Fact and Target Fact. Pre-aggregate Actual Sales and Target Plans in separate CTEs/subqueries by territory (tm.BZIRK) or region (rm."region_code") or month (da.YMONTH), then join the aggregated CTEs on the dimension key.
 3. Filtering & Exclusion Rules:
    - Distribution Channel: ALWAYS filter fact."distribution_channel" = '10' (string literal).
    - Cancelled Invoices Exclusion (CRITICAL FOR PERFORMANCE & MEMORY):
@@ -475,8 +482,9 @@ SAP S/4HANA Sales & Distribution (SD) Architecture and Table Context:
    - Volume / Quantity = SUM(fact."Tyre_Quantity") or SUM(fact."volume")
    - Net Sales = SUM(fact."invoice_value") - SUM(COALESCE(fact."total_discount", 0))
    - Average Realization = SUM(fact."invoice_value") / NULLIF(SUM(fact."Tyre_Quantity"), 0)
-   - Planned Target Value = SUM(PLAN_VALUE), Planned Qty = SUM(ORG_PLAN)
-   - Target Achievement % = (SUM(fact."invoice_value") / NULLIF(SUM(PLAN_VALUE), 0)) * 100
+   - Planned Target Value = SUM(tgt.PLAN_VALUE), Planned Qty = SUM(tgt.ORG_PLAN)
+   - Target Value Achievement % = (SUM(fact."invoice_value") / NULLIF(SUM(tgt.PLAN_VALUE), 0)) * 100
+   - Target Qty Achievement % = (SUM(fact."Tyre_Quantity") / NULLIF(SUM(tgt.ORG_PLAN), 0)) * 100
 """
         chunks.append(_chunk(biz_rules, db="SAP_S4", table="BUSINESS_RULES", kind="schema"))
 
@@ -1312,7 +1320,7 @@ SCHEMA & BUSINESS DEFINITIONS:
      * "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" (Current Period / Rolling MTD Sales Fact View - FAST, use for current sales, top customers, recent data)
      * "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" (Historical Sales Fact View - use for multi-year trends or historical prior periods)
      * "SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR" (Cancelled Sales Invoices Reference View)
-     * "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR" (Sales Plan & Target View: Target Revenue = PLAN_VALUE, Target Qty = ORG_PLAN)
+     * "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR" (Sales Plan & Target View: Target Revenue = PLAN_VALUE or REV_PLAN_VAL, Target Qty = ORG_PLAN or REV_PLAN)
    
    - Master Views & Primary Join Keys:
      * Customer Master: "SAP_S4"."ZIVF_CustomerMaster_01_MD" (JOIN: fact."dealer_code" = cm.KUNNR)
@@ -1330,6 +1338,9 @@ SCHEMA & BUSINESS DEFINITIONS:
        Zone Name: zm.NAME (North Zone, South Zone, East Zone, West Zone, Central Zone)
      * Date Attribute: "SAP_S4"."ZITR_DayAttribute_01_TR" (JOIN: fact."invoice_date" = da."Date_")
        Month: da.YMONTH, Year: da.CAL_YEAR, Qtr: da.QTR, Fin Year: da.FIN_YEAR
+     * Sales Plan & Target: "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR"
+       JOIN Keys: tgt.TERR_CODE = tm.BZIRK (Territory), tgt.REG_CODE = rm."region_code" (Region), tgt.YMONTH = da.YMONTH (Month/Period), tgt.MATNR = sk.MATNR (SKU), tgt.CAT_CODE = cat.CAT_CODE (Category)
+       Target Revenue: tgt.PLAN_VALUE (or tgt.REV_PLAN_VAL), Target Qty: tgt.ORG_PLAN (or tgt.REV_PLAN)
 
 2. CRITICAL SAP HANA CASE-SENSITIVITY & QUOTING RULES:
    - In SAP HANA, unquoted column names automatically become UPPERCASE!
@@ -1350,6 +1361,13 @@ SCHEMA & BUSINESS DEFINITIONS:
    - Cancellation check: AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1')).
      DO NOT join ZPVF_SD_CancelledSalesInvoice_01_TR.
    - Customer filter: AND (cm.KLABC IS NULL OR cm.KLABC <> 'X') on ZIVF_CustomerMaster_01_MD.
+   - TARGET VS ACTUAL / PLAN ACHIEVEMENT RULES:
+     Target view is at monthly planning grain (TERR_CODE, REG_CODE, YMONTH) and does NOT have dealer_code or daily dates.
+     NEVER join Sales Fact directly to Target Fact with an INNER/LEFT JOIN — this causes Cartesian product and duplicates numbers!
+     ALWAYS use Common Table Expressions (CTEs):
+     * CTE 1: actual_sales — Aggregate SUM(fact."invoice_value") AS actual_sales, SUM(fact."Tyre_Quantity") AS actual_qty from ZPVF_SD_CurrentSales_01_TR grouped by territory / region / zone / month.
+     * CTE 2: target_plans — Aggregate SUM(tgt.PLAN_VALUE) AS target_sales, SUM(tgt.ORG_PLAN) AS target_qty from ZIVF_SD_Sales_Plan_Target_01_TR grouped by tgt.TERR_CODE / tgt.REG_CODE / tgt.YMONTH.
+     * Outer Query: Join CTEs on territory/region/month, calculate % Value ((actual_sales / target_sales) * 100) and % Qty ((actual_qty / target_qty) * 100).
 
 4. CANONICAL EXAMPLES:
    - Top 2 Customers by Total Sales:
@@ -1384,6 +1402,48 @@ SCHEMA & BUSINESS DEFINITIONS:
        AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
      GROUP BY zm.NAME, rm."region_name"
      ORDER BY total_sales DESC
+
+   - Target vs Actual Sales & Achievement % by Territory, Region & Zone:
+     WITH actual_sales AS (
+       SELECT 
+         tm.BZIRK AS terr_code,
+         tm.NAME AS territory_name,
+         rm."region_name",
+         zm.NAME AS zone_name,
+         SUM(fact."Tyre_Quantity") AS actual_qty,
+         SUM(fact."invoice_value") AS actual_sales
+       FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
+       JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON fact."dealer_code" = cm.KUNNR
+       JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
+       JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON tm.REGIO = rm."region_code"
+       JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" zm ON tm.P_ZONE = zm.P_ZONE
+       WHERE fact."distribution_channel" = '10'
+         AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
+         AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+       GROUP BY tm.BZIRK, tm.NAME, rm."region_name", zm.NAME
+     ),
+     target_plans AS (
+       SELECT 
+         tgt.TERR_CODE AS terr_code,
+         SUM(tgt.ORG_PLAN) AS target_qty,
+         SUM(tgt.PLAN_VALUE) AS target_sales
+       FROM "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt
+       GROUP BY tgt.TERR_CODE
+     )
+     SELECT 
+       COALESCE(a.zone_name, 'Unknown') AS zone_name,
+       COALESCE(a."region_name", 'Unknown') AS region_name,
+       COALESCE(a.territory_name, 'Unknown') AS territory_name,
+       COALESCE(a.actual_qty, 0) AS actual_qty,
+       COALESCE(t.target_qty, 0) AS target_qty,
+       COALESCE(a.actual_sales, 0) AS actual_sales,
+       COALESCE(t.target_sales, 0) AS target_sales,
+       ROUND((COALESCE(a.actual_sales, 0) / NULLIF(t.target_sales, 0)) * 100, 2) AS value_achv_pct,
+       ROUND((COALESCE(a.actual_qty, 0) / NULLIF(t.target_qty, 0)) * 100, 2) AS qty_achv_pct
+     FROM actual_sales a
+     LEFT JOIN target_plans t ON a.terr_code = t.terr_code
+     ORDER BY actual_sales DESC
+     LIMIT 10
 
    - Multi-year Historical Trend (ONLY when explicitly requested):
      SELECT da.CAL_YEAR, da.YMONTH, SUM(fact."invoice_value") AS total_sales
@@ -2068,18 +2128,24 @@ def _build_geography_prompt(table_cols):
     s4_terr = next((t for t in table_cols if "territorymaster" in t.lower()), None)
     s4_reg  = next((t for t in table_cols if "regionmaster" in t.lower()), None)
     s4_zone = next((t for t in table_cols if "zonemaster" in t.lower()), None)
+    s4_tgt  = next((t for t in table_cols if "plan_target" in t.lower() or "sales_plan" in t.lower()), None)
 
     if s4_cust and s4_terr:
-        reg_join = f"- Region Master: JOIN \"SAP_S4\".\"{s4_reg}\" rm ON tm.REGIO = rm.region_code (Region Name: rm.region_name, Zone code: rm.zone_code)\n" if s4_reg else ""
-        zone_on = "rm.zone_code = zm.P_ZONE" if s4_reg else "tm.P_ZONE = zm.P_ZONE"
+        reg_join = f"- Region Master: JOIN \"SAP_S4\".\"{s4_reg}\" rm ON tm.REGIO = rm.\"region_code\" (Region Name: rm.\"region_name\", Zone code: rm.\"zone_code\")\n" if s4_reg else ""
+        zone_on = "rm.\"zone_code\" = zm.P_ZONE" if s4_reg else "tm.P_ZONE = zm.P_ZONE"
         zone_join = f"- Zone Master: JOIN \"SAP_S4\".\"{s4_zone}\" zm ON {zone_on} (Zone Name: zm.NAME)\n" if s4_zone else ""
+        tgt_hint = (
+            f"- Sales Plan & Target: \"SAP_S4\".\"{s4_tgt}\" tgt (Join keys: tgt.TERR_CODE = tm.BZIRK, tgt.REG_CODE = rm.\"region_code\")\n"
+            f"  CRITICAL FOR TARGET VS ACTUAL: Use separate CTEs for actual sales and target plan, never direct JOIN.\n"
+        ) if s4_tgt else ""
         return (
             f"\n\nSAP S/4HANA GEOGRAPHY CHAIN (MANDATORY):\n"
             f"- Customer Master: \"SAP_S4\".\"{s4_cust}\" cm (fact.dealer_code = cm.KUNNR, FILTER: (cm.KLABC IS NULL OR cm.KLABC <> 'X'))\n"
             f"- Territory Master: JOIN \"SAP_S4\".\"{s4_terr}\" tm ON cm.BZIRK = tm.BZIRK (Territory Name: tm.NAME, Region code: tm.REGIO, Zone code: tm.P_ZONE)\n"
             f"{reg_join}"
             f"{zone_join}"
-            f"Reference columns ONLY on their owning view: Territory name is tm.NAME, Region name is rm.region_name, Zone name is zm.NAME."
+            f"{tgt_hint}"
+            f"Reference columns ONLY on their owning view: Territory name is tm.NAME, Region name is rm.\"region_name\", Zone name is zm.NAME."
         )
 
     g = GEOGRAPHY_CHAIN
