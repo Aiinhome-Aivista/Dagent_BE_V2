@@ -1404,6 +1404,20 @@ SCHEMA & BUSINESS DEFINITIONS:
      ORDER BY total_sales DESC
      LIMIT 2
 
+   - Worst 2 Customers / Lowest Performers:
+     SELECT 
+       COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name, 
+       fact."dealer_code" AS customer_code, 
+       SUM(fact."invoice_value") AS total_sales
+     FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
+     LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
+       ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+     WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
+       AND (cm.KUNNR IS NULL OR cm.KLABC IS NULL OR cm.KLABC <> 'X')
+     GROUP BY COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code"
+     ORDER BY total_sales ASC
+     LIMIT 2
+
    - Sales by Brand & Tyre Category:
      SELECT sk.BRAND, sk.TYRE_TYPE, SUM(fact."invoice_value") AS total_sales, SUM(fact."Tyre_Quantity") AS total_qty
      FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
