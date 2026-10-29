@@ -166,11 +166,11 @@ def sanitize_and_execute_hana(cursor, schema, sql, params=None):
 
         # Match alias.COL or alias."COL" (e.g. s.INVOICE_NUMBER or rm.REGION_CODE)
 
-        clean_sql = re.sub(rf'\b([a-zA-Z0-9_]+)\."?{u_col}"?\b', rf'\1.{exact_col}', clean_sql, flags=re.IGNORECASE)
+        clean_sql = re.sub(rf'\b([a-zA-Z0-9_]+)\.(?:"{u_col}"|{u_col}\b)', rf'\1.{exact_col}', clean_sql, flags=re.IGNORECASE)
 
         # Match standalone COL when preceded by whitespace/comma/parenthesis
 
-        clean_sql = re.sub(rf'(?<![a-zA-Z0-9_".])\b{u_col}\b(?![a-zA-Z0-9_"])', exact_col, clean_sql, flags=re.IGNORECASE)
+        clean_sql = re.sub(rf'(?<![a-zA-Z0-9_".])(?:"{u_col}"|{u_col}\b)', exact_col, clean_sql, flags=re.IGNORECASE)
 
 
 
