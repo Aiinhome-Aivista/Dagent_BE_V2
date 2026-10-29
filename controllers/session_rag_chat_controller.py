@@ -1401,6 +1401,14 @@ SCHEMA & BUSINESS DEFINITIONS:
      * CTE 2: target_plans — Aggregate SUM(tgt.PLAN_VALUE) AS target_sales, SUM(tgt.ORG_PLAN) AS target_qty from ZIVF_SD_Sales_Plan_Target_01_TR grouped by tgt.TERR_CODE / tgt.REG_CODE / tgt.YMONTH.
      * Outer Query: Join CTEs on territory/region/month, calculate % Value ((actual_sales / target_sales) * 100) and % Qty ((actual_qty / target_qty) * 100).
 
+   - YMONTH & DATE FILTERING HYGIENE:
+     * In "SAP_S4"."ZITR_DayAttribute_01_TR", da.YMONTH is a 6-digit string formatted as 'YYYYMM' (e.g. '202609', '202410').
+     * NEVER compare da.YMONTH = EXTRACT(MONTH FROM ...) because EXTRACT(MONTH) returns a single digit (1-12) while YMONTH is 6 digits!
+     * For "current month", "last month", or "recent period", NEVER use CURRENT_DATE because historical datasets may end earlier. Instead, find the latest month dynamically:
+       WHERE da.YMONTH = (SELECT MAX(sub_da.YMONTH) FROM "SAP_S4"."ZITR_DayAttribute_01_TR" sub_da WHERE sub_da."Date_" <= (SELECT MAX(sub_f."invoice_date") FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" sub_f))
+       or in CTE: WHERE dms.month = (SELECT MAX(m.month) FROM dealer_monthly_sales m)
+   - RESULT SET BOUNDING & ACTIONABLE LIMITS:
+     * When generating granular reports across multiple dimensions (e.g. region + territory + category + month) without narrow user filters, ALWAYS append an appropriate ORDER BY ... DESC LIMIT 100 (or LIMIT 50) to keep results actionable, fast, and UI-friendly.
 4. CANONICAL EXAMPLES:
    - Top N Customers in a Region / Territory / Zone (e.g. Jaipur):
      SELECT 
@@ -3103,8 +3111,35 @@ def session_rag_chat_controller(get_connection_func):
                     except: pass
 
             if sql_results:
-                # Override context with SQL results for final LLM generation
-                context = f"SQL Query executed: {sql_query}\n\nSQL Results:\n" + json.dumps(sql_results, indent=2, default=str)
+                total_rows = len(sql_results)
+                if total_rows > 25:
+                    # Calculate metric totals across all returned rows for the LLM
+                    numeric_sums = {}
+                    sample_row = sql_results[0]
+                    for col, val in sample_row.items():
+                        if isinstance(val, (int, float)) and not any(id_w in col.lower() for id_w in ("year", "month", "id", "code", "pct", "percent")):
+                            try:
+                                col_sum = sum(float(r.get(col) or 0) for r in sql_results if r.get(col) is not None)
+                                numeric_sums[col] = f"{col_sum:,.2f}"
+                            except Exception:
+                                pass
+
+                    summary_header = f"Total Records Returned: {total_rows:,}\n"
+                    if numeric_sums:
+                        summary_header += "Overall Metric Totals Across All Records:\n" + "\n".join([f"  - Total {k}: {v}" for k, v in numeric_sums.items()]) + "\n"
+
+                    sample_rows = sql_results[:20]
+                    context = (
+                        f"SQL Query executed: {sql_query}\n\n"
+                        f"{summary_header}\n"
+                        f"Sample Records (Showing top 20 of {total_rows:,} records):\n"
+                        f"{json.dumps(sample_rows, indent=2, default=str)}\n\n"
+                        f"IMPORTANT: The database query successfully returned {total_rows:,} records. "
+                        f"Provide a clear, high-level executive summary of the overall totals and key highlights "
+                        f"from the top records shown above. DO NOT try to list all {total_rows:,} records in text."
+                    )
+                else:
+                    context = f"SQL Query executed: {sql_query}\n\nSQL Results ({len(sql_results)} records):\n" + json.dumps(sql_results, indent=2, default=str)
 
         # Fallback if no SQL rows were produced
         if intent == "AGGREGATION" and not sql_results:
@@ -3247,15 +3282,27 @@ def session_rag_chat_controller(get_connection_func):
             keys_lower = [k.lower() for k in keys]
             has_time = any(t in k for k in keys_lower for t in ['month', 'date', 'year'])
             
+            total_rows = len(sql_results)
+            MAX_TABLE_ROWS = 100
+            table_data = sql_results[:MAX_TABLE_ROWS]
+            table_title = "Data Table"
+            if total_rows > MAX_TABLE_ROWS:
+                table_title = f"Data Table (Showing top {MAX_TABLE_ROWS} of {total_rows:,} records)"
+
             columns = [{"key": k, "label": str(k).replace("_", " ").title()} for k in keys]
             table_vis = {
                 "type": "table",
-                "title": "Data Table",
+                "title": table_title,
                 "columns": columns,
-                "data": sql_results
+                "data": table_data,
+                "total_records": total_rows,
+                "displayed_records": len(table_data)
             }
             
             # Align and sanitize chart xKey, yKey, and data against actual SQL keys
+            # Charts display top 25 data points to guarantee clean readability and instant DOM rendering
+            MAX_CHART_POINTS = 25
+            chart_data = sql_results[:MAX_CHART_POINTS]
             for v in visualizations:
                 if v.get("type") in ("bar_chart", "line_chart"):
                     x_key = v.get("xKey")
@@ -3266,8 +3313,7 @@ def session_rag_chat_controller(get_connection_func):
                     if y_key not in keys:
                         cand_y = next((k for k in keys if any(m in k.lower() for m in ("sales", "value", "qty", "quantity", "total", "count", "achv", "pct"))), keys[-1] if keys else "")
                         v["yKey"] = cand_y
-                    # Always ensure data is backed by verified SQL results
-                    v["data"] = sql_results
+                    v["data"] = chart_data
 
             if not has_time:
                 # Keep only bar_charts; drop hallucinated line/pie charts
