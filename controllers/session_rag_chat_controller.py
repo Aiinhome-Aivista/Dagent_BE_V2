@@ -2913,22 +2913,8 @@ def session_rag_chat_controller(get_connection_func):
 
                                 print(f"[SQL_EXEC] Executing on SAP HANA:\n{run_query}")
 
-                            # -- LARGE RESULT GUARD ------------------------------------------
-                            # For HANA, cap fetched rows to avoid memory / timeout failures
-                            # on "show all"-type queries. The LLM only ever sees the top-20
-                            # sample; total row-count is reported separately, so capping
-                            # the fetch to MAX_FETCH_ROWS is safe.
-                            MAX_FETCH_ROWS = 5000
                             cur_sql.execute(run_query)
-                            if is_hana:
-                                rows = cur_sql.fetchmany(MAX_FETCH_ROWS)
-                                # Peek one more row to know whether the full result is larger
-                                _extra = cur_sql.fetchmany(1)
-                                _hana_has_more = len(_extra) > 0
-                                print(f"[SQL_EXEC] fetchmany({MAX_FETCH_ROWS}) returned {len(rows)} rows (has_more={_hana_has_more})")
-                            else:
-                                rows = cur_sql.fetchall()
-                                _hana_has_more = False
+                            rows = cur_sql.fetchall()
                             if is_hana:
                                 cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
                                 sql_results = [dict(zip(cols, r)) for r in rows]
@@ -3125,10 +3111,7 @@ def session_rag_chat_controller(get_connection_func):
                     except: pass
 
             if sql_results:
-                # _hana_has_more is set when fetchmany capped the result set
-                _has_more = locals().get("_hana_has_more", False)
                 total_rows = len(sql_results)
-                display_count = f"{total_rows:,}+" if _has_more else f"{total_rows:,}"
                 if total_rows > 25:
                     # Calculate metric totals across all returned rows for the LLM
                     numeric_sums = {}
@@ -3141,7 +3124,7 @@ def session_rag_chat_controller(get_connection_func):
                             except Exception:
                                 pass
 
-                    summary_header = f"Total Records Returned: {display_count}\n"
+                    summary_header = f"Total Records Returned: {total_rows:,}\n"
                     if numeric_sums:
                         summary_header += "Overall Metric Totals Across All Records:\n" + "\n".join([f"  - Total {k}: {v}" for k, v in numeric_sums.items()]) + "\n"
 
@@ -3149,14 +3132,14 @@ def session_rag_chat_controller(get_connection_func):
                     context = (
                         f"SQL Query executed: {sql_query}\n\n"
                         f"{summary_header}\n"
-                        f"Sample Records (Showing top 20 of {display_count} records):\n"
+                        f"Sample Records (Showing top 20 of {total_rows:,} records):\n"
                         f"{json.dumps(sample_rows, indent=2, default=str)}\n\n"
-                        f"IMPORTANT: The database query successfully returned {display_count} records. "
+                        f"IMPORTANT: The database query successfully returned {total_rows:,} records. "
                         f"Provide a clear, high-level executive summary of the overall totals and key highlights "
-                        f"from the top records shown above. DO NOT try to list all {display_count} records in text."
+                        f"from the top records shown above. DO NOT try to list all {total_rows:,} records in text."
                     )
                 else:
-                    context = f"SQL Query executed: {sql_query}\n\nSQL Results ({display_count} records):\n" + json.dumps(sql_results, indent=2, default=str)
+                    context = f"SQL Query executed: {sql_query}\n\nSQL Results ({len(sql_results)} records):\n" + json.dumps(sql_results, indent=2, default=str)
 
         # Fallback if no SQL rows were produced
         if intent == "AGGREGATION" and not sql_results:
