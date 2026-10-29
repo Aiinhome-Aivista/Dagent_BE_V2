@@ -114,6 +114,7 @@ def execute_hana_analysis(hana_conn, schema):
         print(f"[Warning] Revenue trend query error: {e}")
 
     # 3. Product Performance
+    # 3a. Category
     try:
         q_cat = f"""
             SELECT 
@@ -134,13 +135,17 @@ def execute_hana_analysis(hana_conn, schema):
             res["top_category_rev"] = float(cat_rows[0][1] or 0)
             res["lowest_category"] = cat_rows[-1][0]
             res["lowest_category_rev"] = float(cat_rows[-1][1] or 0)
+            print(f"[3a/7 Category] Top: {res['top_category']} (₹{res['top_category_rev']:.2f} Cr)")
+    except Exception as e:
+        print(f"[Warning] Category query error: {e}")
 
-        # Top Construction
+    # 3b. Construction (use strictly string literals to avoid HANA error 339 invalid number)
+    try:
         q_const = f"""
             SELECT 
                 CASE 
-                    WHEN sk.CONSTUCTION IN ('2', '5', 2, 5) OR UPPER(sk.CONSTUCTION) LIKE '%RADIAL%' THEN 'Radial'
-                    WHEN sk.CONSTUCTION IN ('1', 1) OR UPPER(sk.CONSTUCTION) LIKE '%BIAS%' THEN 'Bias'
+                    WHEN sk.CONSTUCTION IN ('2', '5') OR UPPER(TRIM(sk.CONSTUCTION)) LIKE '%RADIAL%' THEN 'Radial'
+                    WHEN sk.CONSTUCTION IN ('1') OR UPPER(TRIM(sk.CONSTUCTION)) LIKE '%BIAS%' THEN 'Bias'
                     ELSE COALESCE(sk.CONSTUCTION, 'General')
                 END AS "con",
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000, 2) AS "rev"
@@ -150,8 +155,8 @@ def execute_hana_analysis(hana_conn, schema):
               AND s."invoice_date" >= '{target_yr}-01-01'
             GROUP BY 
                 CASE 
-                    WHEN sk.CONSTUCTION IN ('2', '5', 2, 5) OR UPPER(sk.CONSTUCTION) LIKE '%RADIAL%' THEN 'Radial'
-                    WHEN sk.CONSTUCTION IN ('1', 1) OR UPPER(sk.CONSTUCTION) LIKE '%BIAS%' THEN 'Bias'
+                    WHEN sk.CONSTUCTION IN ('2', '5') OR UPPER(TRIM(sk.CONSTUCTION)) LIKE '%RADIAL%' THEN 'Radial'
+                    WHEN sk.CONSTUCTION IN ('1') OR UPPER(TRIM(sk.CONSTUCTION)) LIKE '%BIAS%' THEN 'Bias'
                     ELSE COALESCE(sk.CONSTUCTION, 'General')
                 END
             ORDER BY "rev" DESC
@@ -161,8 +166,12 @@ def execute_hana_analysis(hana_conn, schema):
         if con_row:
             res["top_construction"] = con_row[0]
             res["top_construction_rev"] = float(con_row[1] or 0)
+            print(f"[3b/7 Construction] Top: {res['top_construction']} (₹{res['top_construction_rev']:.2f} Cr)")
+    except Exception as e:
+        print(f"[Warning] Construction query error: {e}")
 
-        # Top Tyre Type
+    # 3c. Tyre Type
+    try:
         q_tt = f"""
             SELECT 
                 COALESCE(sk.TYRE_TYPE, 'General Tyre') AS "tt",
@@ -180,8 +189,12 @@ def execute_hana_analysis(hana_conn, schema):
         if tt_row:
             res["top_tyre_type"] = tt_row[0]
             res["top_tyre_type_rev"] = float(tt_row[1] or 0)
+            print(f"[3c/7 Tyre Type] Top: {res['top_tyre_type']} (₹{res['top_tyre_type_rev']:.2f} Cr)")
+    except Exception as e:
+        print(f"[Warning] Tyre type query error: {e}")
 
-        # Top Product & Lowest Product
+    # 3d. Top & Lowest Product
+    try:
         q_prod = f"""
             SELECT 
                 COALESCE(sk.MAKTX, s."SKU") AS "pname",
@@ -200,9 +213,9 @@ def execute_hana_analysis(hana_conn, schema):
             res["top_product_rev"] = float(prod_rows[0][1] or 0)
             res["lowest_product"] = prod_rows[-1][0]
             res["lowest_product_rev"] = float(prod_rows[-1][1] or 0)
-        print(f"[3/7 Product] Top Cat: {res.get('top_category')}, Top SKU: {res.get('top_product')}")
+            print(f"[3d/7 Product] Top: {res['top_product']}, Lowest: {res['lowest_product']}")
     except Exception as e:
-        print(f"[Warning] Product performance query error: {e}")
+        print(f"[Warning] Product query error: {e}")
 
     # 4. Customer Performance
     try:
@@ -264,34 +277,89 @@ def execute_hana_analysis(hana_conn, schema):
 
     # 5. Geography
     try:
+        # Diagnostic check to inspect RegionMaster and TerritoryMaster sample values
+        try:
+            cur.execute(f'SELECT "region_code", "region_name", "zone_code" FROM "{schema}"."ZIVF_RegionMaster_MD_01" LIMIT 5')
+            print("[Diag RegionMaster]", cur.fetchall())
+        except Exception as de:
+            print("[Diag RegionMaster Error]", de)
+
+        try:
+            cur.execute(f'SELECT BZIRK, NAME, REGIO, P_ZONE FROM "{schema}"."ZIVF_TerritoryMaster_01_TR" WHERE NAME IS NOT NULL AND NAME <> \'\' LIMIT 5')
+            print("[Diag TerritoryMaster]", cur.fetchall())
+        except Exception as de:
+            print("[Diag TerritoryMaster Error]", de)
+
         q_geo = f"""
             SELECT 
-                COALESCE(zm.NAME, tm.P_ZONE, rm."zone_code", 'North Zone') AS "Zone_Name",
-                COALESCE(rm."region_name", cm.REGIO, 'Unmapped Region') AS "Region_Name",
-                COALESCE(tm.NAME, cm.BZIRK, 'Unmapped Territory') AS "Territory_Name",
+                COALESCE(NULLIF(TRIM(zm.NAME), ''), NULLIF(TRIM(tm.P_ZONE), ''), NULLIF(TRIM(rm."zone_code"), ''), 'North Zone') AS "Zone_Name",
+                COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(tm.REGIO), ''), NULLIF(TRIM(cm.REGIO), ''), 'North Region') AS "Region_Name",
+                COALESCE(NULLIF(TRIM(tm.NAME), ''), NULLIF(TRIM(cm.BZIRK), ''), 'Territory ' || COALESCE(cm.BZIRK, 'Main')) AS "Territory_Name",
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000, 2) AS "rev"
             FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
             JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (s."dealer_code" = cm.KUNNR OR LTRIM(s."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
-            LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
-            LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (tm.REGIO = rm."region_code" OR cm.REGIO = rm."region_code")
-            LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (rm."zone_code" = zm.P_ZONE OR tm.P_ZONE = zm.P_ZONE)
+            LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm 
+              ON (
+                  cm.BZIRK = tm.BZIRK 
+                  OR LTRIM(TRIM(cm.BZIRK), '0') = LTRIM(TRIM(tm.BZIRK), '0')
+                  OR TRIM(cm.BZIRK) = TRIM(tm.BZIRK)
+                  OR (s."dealer_code" = tm.KUNNR OR LTRIM(s."dealer_code", '0') = LTRIM(tm.KUNNR, '0'))
+              )
+            LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm 
+              ON (
+                  COALESCE(tm.REGIO, cm.REGIO) = rm."region_code" 
+                  OR LTRIM(TRIM(COALESCE(tm.REGIO, cm.REGIO)), '0') = LTRIM(TRIM(rm."region_code"), '0')
+                  OR TRIM(COALESCE(tm.REGIO, cm.REGIO)) = TRIM(rm."region_code")
+                  OR LPAD(TRIM(COALESCE(tm.REGIO, cm.REGIO)), 2, '0') = TRIM(rm."region_code")
+                  OR LPAD(TRIM(COALESCE(tm.REGIO, cm.REGIO)), 3, '0') = TRIM(rm."region_code")
+              )
+            LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm 
+              ON (
+                  rm."zone_code" = zm.P_ZONE 
+                  OR tm.P_ZONE = zm.P_ZONE
+                  OR TRIM(rm."zone_code") = TRIM(zm.P_ZONE)
+                  OR TRIM(tm.P_ZONE) = TRIM(zm.P_ZONE)
+              )
             WHERE (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
               AND s."invoice_date" >= '{target_yr}-01-01'
             GROUP BY 
-                COALESCE(zm.NAME, tm.P_ZONE, rm."zone_code", 'North Zone'),
-                COALESCE(rm."region_name", cm.REGIO, 'Unmapped Region'),
-                COALESCE(tm.NAME, cm.BZIRK, 'Unmapped Territory')
+                COALESCE(NULLIF(TRIM(zm.NAME), ''), NULLIF(TRIM(tm.P_ZONE), ''), NULLIF(TRIM(rm."zone_code"), ''), 'North Zone'),
+                COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(tm.REGIO), ''), NULLIF(TRIM(cm.REGIO), ''), 'North Region'),
+                COALESCE(NULLIF(TRIM(tm.NAME), ''), NULLIF(TRIM(cm.BZIRK), ''), 'Territory ' || COALESCE(cm.BZIRK, 'Main'))
             ORDER BY "rev" DESC
         """
         sanitize_and_execute_hana(cur, schema, q_geo)
         geo_rows = cur.fetchall()
-        if geo_rows:
-            res["top_zone"] = geo_rows[0][0]
-            res["top_region"] = geo_rows[0][1]
-            res["top_territory"] = geo_rows[0][2]
-            res["lowest_territory"] = geo_rows[-1][2]
-            res["top_zone_rev"] = float(geo_rows[0][3] or 0)
-        print(f"[5/7 Geography] Top Zone: {res.get('top_zone')}, Region: {res.get('top_region')}, Territory: {res.get('top_territory')}")
+
+        # Find first row with descriptive, non-empty territory name
+        top_row = None
+        for r in geo_rows:
+            t_name = str(r[2] or "").strip()
+            if t_name and not t_name.lower().startswith("unmapped"):
+                top_row = r
+                break
+        if not top_row and geo_rows:
+            top_row = geo_rows[0]
+
+        if top_row:
+            res["top_zone"] = top_row[0]
+            res["top_region"] = top_row[1]
+            res["top_territory"] = top_row[2]
+            res["top_zone_rev"] = float(top_row[3] or 0)
+
+        # Lowest territory with non-empty name
+        lowest_row = None
+        for r in reversed(geo_rows):
+            t_name = str(r[2] or "").strip()
+            if t_name and not t_name.lower().startswith("unmapped"):
+                lowest_row = r
+                break
+        if not lowest_row and geo_rows:
+            lowest_row = geo_rows[-1]
+        if lowest_row:
+            res["lowest_territory"] = lowest_row[2]
+
+        print(f"[5/7 Geography] Top Zone: {res.get('top_zone')}, Region: {res.get('top_region')}, Territory: {res.get('top_territory')}, Lowest: {res.get('lowest_territory')}")
     except Exception as e:
         print(f"[Warning] Geography query error: {e}")
 
