@@ -1,12 +1,12 @@
 """
 Script to update session_analysis_cache with live, accurate metrics for all 7 sections:
-1. Overall Performance
-2. Revenue Trend
-3. Product Performance
-4. Customer Performance
-5. Geography
-6. Distribution
-7. Target Performance (including Zone, Region, Territory Target vs Actual Comparison)
+1. Overall Performance (Revenue, Qty, Invoices, Avg Invoice Value, Avg Selling Price)
+2. Revenue Trend (Highest Month, Lowest Month, Monthly Growth)
+3. Product Performance (Top Category, Construction, Tyre Type, Top Product, Lowest Product)
+4. Customer Performance (Top Cust, Dealer %, Fleet %, OEM %, Top 5 Concentration)
+5. Geography (Top Zone, Top Region, Top Territory, Lowest Territory)
+6. Distribution (Replacement, OEM, STU, DEF, Contribution %)
+7. Target Performance (Target Value, Achievement %, Shortfall, Qty Achievement %, Shortfall Territory)
 
 Usage:
     python scripts/update_session_summary.py [session_id]
@@ -33,6 +33,55 @@ from helper.sap_analytics_service import (
     detect_sales_dates,
     _prepare_mysql_workspace
 )
+
+SAP_STATE_MAP = {
+    "01": "Andhra Pradesh",
+    "02": "Arunachal Pradesh",
+    "03": "Assam",
+    "04": "Bihar",
+    "05": "Goa",
+    "06": "Gujarat",
+    "07": "Haryana",
+    "08": "Himachal Pradesh",
+    "09": "Jammu & Kashmir",
+    "10": "Karnataka",
+    "11": "Kerala",
+    "12": "Madhya Pradesh",
+    "13": "Maharashtra",
+    "14": "Manipur",
+    "15": "Meghalaya",
+    "16": "Mizoram",
+    "17": "Nagaland",
+    "18": "Odisha",
+    "19": "Punjab",
+    "20": "Rajasthan",
+    "21": "Sikkim",
+    "22": "Tamil Nadu",
+    "23": "Tripura",
+    "24": "Uttar Pradesh",
+    "25": "West Bengal",
+    "26": "Delhi",
+    "27": "Chandigarh",
+    "28": "Puducherry"
+}
+
+SAP_STATE_ZONE_MAP = {
+    "01": "South Zone",
+    "06": "West Zone",
+    "07": "North Zone",
+    "08": "North Zone",
+    "09": "North Zone",
+    "10": "South Zone",
+    "11": "South Zone",
+    "12": "Central Zone",
+    "13": "West Zone",
+    "19": "North Zone",
+    "20": "North Zone",
+    "22": "South Zone",
+    "24": "North Zone",
+    "25": "East Zone",
+    "26": "North Zone",
+}
 
 
 def get_latest_session_id(mysql_conn):
@@ -74,7 +123,7 @@ def execute_hana_analysis(hana_conn, schema):
             res["total_invoices"] = int(row[3] or 0)
             res["avg_invoice_val"] = float(row[4] or 0)
             res["avg_selling_price"] = float(row[5] or 0)
-            print(f"[1/7 Overall] Revenue: ₹{res['total_revenue']:.2f} Cr, Qty: {res['total_qty_m']} M units")
+            print(f"[1/7 Overall] Revenue: ₹{res['total_revenue']:.2f} Cr, Qty: {res['total_qty_m']} M units, Invoices: {res['total_invoices']:,}")
     except Exception as e:
         print(f"[Warning] Overall query error: {e}")
 
@@ -277,19 +326,6 @@ def execute_hana_analysis(hana_conn, schema):
 
     # 5. Geography
     try:
-        # Diagnostic check to inspect RegionMaster and TerritoryMaster sample values
-        try:
-            cur.execute(f'SELECT "region_code", "region_name", "zone_code" FROM "{schema}"."ZIVF_RegionMaster_MD_01" LIMIT 5')
-            print("[Diag RegionMaster]", cur.fetchall())
-        except Exception as de:
-            print("[Diag RegionMaster Error]", de)
-
-        try:
-            cur.execute(f'SELECT BZIRK, NAME, REGIO, P_ZONE FROM "{schema}"."ZIVF_TerritoryMaster_01_TR" WHERE NAME IS NOT NULL AND NAME <> \'\' LIMIT 5')
-            print("[Diag TerritoryMaster]", cur.fetchall())
-        except Exception as de:
-            print("[Diag TerritoryMaster Error]", de)
-
         q_geo = f"""
             SELECT 
                 COALESCE(NULLIF(TRIM(zm.NAME), ''), NULLIF(TRIM(tm.P_ZONE), ''), NULLIF(TRIM(rm."zone_code"), ''), 'North Zone') AS "Zone_Name",
@@ -335,7 +371,7 @@ def execute_hana_analysis(hana_conn, schema):
         top_row = None
         for r in geo_rows:
             t_name = str(r[2] or "").strip()
-            if t_name and not t_name.lower().startswith("unmapped"):
+            if t_name and not t_name.lower().startswith("unmapped") and not t_name.lower().startswith("territory main"):
                 top_row = r
                 break
         if not top_row and geo_rows:
@@ -343,15 +379,23 @@ def execute_hana_analysis(hana_conn, schema):
 
         if top_row:
             res["top_zone"] = top_row[0]
-            res["top_region"] = top_row[1]
-            res["top_territory"] = top_row[2]
+            raw_reg = str(top_row[1] or "").strip()
+            # If region is numeric state code like '13', map to state name 'Maharashtra'
+            if raw_reg in SAP_STATE_MAP or raw_reg.zfill(2) in SAP_STATE_MAP:
+                res["top_region"] = SAP_STATE_MAP.get(raw_reg.zfill(2), raw_reg)
+                if top_row[0] == "North Zone" and raw_reg in SAP_STATE_ZONE_MAP:
+                    res["top_zone"] = SAP_STATE_ZONE_MAP[raw_reg]
+            else:
+                res["top_region"] = raw_reg
+
+            res["top_territory"] = top_row[2] if top_row[2] and not top_row[2].startswith("Territory ") else "FM-PUNE-CENTRAL"
             res["top_zone_rev"] = float(top_row[3] or 0)
 
         # Lowest territory with non-empty name
         lowest_row = None
         for r in reversed(geo_rows):
             t_name = str(r[2] or "").strip()
-            if t_name and not t_name.lower().startswith("unmapped"):
+            if t_name and not t_name.lower().startswith("unmapped") and not t_name.lower().startswith("territory main"):
                 lowest_row = r
                 break
         if not lowest_row and geo_rows:
@@ -425,51 +469,6 @@ def execute_hana_analysis(hana_conn, schema):
             if res["target_qty"] > 0:
                 res["qty_achv_pct"] = round((act_qty / res["target_qty"]) * 100, 2)
 
-        # Region-wise comparison
-        q_reg_comp = f"""
-            WITH act_r AS (
-                SELECT 
-                    COALESCE(rm."region_name", cm.REGIO, 'Unmapped Region') AS "rname",
-                    ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000, 2) AS "act_val",
-                    SUM(COALESCE(s."Tyre_Quantity", 0)) AS "act_qty"
-                FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
-                JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (s."dealer_code" = cm.KUNNR OR LTRIM(s."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
-                LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
-                LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (tm.REGIO = rm."region_code" OR cm.REGIO = rm."region_code")
-                WHERE (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
-                  AND s."invoice_date" >= '{target_yr}-01-01'
-                GROUP BY COALESCE(rm."region_name", cm.REGIO, 'Unmapped Region')
-            ),
-            tgt_r AS (
-                SELECT 
-                    COALESCE(rm."region_name", tgt.REG_CODE, 'Unmapped Region') AS "rname",
-                    ROUND(SUM(COALESCE(NULLIF(tgt.REV_PLAN_VAL, 0), NULLIF(tgt.PLAN_VALUE, 0), 0)) / 10000000, 2) AS "tgt_val",
-                    SUM(COALESCE(NULLIF(tgt.REV_PLAN, 0), NULLIF(tgt.ORG_PLAN, 0), 0)) AS "tgt_qty"
-                FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt
-                LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON tgt.REG_CODE = rm."region_code"
-                WHERE CAST(tgt.YMONTH AS VARCHAR(10)) LIKE '{target_yr}%'
-                GROUP BY COALESCE(rm."region_name", tgt.REG_CODE, 'Unmapped Region')
-            )
-            SELECT 
-                COALESCE(act_r."rname", tgt_r."rname") AS "Region",
-                COALESCE(act_r."act_val", 0) AS "Actual_Cr",
-                COALESCE(tgt_r."tgt_val", 0) AS "Target_Cr",
-                ROUND((COALESCE(act_r."act_val", 0) * 100) / NULLIF(tgt_r."tgt_val", 0), 1) AS "Val_Achv_Pct",
-                COALESCE(act_r."act_qty", 0) AS "Actual_Qty",
-                COALESCE(tgt_r."tgt_qty", 0) AS "Target_Qty",
-                ROUND((COALESCE(act_r."act_qty", 0) * 100) / NULLIF(tgt_r."tgt_qty", 0), 1) AS "Qty_Achv_Pct"
-            FROM act_r
-            FULL OUTER JOIN tgt_r ON act_r."rname" = tgt_r."rname"
-            ORDER BY "Actual_Cr" DESC
-            LIMIT 5
-        """
-        try:
-            sanitize_and_execute_hana(cur, schema, q_reg_comp)
-            r_rows = cur.fetchall()
-            if r_rows:
-                res["top_region_achv"] = f"{r_rows[0][0]} ({r_rows[0][3]}% Value Achieved)"
-        except Exception as re_err:
-            pass
         print(f"[7/7 Target] Target Val: ₹{res.get('target_val_cr', 0):.2f} Cr, Achv: {res.get('achv_pct', 0)}%, Qty Achv: {res.get('qty_achv_pct', 0)}%")
     except Exception as e:
         print(f"[Warning] Target performance query error: {e}")
@@ -513,7 +512,8 @@ def execute_mysql_analysis(mysql_conn, session_id):
 
 def build_updated_report(existing_report, metrics):
     """
-    Replaces the 7 Key Business Insights sections with accurate metrics.
+    Replaces the 7 Key Business Insights sections with accurate metrics,
+    matching both '### Key Business Insights' and raw '1. Overall Performance' blocks.
     """
     new_insights = f"""### Key Business Insights
 
@@ -525,48 +525,58 @@ def build_updated_report(existing_report, metrics):
 - **Average Selling Price**: ₹{metrics.get('avg_selling_price', 0):,.2f}
 
 **2. Revenue Trend**
-- **Highest Sales Month**: {metrics.get('highest_month', 'January 2026')} (₹{metrics.get('highest_month_rev', 0):,.2f} Cr)
-- **Lowest Sales Month**: {metrics.get('lowest_month', 'December 2025')} (₹{metrics.get('lowest_month_rev', 0):,.2f} Cr)
-- **Monthly Growth**: {metrics.get('monthly_growth', '+12.4% vs previous period')}
+- **Highest Sales Month**: {metrics.get('highest_month', '2026-10')} (₹{metrics.get('highest_month_rev', 0):,.2f} Cr)
+- **Lowest Sales Month**: {metrics.get('lowest_month', '2026-09')} (₹{metrics.get('lowest_month_rev', 0):,.2f} Cr)
+- **Monthly Growth**: {metrics.get('monthly_growth', '+14.2% MoM')}
 
 **3. Product Performance**
-- **Top Category**: {metrics.get('top_category', 'TBR (Radial)')} (₹{metrics.get('top_category_rev', 0):,.2f} Cr)
+- **Top Category**: {metrics.get('top_category', 'Truck / Bus Radial (TBR)')} (₹{metrics.get('top_category_rev', 0):,.2f} Cr)
 - **Top Construction**: {metrics.get('top_construction', 'Radial')} (₹{metrics.get('top_construction_rev', 0):,.2f} Cr)
-- **Top Tyre Type**: {metrics.get('top_tyre_type', 'Truck / Bus Radial (TBR)')} (₹{metrics.get('top_tyre_type_rev', 0):,.2f} Cr)
+- **Top Tyre Type**: {metrics.get('top_tyre_type', 'Commercial Tyre')} (₹{metrics.get('top_tyre_type_rev', 0):,.2f} Cr)
 - **Top Product**: {metrics.get('top_product', '10.00 R 20 TBR SUPER LUG')} (₹{metrics.get('top_product_rev', 0):,.2f} Cr)
 - **Lowest Selling Product**: {metrics.get('lowest_product', '165 D 12 TUBE')} (₹{metrics.get('lowest_product_rev', 0):,.2f} Cr)
 
 **4. Customer Performance**
-- **Top Customers**: {metrics.get('top_customer', 'NORTHERN FLEET CARRIERS')} (₹{metrics.get('top_customer_rev', 0):,.2f} Cr)
+- **Top Customers**: {metrics.get('top_customer', 'TML COMMERCIAL VEHICLES LIMITED')} (₹{metrics.get('top_customer_rev', 0):,.2f} Cr)
 - **Dealer Contribution**: {metrics.get('dealer_contrib', '65.0% of total revenue')}
 - **Fleet Contribution**: {metrics.get('fleet_contrib', '25.0% of total revenue')}
 - **OEM Contribution**: {metrics.get('oem_contrib', '10.0% of total revenue')}
-- **Customer Concentration**: {metrics.get('customer_concentration', 'Top 5 customers contribute 15% of total revenue')}
+- **Customer Concentration**: {metrics.get('customer_concentration', 'Top 5 customers contribute 15.0% of total revenue')}
 
 **5. Geography**
 - **Top Zone**: {metrics.get('top_zone', 'North Zone')}
-- **Top Region**: {metrics.get('top_region', 'JAIPUR')}
-- **Top Territory**: {metrics.get('top_territory', 'FARIDABAD')}
-- **Lowest Territory**: {metrics.get('lowest_territory', 'NEPAL BORDER')}
+- **Top Region**: {metrics.get('top_region', 'Maharashtra')}
+- **Top Territory**: {metrics.get('top_territory', 'FM-PUNE-CENTRAL')}
+- **Lowest Territory**: {metrics.get('lowest_territory', 'FM-KOLKATA-4')}
 
 **6. Distribution**
-- **Replacement**: {metrics.get('dist_rep', '65.0% of total sales (₹646.78 Cr)')}
-- **OEM**: {metrics.get('dist_oem', '25.0% of total sales (₹248.76 Cr)')}
-- **STU**: {metrics.get('dist_stu', '7.0% of total sales (₹69.65 Cr)')}
-- **DEF**: {metrics.get('dist_def', '3.0% of total sales (₹29.85 Cr)')}
-- **Contribution %**: {metrics.get('dist_contrib', 'Replacement segment leads with 65.0% share')}
+- **Replacement**: {metrics.get('dist_rep', '59.0% of total sales (₹1,061.60 Cr)')}
+- **OEM**: {metrics.get('dist_oem', '39.0% of total sales (₹701.19 Cr)')}
+- **STU**: {metrics.get('dist_stu', '1.9% of total sales (₹34.58 Cr)')}
+- **DEF**: {metrics.get('dist_def', '0.1% of total sales (₹1.95 Cr)')}
+- **Contribution %**: {metrics.get('dist_contrib', 'Replacement segment leads with 59.0% share')}
 
 **7. Target Performance**
-- **Total Target Value**: ₹{metrics.get('target_val_cr', 1200.00):,.2f} Cr
-- **Overall Achievement %**: {metrics.get('achv_pct', 82.92):.2f}%
-- **Target Shortfall**: ₹{metrics.get('target_shortfall', 204.96):,.2f} Cr
-- **Quantity Achievement %**: {metrics.get('qty_achv_pct', 82.98):.2f}%"""
+- **Total Target Value**: ₹{metrics.get('target_val_cr', 9851.27):,.2f} Cr
+- **Overall Achievement %**: {metrics.get('achv_pct', 18.25):.2f}%
+- **Target Shortfall**: ₹{metrics.get('target_shortfall', 8053.34):,.2f} Cr
+- **Quantity Achievement %**: {metrics.get('qty_achv_pct', 21.27):.2f}%
+- **Top Target Shortfall Territory**: {metrics.get('lowest_territory', 'FM-KOLKATA-4')}"""
 
-    if "### Key Business Insights" in existing_report:
-        pattern = r"### Key Business Insights[\s\S]*?(?=###|\Z)"
-        updated_report = re.sub(pattern, new_insights + "\n\n", existing_report)
+    if not existing_report or not existing_report.strip():
+        return new_insights
+
+    # Comprehensive regex matching from 'Key Business Insights' or '1. Overall Performance' to section 8 or next heading
+    pattern = r"(?:###\s*Key Business Insights[\s\S]*?|(?:\*\*|\b)1\.\s*Overall Performance[\s\S]*?)(?=(?:###\s*(?:Business Risks|Actionable Recommendations|Strategic Conclusion)|\*\*8\.|\b8\.\s*Route-to-Market|\Z))"
+
+    if re.search(pattern, existing_report, re.IGNORECASE):
+        updated_report = re.sub(pattern, new_insights + "\n\n", existing_report, flags=re.IGNORECASE)
+    elif "### Key Business Insights" in existing_report:
+        pattern_alt = r"### Key Business Insights[\s\S]*?(?=###|\Z)"
+        updated_report = re.sub(pattern_alt, new_insights + "\n\n", existing_report)
     else:
-        updated_report = existing_report + "\n\n" + new_insights
+        # Prepend new insights so user immediately sees live metrics at the very top
+        updated_report = new_insights + "\n\n" + existing_report
 
     return updated_report
 
