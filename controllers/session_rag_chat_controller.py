@@ -1377,12 +1377,22 @@ SCHEMA & BUSINESS DEFINITIONS:
        SELECT: COALESCE(sk.MAKTX, sk.PROD_TITLE, fact."SKU") AS product_name, fact."SKU" AS sku_code
      * Category: JOIN "SAP_S4"."ZIVF_CategoryMaster_01_TR" cat ON sk.CAT_CODE = cat.CAT_CODE
        SELECT: cat.CAT_DESC AS category_name
-     * Territory: JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
+     * Territory: LEFT JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
        SELECT: tm.NAME AS territory_name, tm.BZIRK AS territory_code
-     * Region: JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON tm.REGIO = rm."region_code"
+     * Region: LEFT JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON (tm.REGIO = rm."region_code" OR cm.REGIO = rm."region_code")
        SELECT: rm."region_name", rm."region_code"
-     * Zone: JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" zm ON tm.P_ZONE = zm.P_ZONE (or rm."zone_code" = zm.P_ZONE)
+     * Zone: LEFT JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" zm ON (tm.P_ZONE = zm.P_ZONE OR rm."zone_code" = zm.P_ZONE)
        SELECT: zm.NAME AS zone_name
+   - CRITICAL CASE-INSENSITIVE TEXT FILTERING (SAP HANA RULE):
+     SAP HANA string comparisons are strictly case-sensitive! Whenever filtering on names or text attributes (e.g., rm."region_name", zm.NAME, sk.BRAND, cat.CAT_DESC, sk.TYRE_TYPE):
+     ALWAYS use case-insensitive matching with UPPER and LIKE or TRIM:
+     e.g., UPPER(TRIM(rm."region_name")) LIKE UPPER('%Jaipur%')
+     NEVER write rm."region_name" = 'Jaipur' as it returns 0 rows if stored in uppercase (e.g. 'JAIPUR')!
+   - NO UNREQUESTED DISTRIBUTION CHANNEL FILTER:
+     Filter fact."distribution_channel" = '10' ONLY IF the user explicitly asked for channel 10 or dealer channel. If not mentioned, DO NOT include fact."distribution_channel" = '10' so all valid channel sales are captured!
+   - SUBQUERY & CTE JOIN KEY HYGIENE (LEADING ZEROS):
+     Whenever comparing dealer/customer codes between CTEs, tables, or subqueries, ALWAYS wrap in LTRIM:
+     ON (LTRIM(ad.dealer_code, '0') = LTRIM(rs.dealer_code, '0'))
    - TARGET VS ACTUAL / PLAN ACHIEVEMENT RULES:
      Target view is at monthly planning grain (TERR_CODE, REG_CODE, YMONTH) and does NOT have dealer_code or daily dates.
      NEVER join Sales Fact directly to Target Fact with an INNER/LEFT JOIN — this causes Cartesian product and duplicates numbers!
@@ -1392,6 +1402,24 @@ SCHEMA & BUSINESS DEFINITIONS:
      * Outer Query: Join CTEs on territory/region/month, calculate % Value ((actual_sales / target_sales) * 100) and % Qty ((actual_qty / target_qty) * 100).
 
 4. CANONICAL EXAMPLES:
+   - Top N Customers in a Region / Territory / Zone (e.g. Jaipur):
+     SELECT 
+       COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name, 
+       fact."dealer_code" AS customer_code, 
+       rm."region_name",
+       SUM(fact."invoice_value") AS total_sales_value
+     FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
+     JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
+       ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+     LEFT JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
+     LEFT JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON (tm.REGIO = rm."region_code" OR cm.REGIO = rm."region_code")
+     WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
+       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+       AND UPPER(TRIM(rm."region_name")) LIKE UPPER('%Jaipur%')
+     GROUP BY COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code", rm."region_name"
+     ORDER BY total_sales_value DESC
+     LIMIT 5
+
    - Top 2 Customers by Total Sales:
      SELECT 
        COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name, 
@@ -2202,9 +2230,9 @@ def _build_geography_prompt(table_cols):
     s4_tgt  = next((t for t in table_cols if "plan_target" in t.lower() or "sales_plan" in t.lower()), None)
 
     if s4_cust and s4_terr:
-        reg_join = f"- Region Master: JOIN \"SAP_S4\".\"{s4_reg}\" rm ON tm.REGIO = rm.\"region_code\" (Region Name: rm.\"region_name\", Zone code: rm.\"zone_code\")\n" if s4_reg else ""
+        reg_join = f"- Region Master: LEFT JOIN \"SAP_S4\".\"{s4_reg}\" rm ON (tm.REGIO = rm.\"region_code\" OR cm.REGIO = rm.\"region_code\") (Region Name: rm.\"region_name\", Zone code: rm.\"zone_code\")\n" if s4_reg else ""
         zone_on = "rm.\"zone_code\" = zm.P_ZONE" if s4_reg else "tm.P_ZONE = zm.P_ZONE"
-        zone_join = f"- Zone Master: JOIN \"SAP_S4\".\"{s4_zone}\" zm ON {zone_on} (Zone Name: zm.NAME)\n" if s4_zone else ""
+        zone_join = f"- Zone Master: LEFT JOIN \"SAP_S4\".\"{s4_zone}\" zm ON {zone_on} (Zone Name: zm.NAME)\n" if s4_zone else ""
         tgt_hint = (
             f"- Sales Plan & Target: \"SAP_S4\".\"{s4_tgt}\" tgt (Join keys: tgt.TERR_CODE = tm.BZIRK, tgt.REG_CODE = rm.\"region_code\")\n"
             f"  CRITICAL FOR TARGET VS ACTUAL: Use separate CTEs for actual sales and target plan, never direct JOIN.\n"
@@ -2212,11 +2240,13 @@ def _build_geography_prompt(table_cols):
         return (
             f"\n\nSAP S/4HANA GEOGRAPHY CHAIN (MANDATORY):\n"
             f"- Customer Master: \"SAP_S4\".\"{s4_cust}\" cm (JOIN: (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')), Customer Name: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact.\"dealer_code\"), FILTER: (cm.KLABC IS NULL OR cm.KLABC <> 'X'))\n"
-            f"- Territory Master: JOIN \"SAP_S4\".\"{s4_terr}\" tm ON cm.BZIRK = tm.BZIRK (Territory Name: tm.NAME, Region code: tm.REGIO, Zone code: tm.P_ZONE)\n"
+            f"- Territory Master: LEFT JOIN \"SAP_S4\".\"{s4_terr}\" tm ON cm.BZIRK = tm.BZIRK (Territory Name: tm.NAME, Region code: tm.REGIO, Zone code: tm.P_ZONE)\n"
             f"{reg_join}"
             f"{zone_join}"
             f"{tgt_hint}"
-            f"Reference columns ONLY on their owning view: Customer name is cm.NAME1 (fallback cm.BNAME), Territory name is tm.NAME, Region name is rm.\"region_name\", Zone name is zm.NAME."
+            f"Reference columns ONLY on their owning view: Customer name is cm.NAME1 (fallback cm.BNAME), Territory name is tm.NAME, Region name is rm.\"region_name\", Zone name is zm.NAME.\n"
+            f"CRITICAL: Always use LEFT JOIN for Territory, Region, and Zone Master so customers with unassigned territories are never dropped.\n"
+            f"CRITICAL STRING FILTER RULE: String matching in SAP HANA is case-sensitive! Always use UPPER(TRIM(col)) LIKE UPPER('%value%') (e.g. UPPER(TRIM(rm.\"region_name\")) LIKE UPPER('%Jaipur%')) instead of strict equality."
         )
 
     g = GEOGRAPHY_CHAIN
@@ -2819,6 +2849,38 @@ def session_rag_chat_controller(get_connection_func):
                                     flags=re.IGNORECASE
                                 )
 
+                                # Ensure Territory, Region, and Zone Master use LEFT JOIN so missing territories never drop customer sales
+                                run_query = re.sub(
+                                    r'\bJOIN\s+(\"?SAP_S4\"?\.)?\"?(ZIVF_TerritoryMaster_01_TR|ZIVF_RegionMaster_MD_01|ZIVF_ZoneMaster_01_TR)\"?',
+                                    r'LEFT JOIN \1"\2"',
+                                    run_query,
+                                    flags=re.IGNORECASE
+                                )
+
+                                # Auto-heal exact string equality on names/descriptions to case-insensitive UPPER LIKE in HANA
+                                run_query = re.sub(
+                                    r'((?:[a-zA-Z0-9_]+\.)?\"?(?:region_name|zone_name|NAME|BRAND|CAT_DESC|TYRE_TYPE)\"?)\s*=\s*\'([^\']+)\'',
+                                    lambda m: m.group(0) if m.group(2) in ('10', 'X', 'Y', '1') else f"UPPER(TRIM({m.group(1)})) LIKE UPPER('%{m.group(2)}%')",
+                                    run_query,
+                                    flags=re.IGNORECASE
+                                )
+
+                                # Auto-heal CTE joins missing LTRIM: ad.dealer_code = rs.dealer_code -> LTRIM(...) = LTRIM(...)
+                                run_query = re.sub(
+                                    r'([a-zA-Z0-9_]+)\.(?:dealer_code|customer_code|kunnr)\s*=\s*([a-zA-Z0-9_]+)\.(?:dealer_code|customer_code|kunnr)',
+                                    r"(LTRIM(\1.dealer_code, '0') = LTRIM(\2.dealer_code, '0'))",
+                                    run_query,
+                                    flags=re.IGNORECASE
+                                )
+
+                                # Auto-heal cm.KTOKD = 'Dealer' to case-insensitive match
+                                run_query = re.sub(
+                                    r'(?:cm\.)?\"?KTOKD\"?\s*=\s*\'([^\']+)\'',
+                                    r"UPPER(TRIM(cm.KTOKD)) LIKE UPPER('%\1%')",
+                                    run_query,
+                                    flags=re.IGNORECASE
+                                )
+
                                 # For ranking queries (Top N / Worst N customers), upgrade LEFT JOIN to JOIN on Customer Master
                                 # so unprofiled internal codes without customer names (e.g. 102425) are excluded
                                 if re.search(r'ORDER\s+BY\s+.*?(?:total_sales|total_qty|invoice_value)', run_query, re.I) and "customermaster" in run_query.lower():
@@ -2875,6 +2937,22 @@ def session_rag_chat_controller(get_connection_func):
                                     except Exception as h_ex:
                                         print(f"[SQL_EXEC] SalesHistory fallback error: {h_ex}")
 
+                                # Fallback 1b: If SalesHistory view returned 0 rows, try CurrentSales view
+                                if not sql_results and "ZPVF_SD_SalesHistory_01_TR" in run_query:
+                                    print("[SQL_EXEC] Fallback 1b: Retrying on CurrentSales view instead of SalesHistory...")
+                                    alt_query = run_query.replace("ZPVF_SD_SalesHistory_01_TR", "ZPVF_SD_CurrentSales_01_TR")
+                                    try:
+                                        cur_sql.execute(alt_query)
+                                        h_rows = cur_sql.fetchall()
+                                        if h_rows:
+                                            cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
+                                            sql_results = [dict(zip(cols, r)) for r in h_rows]
+                                            run_query = alt_query
+                                            sql_query = alt_query
+                                            print(f"[SQL_EXEC] CurrentSales fallback SUCCESS! Returned {len(sql_results)} rows.")
+                                    except Exception as h_ex:
+                                        print(f"[SQL_EXEC] CurrentSales fallback error: {h_ex}")
+
                                 # Fallback 2: If still 0 rows, check if distribution_channel = '10' is filtering out all records
                                 if not sql_results and "distribution_channel" in run_query:
                                     if not re.search(r'\b(?:channel\s*10|dist(?:ribution)?\s*channel)\b', question, re.I):
@@ -2894,26 +2972,47 @@ def session_rag_chat_controller(get_connection_func):
                                         except Exception as rel_e:
                                             print(f"[SQL_EXEC] Relaxed filter error: {rel_e}")
 
-                                # Fallback 3: If still 0 rows, check if CustomerMaster join or KLABC is dropping unmatched rows
-                                if not sql_results and "ZIVF_CustomerMaster_01_MD" in run_query:
-                                    is_ranking = bool(re.search(r'ORDER\s+BY\s+.*?(?:total_sales|total_qty|invoice_value)', run_query, re.I))
-                                    if not is_ranking:
-                                        print("[SQL_EXEC] Fallback 3: Trying LEFT JOIN on CustomerMaster without KLABC filter...")
-                                        cust_q = re.sub(r'\bJOIN\s+(\"?SAP_S4\"?\.)?\"?ZIVF_CustomerMaster_01_MD\"?', r'LEFT JOIN \1"ZIVF_CustomerMaster_01_MD"', run_query, flags=re.IGNORECASE)
-                                        cust_q = re.sub(r'(?:AND\s+)?\(?\s*(?:cm\.)?KLABC\s*IS\s*NULL\s*OR\s*(?:cm\.)?KLABC\s*<>\s*\'X\'\s*\)?\s*(?:AND\s+)?', ' ', cust_q, flags=re.IGNORECASE)
-                                        cust_q = re.sub(r'WHERE\s+(?:AND\s+)+', 'WHERE ', cust_q, flags=re.IGNORECASE)
-                                        cust_q = re.sub(r'WHERE\s*(GROUP|ORDER|\Z)', r'\1', cust_q, flags=re.IGNORECASE)
+                                # Fallback 3: Convert exact string equality in WHERE clause to case-insensitive UPPER LIKE
+                                if not sql_results and re.search(r"=\s*'([^']+)'", run_query):
+                                    print("[SQL_EXEC] Fallback 3: Converting exact string matches to UPPER LIKE in WHERE clause...")
+                                    like_q = re.sub(
+                                        r"((?:[a-zA-Z0-9_]+\.)?\"?[a-zA-Z0-9_]+\"?)\s*=\s*\'([^\']+)\'",
+                                        lambda m: m.group(0) if m.group(2) in ('10', 'X', 'Y', '1') else f"UPPER(TRIM({m.group(1)})) LIKE UPPER('%{m.group(2)}%')",
+                                        run_query
+                                    )
+                                    if like_q != run_query:
                                         try:
-                                            cur_sql.execute(cust_q)
-                                            c_rows = cur_sql.fetchall()
-                                            if c_rows:
+                                            cur_sql.execute(like_q)
+                                            l_rows = cur_sql.fetchall()
+                                            if l_rows:
                                                 cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
-                                                sql_results = [dict(zip(cols, r)) for r in c_rows]
-                                                run_query = cust_q
-                                                sql_query = cust_q
-                                                print(f"[SQL_EXEC] CustomerMaster LEFT JOIN SUCCESS! Returned {len(sql_results)} rows.")
-                                        except Exception as c_e:
-                                            print(f"[SQL_EXEC] CustomerMaster fallback error: {c_e}")
+                                                sql_results = [dict(zip(cols, r)) for r in l_rows]
+                                                run_query = like_q
+                                                sql_query = like_q
+                                                print(f"[SQL_EXEC] Case-insensitive UPPER LIKE fallback SUCCESS! Returned {len(sql_results)} rows.")
+                                        except Exception as l_ex:
+                                            print(f"[SQL_EXEC] UPPER LIKE fallback error: {l_ex}")
+
+                                # Fallback 4: If still 0 rows, relax ALL dimension joins to LEFT JOIN
+                                if not sql_results and "JOIN" in run_query:
+                                    print("[SQL_EXEC] Fallback 4: Relaxing all master/dimension joins to LEFT JOIN...")
+                                    left_q = re.sub(r'\bINNER\s+JOIN\b', 'LEFT JOIN', run_query, flags=re.IGNORECASE)
+                                    left_q = re.sub(r'(?<!LEFT\s)\bJOIN\s+(\"?SAP_S4\"?\.)?\"?(ZIV[FR]_[a-zA-Z0-9_]+)\"?', r'LEFT JOIN \1"\2"', left_q, flags=re.IGNORECASE)
+                                    # Also relax cm.KLABC or cm.KTOKD if dropping rows
+                                    left_q = re.sub(r'(?:AND\s+)?\(?\s*(?:cm\.)?KLABC\s*IS\s*NULL\s*OR\s*(?:cm\.)?KLABC\s*<>\s*\'X\'\s*\)?\s*(?:AND\s+)?', ' ', left_q, flags=re.IGNORECASE)
+                                    left_q = re.sub(r'WHERE\s+(?:AND\s+)+', 'WHERE ', left_q, flags=re.IGNORECASE)
+                                    left_q = re.sub(r'WHERE\s*(GROUP|ORDER|\Z)', r'\1', left_q, flags=re.IGNORECASE)
+                                    try:
+                                        cur_sql.execute(left_q)
+                                        j_rows = cur_sql.fetchall()
+                                        if j_rows:
+                                            cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
+                                            sql_results = [dict(zip(cols, r)) for r in j_rows]
+                                            run_query = left_q
+                                            sql_query = left_q
+                                            print(f"[SQL_EXEC] Relaxed LEFT JOIN fallback SUCCESS! Returned {len(sql_results)} rows.")
+                                    except Exception as j_ex:
+                                        print(f"[SQL_EXEC] Relaxed LEFT JOIN fallback error: {j_ex}")
 
                             # Convert Decimal, Date, and non-serializable objects
                             import decimal
@@ -3010,14 +3109,14 @@ def session_rag_chat_controller(get_connection_func):
         # Fallback if no SQL rows were produced
         if intent == "AGGREGATION" and not sql_results:
             _detail = f" (error: {agg_sql_error})" if agg_sql_error else ""
-            print(f"[AGGREGATION] No SQL rows returned{_detail} — retrieving knowledge context")
-            retrieved_ctx = _retrieve(all_chunks, bm25_idx, col, question, understanding)
+            print(f"[AGGREGATION] No SQL rows returned{_detail} — setting clean zero-row context")
             context = (
-                f"SQL Execution Note: Direct SQL computation returned no rows{_detail}.\n"
-                f"Attempted Query: {sql_query if 'sql_query' in locals() else 'N/A'}\n\n"
-                f"Available Session Knowledge Context & Views:\n{retrieved_ctx}\n\n"
-                "Instruction: Answer the user's question clearly and helpfully using the available session context, views, schema definitions, and records. "
-                "If the direct numerical computation could not be fetched from the database, explain the relevant data structure, tables, and available insights accurately."
+                f"SQL Execution Note: Direct SQL computation returned 0 rows (no matching records found in the database){_detail}.\n"
+                f"Attempted Query: {sql_query if 'sql_query' in locals() else 'N/A'}\n"
+                f"Question: {question}\n\n"
+                "CRITICAL INSTRUCTION: State clearly, politely, and directly in 1 or 2 sentences that no records or transactions were found matching the specified criteria in the database. "
+                "DO NOT generate lengthy paragraphs, diagnostic checklists, troubleshooting steps, or alternative query approaches. "
+                "DO NOT explain database schemas or internal table architectures. Keep your response direct, concise, and professional."
             )
 
     # Graph
@@ -3139,27 +3238,46 @@ def session_rag_chat_controller(get_connection_func):
         _normalize_visualizations(res.get("visualizations", []))
     )
 
-    if understanding.get("intent") == "AGGREGATION" and sql_results:
-        keys_lower = [k.lower() for k in sql_results[0].keys()]
-        has_time = any(t in k for k in keys_lower for t in ['month', 'date', 'year'])
-        
-        columns = [{"key": k, "label": str(k).replace("_", " ").title()} for k in sql_results[0].keys()]
-        table_vis = {
-            "type": "table",
-            "title": "Data Table",
-            "columns": columns,
-            "data": sql_results
-        }
-        
-        if not has_time:
-            # Keep only bar_charts; drop hallucinated line/pie charts
-            visualizations = [v for v in visualizations if v.get("type") == "bar_chart"]
+    if understanding.get("intent") == "AGGREGATION":
+        if not sql_results:
+            # Zero rows: Drop all hallucinated charts/tables so frontend never renders blank widgets
+            visualizations = []
         else:
-            # Keep all non-table charts (like line_chart)
-            visualizations = [v for v in visualizations if v.get("type") != "table"]
+            keys = list(sql_results[0].keys())
+            keys_lower = [k.lower() for k in keys]
+            has_time = any(t in k for k in keys_lower for t in ['month', 'date', 'year'])
             
-        # ALWAYS append the perfectly formatted Python table, replacing any broken LLM table
-        visualizations.append(table_vis)
+            columns = [{"key": k, "label": str(k).replace("_", " ").title()} for k in keys]
+            table_vis = {
+                "type": "table",
+                "title": "Data Table",
+                "columns": columns,
+                "data": sql_results
+            }
+            
+            # Align and sanitize chart xKey, yKey, and data against actual SQL keys
+            for v in visualizations:
+                if v.get("type") in ("bar_chart", "line_chart"):
+                    x_key = v.get("xKey")
+                    y_key = v.get("yKey")
+                    if x_key not in keys:
+                        cand_x = next((k for k in keys if any(m in k.lower() for m in ("name", "title", "code", "desc", "month", "year", "date"))), keys[0] if keys else "")
+                        v["xKey"] = cand_x
+                    if y_key not in keys:
+                        cand_y = next((k for k in keys if any(m in k.lower() for m in ("sales", "value", "qty", "quantity", "total", "count", "achv", "pct"))), keys[-1] if keys else "")
+                        v["yKey"] = cand_y
+                    # Always ensure data is backed by verified SQL results
+                    v["data"] = sql_results
+
+            if not has_time:
+                # Keep only bar_charts; drop hallucinated line/pie charts
+                visualizations = [v for v in visualizations if v.get("type") == "bar_chart"]
+            else:
+                # Keep all non-table charts (like line_chart)
+                visualizations = [v for v in visualizations if v.get("type") != "table"]
+                
+            # ALWAYS append the perfectly formatted Python table, replacing any broken LLM table
+            visualizations.append(table_vis)
 
     # If user explicitly asked for table → keep only table
     if "table" in question.lower():
