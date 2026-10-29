@@ -15,7 +15,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
             import pymysql
             cursor = conn.cursor(pymysql.cursors.DictCursor)
             is_mysql_connector = False
-        print(f"[Excel Export] Starting SP calls for {year}-{month}-{day}", flush=True)
+        print(f"[Excel Export] Generating domestic sales report for {year}-{month}-{day}", flush=True)
         
         rows = []
         rows_ws1 = []
@@ -33,6 +33,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         )
 
         hana_conn, tunnel, schema = get_sap_connection_for_session(conn, session_id)
+        is_sap_session = bool(hana_conn)
         if hana_conn:
             print(f"[Excel Export] Detected SAP HANA connection for session {session_id}. Querying SAP views in schema '{schema}'...", flush=True)
             try:
@@ -52,7 +53,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
 
         sync_row = None
         db_to_use = None
-        if not rows:
+        if not rows and not is_sap_session:
             print(f"[Excel Export] Received session_id: {session_id}, year: {year}, month: {month}, day: {day}", flush=True)
             # Handle dynamic database based on session_id and where SP exists
             if session_id:
@@ -280,7 +281,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         # POPULATE WS1 (Sales Summary)
         # ==========================================
         try:
-            if not rows_ws1:
+            if not rows_ws1 and not is_sap_session:
                 # Update SP call for WS1
                 print(f"[Excel Export] Executing sp_sales_numbers for WS1...", flush=True)
                 try:
@@ -488,7 +489,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         # POPULATE WS2 (Sales Report by Values)
         # ==========================================
         try:
-            if not rows_ws2:
+            if not rows_ws2 and not is_sap_session:
                 print(f"[Excel Export] Executing sp_sales_report_by_values for WS2...", flush=True)
                 try:
                     if session_id and sync_row and db_to_use:
@@ -697,7 +698,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
         # POPULATE WS3 (Sales Numbers)
         # ==========================================
         try:
-            if not rows_ws3:
+            if not rows_ws3 and not is_sap_session:
                 print(f"[Excel Export] Executing sp_sales_summary_in_no_and_values_for_month for WS3...", flush=True)
                 try:
                     if session_id and sync_row and db_to_use:
