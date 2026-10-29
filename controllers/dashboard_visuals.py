@@ -535,11 +535,19 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
         for clean_k, c_n in curr_map.items():
             if clean_k in hist_map:
                 common_cols.append((c_n, hist_map[clean_k]))
+        
+        # In SAP HANA, exclude duplicate handoff records on boundary date 2026-09-27 from CurrentSales
+        curr_cond = c_curr_expr
+        if is_hana:
+            c_date = check_match(curr_map, ["invoice_date", "date", "fkdat"])
+            if c_date and "2026-09-27" not in curr_cond:
+                curr_cond = (curr_cond.replace("WHERE", "WHERE 1=1 AND") if curr_cond else "WHERE 1=1") + f' AND c."{c_date}" > \'2026-09-27\''
+
         if not common_cols:
-            return f"(SELECT * FROM {q_tbl(curr_t)} {c_curr_expr} UNION ALL SELECT * FROM {q_tbl(hist_t)} {c_hist_expr})"
+            return f"(SELECT * FROM {q_tbl(curr_t)} c {curr_cond} UNION ALL SELECT * FROM {q_tbl(hist_t)} h {c_hist_expr})"
         c_proj = ", ".join([f'c.{q_name(c[0])} AS {q_name(c[0])}' for c in common_cols])
         h_proj = ", ".join([f'h.{q_name(c[1])} AS {q_name(c[0])}' for c in common_cols])
-        return f"(SELECT {c_proj} FROM {q_tbl(curr_t)} c {c_curr_expr} UNION ALL SELECT {h_proj} FROM {q_tbl(hist_t)} h {c_hist_expr})"
+        return f"(SELECT {c_proj} FROM {q_tbl(curr_t)} c {curr_cond} UNION ALL SELECT {h_proj} FROM {q_tbl(hist_t)} h {c_hist_expr})"
 
     # Build cancellation & distribution channel conditions on fact tables
     cancel_expr_curr = ""
@@ -571,19 +579,12 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
             except ValueError: pass
 
     if is_hana and curr_sales_tbl and hist_sales_tbl:
-        # In SAP HANA, ZPVF_SD_SalesHistory_01_TR has >30M rows.
-        # Avoid unconstrained union if user selects current year (>=2026) or default dashboard view
-        if valid_years and all(y >= 2026 for y in valid_years):
-            fact_from = f"(SELECT s.* FROM {q_tbl(curr_sales_tbl)} s {can_filter} {cancel_expr_curr.replace('WHERE', 'WHERE 1=1 AND')} {can_null}) s"
-            fact_cols = table_columns.get(curr_sales_tbl, {})
-        elif valid_years and all(y <= 2025 for y in valid_years):
+        # If user queries strictly historical years <= 2025, query SalesHistory directly
+        if valid_years and all(y <= 2025 for y in valid_years):
             fact_from = f"(SELECT s.* FROM {q_tbl(hist_sales_tbl)} s {can_filter} {cancel_expr_hist.replace('WHERE', 'WHERE 1=1 AND')} {can_null}) s"
             fact_cols = table_columns.get(hist_sales_tbl, {})
-        elif not valid_years:
-            # Default dashboard view: use current sales for fast, memory-safe load
-            fact_from = f"(SELECT s.* FROM {q_tbl(curr_sales_tbl)} s {can_filter} {cancel_expr_curr.replace('WHERE', 'WHERE 1=1 AND')} {can_null}) s"
-            fact_cols = table_columns.get(curr_sales_tbl, {})
         else:
+            # For 2026 (spans both views) or full lifetime dashboard, combine both views cleanly
             aligned_u = build_aligned_union(curr_sales_tbl, hist_sales_tbl, cancel_expr_curr, cancel_expr_hist)
             fact_from = f"(SELECT s.* FROM {aligned_u} s {can_filter} WHERE 1=1 {can_null}) s"
             fact_cols = table_columns.get(curr_sales_tbl) or table_columns.get(hist_sales_tbl) or {}
@@ -629,17 +630,17 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
         if s_cust and c_cust:
             joins.append(f"LEFT JOIN {q_tbl(cust_tbl)} cm ON s.{q_name(s_cust)} = cm.{q_name(c_cust)}")
 
-    # 2. Territory Master `tm`
+    # 2. Territory Master `tm` (Customer Geography prioritized over manufacturing plant)
     if terr_tbl:
+        c_terr = check_match(table_columns.get(cust_tbl, {}), ["bzirk", "territory", "territory_code"]) if cust_tbl else None
+        t_terr = check_match(table_columns[terr_tbl], ["bzirk", "territory_code", "territory"])
         s_plant = check_match(fact_cols, ["plant", "werks", "vwerk"])
         t_plant = check_match(table_columns[terr_tbl], ["werks", "plant"])
-        if s_plant and t_plant:
+
+        if cust_tbl and any("cm" in j for j in joins) and c_terr and t_terr:
+            joins.append(f"LEFT JOIN {q_tbl(terr_tbl)} tm ON cm.{q_name(c_terr)} = tm.{q_name(t_terr)}")
+        elif s_plant and t_plant:
             joins.append(f"LEFT JOIN {q_tbl(terr_tbl)} tm ON s.{q_name(s_plant)} = tm.{q_name(t_plant)}")
-        elif cust_tbl:
-            c_terr = check_match(table_columns[cust_tbl], ["bzirk", "territory", "territory_code"])
-            t_terr = check_match(table_columns[terr_tbl], ["bzirk", "territory_code", "territory"])
-            if c_terr and t_terr:
-                joins.append(f"LEFT JOIN {q_tbl(terr_tbl)} tm ON cm.{q_name(c_terr)} = tm.{q_name(t_terr)}")
 
     # 3. Region Master `rm`
     if reg_tbl:
@@ -2043,10 +2044,66 @@ def default_dashboard_metrics_controller(get_db_connection):
                 hist_conds.append(f"(TRIM(CAST({q_name(d_hist)} AS NVARCHAR(20))) IN ('10', '010', '1'))" if is_hana else f"({q_name(d_hist)} = 10 OR {q_name(d_hist)} = '10')")
             cancel_expr_hist = ("WHERE " + " AND ".join(hist_conds)) if hist_conds else ""
 
-        if is_hana and curr_sales_tbl:
-            sales_from = f"(SELECT s.* FROM {q_tbl(curr_sales_tbl)} s {can_filter} {cancel_expr_curr.replace('WHERE', 'WHERE 1=1 AND')} {can_null}) s"
-            sales_cols = table_columns.get(curr_sales_tbl, {})
-            primary_sales_tbl = curr_sales_tbl
+        if is_hana and curr_sales_tbl and hist_sales_tbl:
+            # Both SAP calculation views present: Combine into unified lifetime sales view
+            curr_c = table_columns.get(curr_sales_tbl, {})
+            hist_c = table_columns.get(hist_sales_tbl, {})
+
+            c_rev = check_col(curr_c, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+            h_rev = check_col(hist_c, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+
+            c_date = check_col(curr_c, ["invoice_date", "date", "fkdat"]) or "invoice_date"
+            h_date = check_col(hist_c, ["invoice_date", "date", "fkdat"]) or "invoice_date"
+
+            c_cust = check_col(curr_c, ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+            h_cust = check_col(hist_c, ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+
+            c_sku = check_col(curr_c, ["sku", "material", "matnr"]) or "SKU"
+            h_sku = check_col(hist_c, ["sku", "material", "matnr"]) or "SKU"
+
+            c_plt = check_col(curr_c, ["plant", "werks"]) or "plant"
+            h_plt = check_col(hist_c, ["plant", "werks"]) or "plant"
+
+            c_qty = check_col(curr_c, ["tyre_quantity", "quantity", "menge"]) or "Tyre_Quantity"
+            h_qty = check_col(hist_c, ["tyre_quantity", "quantity", "menge"]) or "Tyre_Quantity"
+
+            # In CurrentSales, invoice_date > '2026-09-27' eliminates duplicate handoff records on boundary date
+            curr_where = cancel_expr_curr.replace('WHERE', 'WHERE 1=1 AND') if cancel_expr_curr else "WHERE 1=1"
+            curr_where += f' AND "{c_date}" > \'2026-09-27\''
+
+            hist_where = cancel_expr_hist.replace('WHERE', 'WHERE 1=1 AND') if cancel_expr_hist else "WHERE 1=1"
+
+            sales_from = f"""(
+                SELECT 
+                    "{h_rev}" AS "invoice_value",
+                    "{h_date}" AS "invoice_date",
+                    "{h_cust}" AS "dealer_code",
+                    "{h_sku}" AS "SKU",
+                    "{h_plt}" AS "plant",
+                    "{h_qty}" AS "Tyre_Quantity"
+                FROM {q_tbl(hist_sales_tbl)}
+                {hist_where}
+                UNION ALL
+                SELECT 
+                    "{c_rev}" AS "invoice_value",
+                    "{c_date}" AS "invoice_date",
+                    "{c_cust}" AS "dealer_code",
+                    "{c_sku}" AS "SKU",
+                    "{c_plt}" AS "plant",
+                    "{c_qty}" AS "Tyre_Quantity"
+                FROM {q_tbl(curr_sales_tbl)}
+                {curr_where}
+            ) s"""
+
+            sales_cols = {
+                "invoicevalue": "invoice_value",
+                "invoicedate": "invoice_date",
+                "dealercode": "dealer_code",
+                "sku": "SKU",
+                "plant": "plant",
+                "tyrequantity": "Tyre_Quantity"
+            }
+            primary_sales_tbl = hist_sales_tbl
         elif curr_sales_tbl and hist_sales_tbl:
             aligned_u = build_aligned_union(curr_sales_tbl, hist_sales_tbl, cancel_expr_curr, cancel_expr_hist)
             sales_from = f"(SELECT s.* FROM {aligned_u} s {can_filter} WHERE 1=1 {can_null}) s"
@@ -2085,20 +2142,31 @@ def default_dashboard_metrics_controller(get_db_connection):
         else:
             join_revenue_expr = "0.0"
 
-        # 1. Total Sales Revenue
+        real_date_col = check_col(sales_cols, ["invoice_date", "date", "billing__doc_date", "billing_doc_date", "fkdat"])
+
+        # 1. Total Sales Revenue & Dynamic Lifetime Period
         total_revenue = 0.0
+        min_sales_yr = None
+        max_sales_yr = None
         if has_revenue:
             try:
-                execute_query(cursor, f"SELECT SUM({join_revenue_expr}) AS total_sales_revenue FROM {sales_from}", is_hana=is_hana)
+                rev_q = f"SELECT SUM({join_revenue_expr}) AS total_sales_revenue"
+                if real_date_col:
+                    rev_q += f", MIN(YEAR(s.{q_name(real_date_col)})) AS min_yr, MAX(YEAR(s.{q_name(real_date_col)})) AS max_yr"
+                rev_q += f" FROM {sales_from}"
+                execute_query(cursor, rev_q, is_hana=is_hana)
                 row = fetchone_dict(cursor)
-                total_revenue = float(row["total_sales_revenue"] or 0) if row else 0.0
+                if row:
+                    total_revenue = float(row.get("total_sales_revenue") or 0)
+                    min_sales_yr = row.get("min_yr")
+                    max_sales_yr = row.get("max_yr")
             except Exception as rev_err:
                 print(f"[Default Metrics] Total revenue query failed: {rev_err}")
 
         # 2. Top Performing Tyre
         top_tyre = "N/A"
         if has_revenue:
-            # Join SKU Master with Category Master
+            # Join SKU Master with Category Master (pre-aggregated by SKU for ultra-fast execution)
             if sku_tbl and cat_tbl:
                 sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
                 sku_mat = check_col(table_columns[sku_tbl], ["matnr", "sku", "material"])
@@ -2111,9 +2179,14 @@ def default_dashboard_metrics_controller(get_db_connection):
                         q_t = f"""
                             SELECT
                                 cat.{q_name(cat_desc)} AS vehicle_type,
-                                ROUND(SUM({join_revenue_expr}), 2) AS revenue
-                            FROM {sales_from}
-                            JOIN {q_tbl(sku_tbl)} sm ON s.{q_name(sales_mat)} = sm.{q_name(sku_mat)}
+                                ROUND(SUM(ms.mat_rev), 2) AS revenue
+                            FROM (
+                                SELECT s.{q_name(sales_mat)} AS mat_id, SUM({join_revenue_expr}) AS mat_rev
+                                FROM {sales_from}
+                                WHERE s.{q_name(sales_mat)} IS NOT NULL
+                                GROUP BY s.{q_name(sales_mat)}
+                            ) ms
+                            JOIN {q_tbl(sku_tbl)} sm ON (ms.mat_id = sm.{q_name(sku_mat)} OR LTRIM(ms.mat_id, '0') = LTRIM(sm.{q_name(sku_mat)}, '0'))
                             JOIN {q_tbl(cat_tbl)} cat ON sm.{q_name(sku_cat)} = cat.{q_name(cat_code)}
                             WHERE cat.{q_name(cat_desc)} IS NOT NULL AND cat.{q_name(cat_desc)} <> ''
                             GROUP BY cat.{q_name(cat_desc)}
@@ -2137,9 +2210,14 @@ def default_dashboard_metrics_controller(get_db_connection):
                         q_t2 = f"""
                             SELECT
                                 cat.{q_name(cat_desc)} AS vehicle_type,
-                                ROUND(SUM({join_revenue_expr}), 2) AS revenue
-                            FROM {sales_from}
-                            JOIN {q_tbl(cat_tbl)} cat ON s.{q_name(sales_mat)} = cat.{q_name(cat_mat)}
+                                ROUND(SUM(ms.mat_rev), 2) AS revenue
+                            FROM (
+                                SELECT s.{q_name(sales_mat)} AS mat_id, SUM({join_revenue_expr}) AS mat_rev
+                                FROM {sales_from}
+                                WHERE s.{q_name(sales_mat)} IS NOT NULL
+                                GROUP BY s.{q_name(sales_mat)}
+                            ) ms
+                            JOIN {q_tbl(cat_tbl)} cat ON (ms.mat_id = cat.{q_name(cat_mat)} OR LTRIM(ms.mat_id, '0') = LTRIM(cat.{q_name(cat_mat)}, '0'))
                             WHERE cat.{q_name(cat_desc)} IS NOT NULL AND cat.{q_name(cat_desc)} <> ''
                             GROUP BY cat.{q_name(cat_desc)}
                             ORDER BY revenue DESC
@@ -2162,9 +2240,14 @@ def default_dashboard_metrics_controller(get_db_connection):
                         q_t3 = f"""
                             SELECT
                                 sm.{q_name(sku_tyre)} AS vehicle_type,
-                                ROUND(SUM({join_revenue_expr}), 2) AS revenue
-                            FROM {sales_from}
-                            JOIN {q_tbl(sku_tbl)} sm ON s.{q_name(sales_mat)} = sm.{q_name(sku_mat)}
+                                ROUND(SUM(ms.mat_rev), 2) AS revenue
+                            FROM (
+                                SELECT s.{q_name(sales_mat)} AS mat_id, SUM({join_revenue_expr}) AS mat_rev
+                                FROM {sales_from}
+                                WHERE s.{q_name(sales_mat)} IS NOT NULL
+                                GROUP BY s.{q_name(sales_mat)}
+                            ) ms
+                            JOIN {q_tbl(sku_tbl)} sm ON (ms.mat_id = sm.{q_name(sku_mat)} OR LTRIM(ms.mat_id, '0') = LTRIM(sm.{q_name(sku_mat)}, '0'))
                             WHERE sm.{q_name(sku_tyre)} IS NOT NULL AND sm.{q_name(sku_tyre)} NOT IN ('', '0', '-')
                             GROUP BY sm.{q_name(sku_tyre)}
                             ORDER BY revenue DESC
@@ -2177,11 +2260,88 @@ def default_dashboard_metrics_controller(get_db_connection):
                     except Exception as tyre_err:
                         print(f"[Default Metrics] SKU tyre_type query failed: {tyre_err}")
 
-        # 3. Leading Region
+        # 3. Leading Region (Prioritize Customer Market Geography over Factory Plant location)
         leading_region = "N/A"
         if has_revenue:
-            # Plant -> Territory -> Region
-            if terr_tbl and reg_tbl:
+            # Customer -> Territory -> Region (True customer sales market geography)
+            if cust_tbl and reg_tbl:
+                sales_cust = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
+                cust_id = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
+                r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
+
+                if terr_tbl:
+                    cust_terr = check_col(table_columns[cust_tbl], ["bzirk", "territory", "territory_code"])
+                    terr_code = check_col(table_columns[terr_tbl], ["bzirk", "territory_code", "territory"])
+                    terr_reg = check_col(table_columns[terr_tbl], ["regio", "region_code", "region", "area"])
+                    cust_reg = check_col(table_columns[cust_tbl], ["regio", "region_code", "region"])
+                    r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
+
+                    if sales_cust and cust_id and cust_terr and terr_code and terr_reg and r_code and r_name:
+                        try:
+                            # Pre-aggregate by dealer_code for fast execution
+                            q_r3 = f"""
+                                SELECT
+                                    COALESCE(r.{q_name(r_name)}, r.{q_name(r_code)}, 'Unknown') AS region_name,
+                                    ROUND(SUM(ds.dealer_rev), 2) AS revenue
+                                FROM (
+                                    SELECT s.{q_name(sales_cust)} AS d_code, SUM({join_revenue_expr}) AS dealer_rev
+                                    FROM {sales_from}
+                                    WHERE s.{q_name(sales_cust)} IS NOT NULL
+                                    GROUP BY s.{q_name(sales_cust)}
+                                ) ds
+                                JOIN {q_tbl(cust_tbl)} c ON (ds.d_code = c.{q_name(cust_id)} OR LTRIM(ds.d_code, '0') = LTRIM(c.{q_name(cust_id)}, '0'))
+                                LEFT JOIN {q_tbl(terr_tbl)} t ON c.{q_name(cust_terr)} = t.{q_name(terr_code)}
+                                LEFT JOIN {q_tbl(reg_tbl)} r ON (t.{q_name(terr_reg)} = r.{q_name(r_code)} OR c.{q_name(cust_reg)} = r.{q_name(r_code)})
+                                WHERE (c.{q_name('KLABC')} IS NULL OR c.{q_name('KLABC')} <> 'X')
+                                  AND r.{q_name(r_name)} IS NOT NULL AND r.{q_name(r_name)} <> ''
+                                GROUP BY COALESCE(r.{q_name(r_name)}, r.{q_name(r_code)}, 'Unknown')
+                                ORDER BY revenue DESC
+                                LIMIT 1
+                            """
+                            execute_query(cursor, q_r3, is_hana=is_hana)
+                            row = fetchone_dict(cursor)
+                            if row and row.get("region_name"):
+                                leading_region = row["region_name"]
+                        except Exception as reg_err:
+                            print(f"[Default Metrics] Customer territory region query failed: {reg_err}")
+
+            # Fallback direct Customer -> Region
+            if leading_region == "N/A" and cust_tbl and reg_tbl:
+                sales_cust = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
+                cust_id = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
+                cust_reg = check_col(table_columns[cust_tbl], ["regio", "region_code", "region"])
+                r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
+                r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
+
+                if sales_cust and cust_id and cust_reg and r_code and r_name:
+                    try:
+                        q_r_direct = f"""
+                            SELECT
+                                r.{q_name(r_name)} AS region_name,
+                                ROUND(SUM(ds.dealer_rev), 2) AS revenue
+                            FROM (
+                                SELECT s.{q_name(sales_cust)} AS d_code, SUM({join_revenue_expr}) AS dealer_rev
+                                FROM {sales_from}
+                                WHERE s.{q_name(sales_cust)} IS NOT NULL
+                                GROUP BY s.{q_name(sales_cust)}
+                            ) ds
+                            JOIN {q_tbl(cust_tbl)} c ON (ds.d_code = c.{q_name(cust_id)} OR LTRIM(ds.d_code, '0') = LTRIM(c.{q_name(cust_id)}, '0'))
+                            JOIN {q_tbl(reg_tbl)} r ON c.{q_name(cust_reg)} = r.{q_name(r_code)}
+                            WHERE (c.{q_name('KLABC')} IS NULL OR c.{q_name('KLABC')} <> 'X')
+                              AND r.{q_name(r_name)} IS NOT NULL AND r.{q_name(r_name)} <> ''
+                            GROUP BY r.{q_name(r_name)}
+                            ORDER BY revenue DESC
+                            LIMIT 1
+                        """
+                        execute_query(cursor, q_r_direct, is_hana=is_hana)
+                        row = fetchone_dict(cursor)
+                        if row and row.get("region_name"):
+                            leading_region = row["region_name"]
+                    except Exception as reg_err:
+                        print(f"[Default Metrics] Direct customer region query failed: {reg_err}")
+
+            # Last resort fallback: Plant -> Territory -> Region (only if Customer Master unavailable)
+            if leading_region == "N/A" and terr_tbl and reg_tbl:
                 sales_plant = check_col(sales_cols, ["plant", "werks"])
                 terr_werks = check_col(table_columns[terr_tbl], ["werks", "plant"])
                 terr_area = check_col(table_columns[terr_tbl], ["area", "region_code", "region", "regio"])
@@ -2209,46 +2369,13 @@ def default_dashboard_metrics_controller(get_db_connection):
                     except Exception as reg_err:
                         print(f"[Default Metrics] Plant territory region query failed: {reg_err}")
 
-            # Customer -> Territory -> Region
-            if leading_region == "N/A" and cust_tbl and reg_tbl:
-                sales_cust = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
-                cust_id = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
-                r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
-
-                if terr_tbl:
-                    cust_terr = check_col(table_columns[cust_tbl], ["bzirk", "territory", "territory_code"])
-                    terr_code = check_col(table_columns[terr_tbl], ["bzirk", "territory_code", "territory"])
-                    terr_reg = check_col(table_columns[terr_tbl], ["regio", "region_code", "region", "area"])
-                    r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
-
-                    if sales_cust and cust_id and cust_terr and terr_code and terr_reg and r_code and r_name:
-                        try:
-                            q_r3 = f"""
-                                SELECT
-                                    r.{q_name(r_name)} AS region_name,
-                                    ROUND(SUM({join_revenue_expr}), 2) AS revenue
-                                FROM {sales_from}
-                                JOIN {q_tbl(cust_tbl)} c ON s.{q_name(sales_cust)} = c.{q_name(cust_id)}
-                                JOIN {q_tbl(terr_tbl)} t ON c.{q_name(cust_terr)} = t.{q_name(terr_code)}
-                                JOIN {q_tbl(reg_tbl)} r ON t.{q_name(terr_reg)} = r.{q_name(r_code)}
-                                WHERE r.{q_name(r_name)} IS NOT NULL AND r.{q_name(r_name)} <> ''
-                                GROUP BY r.{q_name(r_name)}
-                                ORDER BY revenue DESC
-                                LIMIT 1
-                            """
-                            execute_query(cursor, q_r3, is_hana=is_hana)
-                            row = fetchone_dict(cursor)
-                            if row and row.get("region_name"):
-                                leading_region = row["region_name"]
-                        except Exception as reg_err:
-                            print(f"[Default Metrics] Joined territory region query failed: {reg_err}")
-
         # 4. YoY Growth
         current_year = 0.0
         previous_year = 0.0
+        current_year_num = None
+        prev_year_num = None
         yoy = 0.0
         yoy_subtext = "No data available"
-        real_date_col = check_col(sales_cols, ["invoice_date", "date", "billing__doc_date", "billing_doc_date", "fkdat"])
 
         if has_revenue and real_date_col:
             try:
@@ -2278,7 +2405,7 @@ def default_dashboard_metrics_controller(get_db_connection):
                         if previous_year > 0:
                             yoy = round(((current_year - previous_year) / previous_year) * 100, 2)
                             if current_year_num - prev_year_num == 1:
-                                yoy_subtext = "Compared to last year"
+                                yoy_subtext = f"Compared to {prev_year_num}"
                             else:
                                 yoy_subtext = f"Compared to {prev_year_num}"
                         else:
@@ -2435,25 +2562,55 @@ def default_dashboard_metrics_controller(get_db_connection):
         # 10. Sales Target and Achievement
         sales_target_val = "N/A"
         achievement_val = "N/A"
+        target_subtext = "Target sales"
+        ach_subtext = "Current achievement"
         if target_tbl:
             try:
                 target_col = check_col(table_columns[target_tbl], ["plan_value", "rev_plan_val", "plan_ho_val", "rev_plan", "org_plan", "value", "target", "target_value", "sales_target"])
+                ymonth_col = check_col(table_columns[target_tbl], ["ymonth", "year_month", "month", "calmonth"])
                 if target_col:
-                    if is_hana:
-                        execute_query(cursor, f"SELECT SUM(COALESCE({q_name(target_col)}, 0)) AS total_target FROM {q_tbl(target_tbl)}", is_hana=is_hana)
+                    t_val = 0.0
+                    ref_sales = 0.0
+                    # Try active year target first (e.g. 2026)
+                    target_filter = ""
+                    if ymonth_col and current_year > 0 and current_year_num:
+                        target_filter = f"WHERE CAST({q_name(ymonth_col)} AS NVARCHAR(20)) LIKE '{current_year_num}%'"
+                        ref_sales = current_year
+                        target_subtext = f"{current_year_num} Target"
+                        ach_subtext = f"{current_year_num} Achievement"
                     else:
-                        execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(target_col)}), ',', '') AS DECIMAL(18,2))) AS total_target FROM {q_tbl(target_tbl)}", is_hana=is_hana)
-                    t_row = fetchone_dict(cursor)
-                    if t_row and t_row.get("total_target") is not None:
-                        t_val = float(t_row["total_target"])
-                        if t_val > 0:
-                            if t_val >= 10000000: sales_target_val = f"₹{(t_val / 10000000):.2f} Cr"
-                            elif t_val >= 100000: sales_target_val = f"₹{(t_val / 100000):.2f} Lac"
-                            else: sales_target_val = f"₹{t_val:,.2f}"
+                        ref_sales = total_revenue
+                        target_subtext = "Lifetime Target"
+                        ach_subtext = "Lifetime Achievement"
 
-                            if total_revenue > 0:
-                                ach = (total_revenue / t_val) * 100
-                                achievement_val = f"{ach:.2f}%"
+                    if is_hana:
+                        execute_query(cursor, f"SELECT SUM(COALESCE({q_name(target_col)}, 0)) AS total_target FROM {q_tbl(target_tbl)} {target_filter}", is_hana=is_hana)
+                    else:
+                        execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(target_col)}), ',', '') AS DECIMAL(18,2))) AS total_target FROM {q_tbl(target_tbl)} {target_filter}", is_hana=is_hana)
+                    t_row = fetchone_dict(cursor)
+                    if t_row and t_row.get("total_target") is not None and float(t_row["total_target"]) > 0:
+                        t_val = float(t_row["total_target"])
+                    elif target_filter:
+                        # Fallback to total target if year filter yielded zero
+                        if is_hana:
+                            execute_query(cursor, f"SELECT SUM(COALESCE({q_name(target_col)}, 0)) AS total_target FROM {q_tbl(target_tbl)}", is_hana=is_hana)
+                        else:
+                            execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(target_col)}), ',', '') AS DECIMAL(18,2))) AS total_target FROM {q_tbl(target_tbl)}", is_hana=is_hana)
+                        t_row = fetchone_dict(cursor)
+                        if t_row and t_row.get("total_target") is not None:
+                            t_val = float(t_row["total_target"])
+                            ref_sales = total_revenue
+                            target_subtext = "Lifetime Target"
+                            ach_subtext = "Lifetime Achievement"
+
+                    if t_val > 0:
+                        if t_val >= 10000000: sales_target_val = f"₹{(t_val / 10000000):.2f} Cr"
+                        elif t_val >= 100000: sales_target_val = f"₹{(t_val / 100000):.2f} Lac"
+                        else: sales_target_val = f"₹{t_val:,.2f}"
+
+                        if ref_sales > 0:
+                            ach = (ref_sales / t_val) * 100
+                            achievement_val = f"{ach:.2f}%"
             except Exception as e:
                 print(f"[Default Metrics] Sales target query failed: {e}")
 
@@ -2477,11 +2634,31 @@ def default_dashboard_metrics_controller(get_db_connection):
         elif total_revenue >= 100000:
             formatted_revenue = f"₹{(total_revenue / 100000):.2f} Lac"
 
+        if min_sales_yr and max_sales_yr:
+            rev_subtext = f"Lifetime revenue ({min_sales_yr}-{max_sales_yr})"
+        else:
+            rev_subtext = "Lifetime revenue"
+
+        # Format Sales Actual
+        actual_subtext = "Actual sales"
+        if current_year > 0 and current_year_num:
+            actual_revenue = current_year
+            if actual_revenue >= 10000000:
+                formatted_actual = f"₹{(actual_revenue / 10000000):.2f} Cr"
+            elif actual_revenue >= 100000:
+                formatted_actual = f"₹{(actual_revenue / 100000):.2f} Lac"
+            else:
+                formatted_actual = f"₹{actual_revenue:,.2f}"
+            actual_subtext = f"{current_year_num} Actual"
+        else:
+            formatted_actual = formatted_revenue
+            actual_subtext = "Lifetime Actual"
+
         metrics_data = {
             "metric_1": {
                 "label": "Total Sales Revenue", 
                 "value": formatted_revenue, 
-                "subtext": "Lifetime revenue"
+                "subtext": rev_subtext
             },
             "metric_2": {
                 "label": "Top Performing Tyre", 
@@ -2498,9 +2675,9 @@ def default_dashboard_metrics_controller(get_db_connection):
                 "value": f"{yoy:+0.1f}%" if previous_year > 0 else ("0.0%" if current_year > 0 else "N/A"), 
                 "subtext": yoy_subtext
             },
-            "metric_5": {"label": "Achievement", "value": achievement_val, "subtext": "Current achievement"},
-            "metric_6": {"label": "Sales Target", "value": sales_target_val, "subtext": "Target sales"},
-            "metric_7": {"label": "Sales Actual", "value": formatted_revenue, "subtext": "Actual sales"},
+            "metric_5": {"label": "Achievement", "value": achievement_val, "subtext": ach_subtext},
+            "metric_6": {"label": "Sales Target", "value": sales_target_val, "subtext": target_subtext},
+            "metric_7": {"label": "Sales Actual", "value": formatted_actual, "subtext": actual_subtext},
             "metric_8": {"label": "SAS IN", "value": sas_in_val, "subtext": "SAS IN value"},
             "metric_9": {"label": "SAS Variance", "value": sas_variance_val, "subtext": "Variance"},
             "metric_10": {"label": "Billing Scope", "value": billing_scope, "subtext": "Customers billed"},
