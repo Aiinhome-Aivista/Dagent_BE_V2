@@ -1259,7 +1259,6 @@ def _mistral(system, user, retries=2, temperature=0.15):
             print(f"[LLM] error attempt {attempt+1}: {type(e).__name__}: {e}")
             print(f"[LLM] Traceback:\n{traceback.format_exc()}")
             if attempt == retries: return None
-            import time
             time.sleep(1)
     return None
 
@@ -2864,11 +2863,13 @@ def session_rag_chat_controller(get_connection_func):
 
                                 # Ensure Territory, Region, and Zone Master use LEFT JOIN so missing territories never drop customer sales
                                 run_query = re.sub(
-                                    r'\bJOIN\s+(\"?SAP_S4\"?\.)?\"?(ZIVF_TerritoryMaster_01_TR|ZIVF_RegionMaster_MD_01|ZIVF_ZoneMaster_01_TR)\"?',
+                                    r'(?<!LEFT\s)\bJOIN\s+(\"?SAP_S4\"?\.)?\"?(ZIVF_TerritoryMaster_01_TR|ZIVF_RegionMaster_MD_01|ZIVF_ZoneMaster_01_TR)\"?',
                                     r'LEFT JOIN \1"\2"',
                                     run_query,
                                     flags=re.IGNORECASE
                                 )
+                                # Collapse any accidental duplicated LEFT JOINs (e.g. "LEFT LEFT JOIN" -> "LEFT JOIN")
+                                run_query = re.sub(r'\b(?:LEFT\s+)+JOIN\b', 'LEFT JOIN', run_query, flags=re.IGNORECASE)
 
                                 # Auto-heal exact string equality on names/descriptions to case-insensitive UPPER LIKE in HANA
                                 run_query = re.sub(
