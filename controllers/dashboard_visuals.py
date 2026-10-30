@@ -3282,13 +3282,20 @@ ORDER BY yr DESC"""
                             ach_subtext = "Lifetime Achievement"
 
                     if t_val > 0:
-                        if t_val >= 10000000: sales_target_val = f"₹{(t_val / 10000000):.2f} Cr"
-                        elif t_val >= 100000: sales_target_val = f"₹{(t_val / 100000):.2f} Lac"
-                        else: sales_target_val = f"₹{t_val:,.2f}"
+                        if is_hana:
+                            t_val_cr = t_val / 10000000 if t_val >= 10000000 else t_val
+                            sales_target_val = f"₹{t_val_cr:,.2f} Cr"
+                            if ref_sales > 0:
+                                ach = (ref_sales / t_val_cr) * 100
+                                achievement_val = f"{ach:.2f}%"
+                        else:
+                            if t_val >= 10000000: sales_target_val = f"₹{(t_val / 10000000):.2f} Cr"
+                            elif t_val >= 100000: sales_target_val = f"₹{(t_val / 100000):.2f} Lac"
+                            else: sales_target_val = f"₹{t_val:,.2f}"
 
-                        if ref_sales > 0:
-                            ach = (ref_sales / t_val) * 100
-                            achievement_val = f"{ach:.2f}%"
+                            if ref_sales > 0:
+                                ach = (ref_sales / t_val) * 100
+                                achievement_val = f"{ach:.2f}%"
             except Exception as e:
                 print(f"[Default Metrics] Sales target query failed: {e}")
 
@@ -3357,11 +3364,15 @@ ORDER BY yr DESC"""
                     print(f"[Default Metrics] New dealer query failed: {e}")
 
         # Format total revenue
-        formatted_revenue = f"₹{float(total_revenue):,.2f}"
-        if total_revenue >= 10000000:
-            formatted_revenue = f"₹{(total_revenue / 10000000):.2f} Cr"
-        elif total_revenue >= 100000:
-            formatted_revenue = f"₹{(total_revenue / 100000):.2f} Lac"
+        # Total Sales Revenue
+        if is_hana:
+            formatted_revenue = f"₹{float(total_revenue):,.2f} Cr"
+        else:
+            formatted_revenue = f"₹{float(total_revenue):,.2f}"
+            if total_revenue >= 10000000:
+                formatted_revenue = f"₹{(total_revenue / 10000000):.2f} Cr"
+            elif total_revenue >= 100000:
+                formatted_revenue = f"₹{(total_revenue / 100000):.2f} Lac"
 
         if min_sales_yr and max_sales_yr:
             rev_subtext = f"Lifetime revenue ({min_sales_yr}-{max_sales_yr})"
@@ -3372,12 +3383,15 @@ ORDER BY yr DESC"""
         actual_subtext = "Actual sales"
         if current_year > 0 and current_year_num:
             actual_revenue = current_year
-            if actual_revenue >= 10000000:
-                formatted_actual = f"₹{(actual_revenue / 10000000):.2f} Cr"
-            elif actual_revenue >= 100000:
-                formatted_actual = f"₹{(actual_revenue / 100000):.2f} Lac"
+            if is_hana:
+                formatted_actual = f"₹{actual_revenue:,.2f} Cr"
             else:
-                formatted_actual = f"₹{actual_revenue:,.2f}"
+                if actual_revenue >= 10000000:
+                    formatted_actual = f"₹{(actual_revenue / 10000000):.2f} Cr"
+                elif actual_revenue >= 100000:
+                    formatted_actual = f"₹{(actual_revenue / 100000):.2f} Lac"
+                else:
+                    formatted_actual = f"₹{actual_revenue:,.2f}"
             actual_subtext = f"{current_year_num} Actual"
         else:
             formatted_actual = formatted_revenue
