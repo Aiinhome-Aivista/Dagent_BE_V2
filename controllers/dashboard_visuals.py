@@ -2974,54 +2974,202 @@ ORDER BY yr DESC"""
                 except Exception as yoy_err:
                     print(f"[Default Metrics] YoY query failed: {yoy_err}")
 
-        # 5. Billing Scope (Distinct active customers billed)
+        # 5. Billing Scope, Dealer Spread, Financials & Network Health KPIs
         billing_scope = "N/A"
-        real_cust_col_sales = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
-        if real_cust_col_sales:
-            try:
-                execute_query(cursor, f"SELECT COUNT(DISTINCT s.{q_name(real_cust_col_sales)}) AS cust_count FROM {sales_from}", is_hana=is_hana)
-                row = fetchone_dict(cursor)
-                if row and row.get("cust_count") is not None:
-                    billing_scope = str(row["cust_count"])
-            except Exception as e:
-                print(f"[Default Metrics] Billing scope query failed: {e}")
-
-        # 6. Dealer Spread (Active dealers with CH_TYPE='DL', KTOKD in ('Z001', '0001') or DLR_CNT > 0)
         dealer_spread = "N/A"
-        if real_cust_col_sales and cust_tbl:
-            cust_id_col = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
-            dealer_type_col = check_col(table_columns[cust_tbl], ["ch_type", "ktokd", "acc_grp", "customer_type"])
-            dlr_cnt_col = check_col(table_columns[cust_tbl], ["dlr_cnt", "dlrcnt", "dealer_cnt"])
-            klabc_col = check_col(table_columns[cust_tbl], ["klabc"])
-            klabc_filter = f"AND (c.{q_name(klabc_col)} IS NULL OR c.{q_name(klabc_col)} <> 'X')" if klabc_col else ""
+        exposure_val = "N/A"
+        overdue_val = "N/A"
+        overdue_num = 0.0
+        exposure_num = 0.0
+        sas_in_val = "₹0.00"
+        sas_variance_val = "0.0%"
+        rotation_val = "0.0x"
+        rot_subtext = "Receivables turnover"
+        attrition = "N/A"
+        att_subtext = "Inactive from last month"
+        new_dealer_val = "N/A"
+        target_yr_str = str(current_year_num) if current_year_num else str(datetime.now().year)
+        new_dealer_subtext = f"Onboarded in {target_yr_str}"
 
-            if cust_id_col:
+        if is_hana and curr_sales_tbl and hist_sales_tbl:
+            # ── Dedicated Optimized SAP HANA Path ──
+            cust_tbl_h = find_table(["zivfcustomermaster", "customermaster", "customer"])
+            canc_tbl_h = find_table(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled"])
+
+            # 5. Billing Scope (Distinct customers billed with valid distribution channel 10)
+            try:
+                q_bscope_h = f"""
+                SELECT COUNT(DISTINCT s."dealer_code") AS cust_count
+                FROM (
+                    SELECT "dealer_code", "distribution_channel", "indicator_cancel", "invoice_number", "plant", "FKART"
+                    FROM {q_tbl(hist_sales_tbl)}
+                    UNION ALL
+                    SELECT "dealer_code", "distribution_channel", "indicator_cancel", "invoice_number", "plant", "FKART"
+                    FROM {q_tbl(curr_sales_tbl)}
+                ) s
+                WHERE CAST(s."distribution_channel" AS NVARCHAR(10)) = '10'
+                  AND COALESCE(s."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+                """
+                if canc_tbl_h:
+                    q_bscope_h += f"""
+                  AND NOT EXISTS (
+                      SELECT 1 FROM {q_tbl(canc_tbl_h)} c
+                      WHERE CAST(c."distribution_channel" AS NVARCHAR(10)) = '10'
+                        AND c."invoice_number" = s."invoice_number"
+                        AND c."plant" = s."plant" AND c."FKART" = s."FKART"
+                  )"""
+                if cust_tbl_h:
+                    q_bscope_h += f"""
+                  AND NOT EXISTS (
+                      SELECT 1 FROM {q_tbl(cust_tbl_h)} cm
+                      WHERE cm."KUNNR" = s."dealer_code" AND UPPER(TRIM(cm."KLABC")) = 'X'
+                  )"""
+                execute_query(cursor, q_bscope_h, is_hana=True)
+                b_row = fetchone_dict(cursor)
+                if b_row and b_row.get("cust_count") is not None:
+                    billing_scope = str(b_row["cust_count"])
+                    print(f"[Default Metrics] HANA Billing Scope: {billing_scope}")
+            except Exception as b_err:
+                print(f"[Default Metrics] HANA Billing Scope failed: {b_err}")
+
+            # 6 to 10 & 12: CustomerMaster-based KPIs in a single fast query
+            if cust_tbl_h:
                 try:
-                    conds = []
-                    if dealer_type_col:
-                        conds.append(f"UPPER(TRIM(CAST(c.{q_name(dealer_type_col)} AS NVARCHAR(20)))) IN ('DL', '0001', 'Z001')")
-                    if dlr_cnt_col:
-                        conds.append(f"COALESCE(c.{q_name(dlr_cnt_col)}, 0) > 0")
-                    dealer_filter = f"AND ({' OR '.join(conds)})" if conds else ""
-
-                    q_ds = f"""
-                        SELECT COUNT(DISTINCT s.d_code) AS dealer_count
-                        FROM (
-                            SELECT DISTINCT s.{q_name(real_cust_col_sales)} AS d_code
-                            FROM {sales_from}
-                            WHERE s.{q_name(real_cust_col_sales)} IS NOT NULL
-                        ) s
-                        JOIN {q_tbl(cust_tbl)} c 
-                          ON (s.d_code = c.{q_name(cust_id_col)} OR LTRIM(s.d_code, '0') = LTRIM(CAST(c.{q_name(cust_id_col)} AS NVARCHAR(20)), '0'))
-                        WHERE 1=1 {klabc_filter} {dealer_filter}
+                    q_cm_kpis = f"""
+                    SELECT 
+                        COUNT(DISTINCT CASE 
+                            WHEN (UPPER(TRIM(cm."CH_TYPE")) = 'DL' OR cm."KTOKD" IN ('0001', 'Z001') OR COALESCE(cm."DLR_CNT", 0) > 0 OR UPPER(TRIM(cm."ACTIVE_CM")) = 'Y')
+                            THEN cm."KUNNR" END
+                        ) AS active_dealers,
+                        
+                        SUM(CASE WHEN COALESCE(cm."OUTSTAND", 0) > 0 THEN cm."OUTSTAND" ELSE 0 END) AS tot_overdue,
+                        SUM(COALESCE(cm."EXPOSURE", 0)) AS tot_exposure,
+                        
+                        SUM(COALESCE(cm."SAS_CURR", cm."DMBTR_SAS", cm."OPEN_SAS", 0)) AS tot_sas_in,
+                        SUM(COALESCE(cm."SAS_CURR", 0)) AS curr_sas,
+                        SUM(COALESCE(cm."OPEN_SAS", 0)) AS open_sas,
+                        
+                        SUM(COALESCE(cm."SALE_TOT", 0)) AS tot_sale_tot,
+                        
+                        COUNT(DISTINCT CASE 
+                            WHEN LEFT(CAST(cm."ERDAT" AS NVARCHAR(20)), 4) = '{target_yr_str}' 
+                              OR LEFT(CAST(cm."FS_BILL_DT" AS NVARCHAR(20)), 4) = '{target_yr_str}'
+                            THEN cm."KUNNR" END
+                        ) AS new_dealers_curr,
+                        
+                        COUNT(DISTINCT CASE 
+                            WHEN UPPER(TRIM(cm."ATTRATION")) IN ('Y', '1', 'TRUE') 
+                              OR UPPER(TRIM(cm."LM_NOBILL")) = 'Y'
+                            THEN cm."KUNNR" END
+                        ) AS attrition_count
+                    FROM {q_tbl(cust_tbl_h)} cm
+                    WHERE COALESCE(cm."KLABC", '') <> 'X'
                     """
-                    execute_query(cursor, q_ds, is_hana=is_hana)
+                    execute_query(cursor, q_cm_kpis, is_hana=True)
+                    cm_row = fetchone_dict(cursor)
+                    if cm_row:
+                        # Dealer Spread
+                        act_dlrs = int(cm_row.get("active_dealers") or 0)
+                        if act_dlrs > 0:
+                            dealer_spread = str(act_dlrs)
+                        elif billing_scope != "N/A":
+                            dealer_spread = billing_scope
+
+                        # Overdue
+                        od_val = float(cm_row.get("tot_overdue") or 0)
+                        overdue_num = od_val
+                        if od_val >= 10000000: overdue_val = f"₹{(od_val / 10000000):.2f} Cr"
+                        elif od_val >= 100000: overdue_val = f"₹{(od_val / 100000):.2f} Lac"
+                        elif od_val > 0: overdue_val = f"₹{od_val:,.2f}"
+                        else: overdue_val = "₹0.00"
+
+                        # Exposure
+                        exp_val = float(cm_row.get("tot_exposure") or 0)
+                        exposure_num = exp_val
+                        if exp_val >= 10000000: exposure_val = f"₹{(exp_val / 10000000):.2f} Cr"
+                        elif exp_val >= 100000: exposure_val = f"₹{(exp_val / 100000):.2f} Lac"
+                        elif exp_val > 0: exposure_val = f"₹{exp_val:,.2f}"
+                        else: exposure_val = "₹0.00"
+
+                        # SAS IN
+                        sas_val = float(cm_row.get("tot_sas_in") or 0)
+                        if sas_val >= 10000000: sas_in_val = f"₹{(sas_val / 10000000):.2f} Cr"
+                        elif sas_val >= 100000: sas_in_val = f"₹{(sas_val / 100000):.2f} Lac"
+                        elif sas_val > 0: sas_in_val = f"₹{sas_val:,.2f}"
+                        else: sas_in_val = "₹0.00"
+
+                        # SAS Variance
+                        c_sas = float(cm_row.get("curr_sas") or 0)
+                        o_sas = float(cm_row.get("open_sas") or 0)
+                        if o_sas > 0:
+                            s_var = ((c_sas - o_sas) / o_sas) * 100
+                            sas_variance_val = f"{s_var:+.1f}%"
+                        else:
+                            sas_variance_val = "0.0%"
+
+                        # Rotation
+                        tot_st = float(cm_row.get("tot_sale_tot") or 0)
+                        if od_val > 0 and tot_st > 0:
+                            rot = round(tot_st / od_val, 1)
+                            rotation_val = f"{rot:.1f}x"
+                            rot_subtext = "Receivables turnover"
+                        elif current_year > 0 and od_val > 0:
+                            rot = round((current_year * 10000000) / od_val, 1)
+                            rotation_val = f"{rot:.1f}x"
+                            rot_subtext = "Receivables turnover"
+                        else:
+                            rotation_val = "0.0x"
+                            rot_subtext = "Receivables turnover"
+
+                        # New Dealer
+                        nd_cnt = int(cm_row.get("new_dealers_curr") or 0)
+                        if nd_cnt > 0:
+                            new_dealer_val = str(nd_cnt)
+                        else:
+                            new_dealer_val = "0"
+
+                        # Attrition
+                        att_cnt = int(cm_row.get("attrition_count") or 0)
+                        if att_cnt > 0:
+                            attrition = str(att_cnt)
+                            att_subtext = f"Inactive since Sep {target_yr_str}"
+                        else:
+                            attrition = "0"
+                            att_subtext = f"Inactive since Sep {target_yr_str}"
+
+                        print(f"[Default Metrics] HANA KPIs: Dealers={dealer_spread}, Overdue={overdue_val}, Exposure={exposure_val}, New={new_dealer_val}, Attrition={attrition}")
+                except Exception as cm_err:
+                    print(f"[Default Metrics] HANA CustomerMaster KPIs query failed: {cm_err}")
+
+        else:
+            # ── Non-HANA / MySQL Fallback Path ──
+            real_cust_col_sales = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
+            if real_cust_col_sales:
+                try:
+                    execute_query(cursor, f"SELECT COUNT(DISTINCT s.{q_name(real_cust_col_sales)}) AS cust_count FROM {sales_from}", is_hana=is_hana)
                     row = fetchone_dict(cursor)
-                    if row and row.get("dealer_count") is not None and int(row["dealer_count"]) > 0:
-                        dealer_spread = str(row["dealer_count"])
-                    else:
-                        # Fallback: All active billed customers in master (with KLABC <> 'X')
-                        q_ds_fb = f"""
+                    if row and row.get("cust_count") is not None:
+                        billing_scope = str(row["cust_count"])
+                except Exception as e:
+                    print(f"[Default Metrics] Billing scope query failed: {e}")
+
+            if real_cust_col_sales and cust_tbl:
+                cust_id_col = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
+                dealer_type_col = check_col(table_columns[cust_tbl], ["ch_type", "ktokd", "acc_grp", "customer_type"])
+                dlr_cnt_col = check_col(table_columns[cust_tbl], ["dlr_cnt", "dlrcnt", "dealer_cnt"])
+                klabc_col = check_col(table_columns[cust_tbl], ["klabc"])
+                klabc_filter = f"AND (c.{q_name(klabc_col)} IS NULL OR c.{q_name(klabc_col)} <> 'X')" if klabc_col else ""
+
+                if cust_id_col:
+                    try:
+                        conds = []
+                        if dealer_type_col:
+                            conds.append(f"UPPER(TRIM(CAST(c.{q_name(dealer_type_col)} AS NVARCHAR(20)))) IN ('DL', '0001', 'Z001')")
+                        if dlr_cnt_col:
+                            conds.append(f"COALESCE(c.{q_name(dlr_cnt_col)}, 0) > 0")
+                        dealer_filter = f"AND ({' OR '.join(conds)})" if conds else ""
+
+                        q_ds = f"""
                             SELECT COUNT(DISTINCT s.d_code) AS dealer_count
                             FROM (
                                 SELECT DISTINCT s.{q_name(real_cust_col_sales)} AS d_code
@@ -3030,213 +3178,93 @@ ORDER BY yr DESC"""
                             ) s
                             JOIN {q_tbl(cust_tbl)} c 
                               ON (s.d_code = c.{q_name(cust_id_col)} OR LTRIM(s.d_code, '0') = LTRIM(CAST(c.{q_name(cust_id_col)} AS NVARCHAR(20)), '0'))
-                            WHERE 1=1 {klabc_filter}
+                            WHERE 1=1 {klabc_filter} {dealer_filter}
                         """
-                        execute_query(cursor, q_ds_fb, is_hana=is_hana)
-                        row_fb = fetchone_dict(cursor)
-                        if row_fb and row_fb.get("dealer_count") is not None and int(row_fb["dealer_count"]) > 0:
-                            dealer_spread = str(row_fb["dealer_count"])
+                        execute_query(cursor, q_ds, is_hana=is_hana)
+                        row = fetchone_dict(cursor)
+                        if row and row.get("dealer_count") is not None and int(row["dealer_count"]) > 0:
+                            dealer_spread = str(row["dealer_count"])
                         elif billing_scope != "N/A":
                             dealer_spread = billing_scope
-                except Exception as e:
-                    print(f"[Default Metrics] Dealer spread query failed: {e}")
-                    if billing_scope != "N/A":
-                        dealer_spread = billing_scope
-        if (not dealer_spread or str(dealer_spread) in ("0", "N/A")) and billing_scope not in ("0", "N/A"):
-            dealer_spread = billing_scope
+                    except Exception as e:
+                        print(f"[Default Metrics] Dealer spread query failed: {e}")
+                        if billing_scope != "N/A":
+                            dealer_spread = billing_scope
 
-        # 7. Credit Exposure and Outstanding
-        exposure_val = "N/A"
-        overdue_val = "N/A"
-        overdue_num = 0.0
-        exposure_num = 0.0
-        if cust_tbl:
-            exp_col = check_col(table_columns[cust_tbl], ["exposure"])
-            out_col = check_col(table_columns[cust_tbl], ["outstand", "outstanding"])
-            klabc_col = check_col(table_columns[cust_tbl], ["klabc"])
-            klabc_filter = f"WHERE ({q_name(klabc_col)} IS NULL OR {q_name(klabc_col)} <> 'X')" if klabc_col else "WHERE 1=1"
+            if cust_tbl:
+                exp_col = check_col(table_columns[cust_tbl], ["exposure"])
+                out_col = check_col(table_columns[cust_tbl], ["outstand", "outstanding"])
+                klabc_col = check_col(table_columns[cust_tbl], ["klabc"])
+                klabc_filter = f"WHERE ({q_name(klabc_col)} IS NULL OR {q_name(klabc_col)} <> 'X')" if klabc_col else "WHERE 1=1"
 
-            if exp_col:
-                try:
-                    if is_hana:
-                        execute_query(cursor, f"SELECT SUM(COALESCE({q_name(exp_col)}, 0)) AS val FROM {q_tbl(cust_tbl)} {klabc_filter} AND {q_name(exp_col)} IS NOT NULL", is_hana=is_hana)
-                    else:
+                if exp_col:
+                    try:
                         execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(exp_col)}), ',', '') AS DECIMAL(18,2))) AS val FROM {q_tbl(cust_tbl)} {klabc_filter} AND {q_name(exp_col)} IS NOT NULL AND {q_name(exp_col)} != ''", is_hana=is_hana)
-                    row = fetchone_dict(cursor)
-                    if row and row.get("val") is not None:
-                        exposure_num = float(row["val"])
-                        if exposure_num >= 10000000: exposure_val = f"₹{(exposure_num / 10000000):.2f} Cr"
-                        elif exposure_num >= 100000: exposure_val = f"₹{(exposure_num / 100000):.2f} Lac"
-                        else: exposure_val = f"₹{exposure_num:,.2f}"
-                except Exception as e:
-                    print(f"[Default Metrics] Exposure query failed: {e}")
+                        row = fetchone_dict(cursor)
+                        if row and row.get("val") is not None:
+                            exposure_num = float(row["val"])
+                            if exposure_num >= 10000000: exposure_val = f"₹{(exposure_num / 10000000):.2f} Cr"
+                            elif exposure_num >= 100000: exposure_val = f"₹{(exposure_num / 100000):.2f} Lac"
+                            else: exposure_val = f"₹{exposure_num:,.2f}"
+                    except Exception as e:
+                        print(f"[Default Metrics] Exposure query failed: {e}")
 
-            if out_col:
-                try:
-                    if is_hana:
-                        execute_query(cursor, f"SELECT SUM(COALESCE({q_name(out_col)}, 0)) AS val FROM {q_tbl(cust_tbl)} {klabc_filter} AND {q_name(out_col)} IS NOT NULL", is_hana=is_hana)
-                    else:
+                if out_col:
+                    try:
                         execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(out_col)}), ',', '') AS DECIMAL(18,2))) AS val FROM {q_tbl(cust_tbl)} {klabc_filter} AND {q_name(out_col)} IS NOT NULL AND {q_name(out_col)} != ''", is_hana=is_hana)
-                    row = fetchone_dict(cursor)
-                    if row and row.get("val") is not None:
-                        overdue_num = float(row["val"])
-                        if overdue_num >= 10000000: overdue_val = f"₹{(overdue_num / 10000000):.2f} Cr"
-                        elif overdue_num >= 100000: overdue_val = f"₹{(overdue_num / 100000):.2f} Lac"
-                        else: overdue_val = f"₹{overdue_num:,.2f}"
-                except Exception as e:
-                    print(f"[Default Metrics] Outstanding query failed: {e}")
+                        row = fetchone_dict(cursor)
+                        if row and row.get("val") is not None:
+                            overdue_num = float(row["val"])
+                            if overdue_num >= 10000000: overdue_val = f"₹{(overdue_num / 10000000):.2f} Cr"
+                            elif overdue_num >= 100000: overdue_val = f"₹{(overdue_num / 100000):.2f} Lac"
+                            else: overdue_val = f"₹{overdue_num:,.2f}"
+                    except Exception as e:
+                        print(f"[Default Metrics] Outstanding query failed: {e}")
 
-        # 8. SAS IN & SAS Variance
-        sas_in_val = "₹0.00"
-        sas_variance_val = "0.0%"
-        sas_num = 0.0
-        if cust_tbl:
-            dmbtr_sas_col = check_col(table_columns[cust_tbl], ["dmbtr_sas", "dmbtrsas"])
-            sas_curr_col = check_col(table_columns[cust_tbl], ["sas_curr", "sascurr"])
-            open_sas_col = check_col(table_columns[cust_tbl], ["open_sas", "opensas"])
-            klabc_col = check_col(table_columns[cust_tbl], ["klabc"])
-            klabc_filter = f"WHERE ({q_name(klabc_col)} IS NULL OR {q_name(klabc_col)} <> 'X')" if klabc_col else "WHERE 1=1"
+                dmbtr_sas_col = check_col(table_columns[cust_tbl], ["dmbtr_sas", "dmbtrsas"])
+                sas_curr_col = check_col(table_columns[cust_tbl], ["sas_curr", "sascurr"])
+                open_sas_col = check_col(table_columns[cust_tbl], ["open_sas", "opensas"])
+                cols_to_sum = []
+                if dmbtr_sas_col: cols_to_sum.append(f"SUM(COALESCE({q_name(dmbtr_sas_col)}, 0)) AS d_sas")
+                if sas_curr_col: cols_to_sum.append(f"SUM(COALESCE({q_name(sas_curr_col)}, 0)) AS c_sas")
+                if open_sas_col: cols_to_sum.append(f"SUM(COALESCE({q_name(open_sas_col)}, 0)) AS o_sas")
+                if cols_to_sum:
+                    try:
+                        q_sas = f"SELECT {', '.join(cols_to_sum)} FROM {q_tbl(cust_tbl)} {klabc_filter}"
+                        execute_query(cursor, q_sas, is_hana=is_hana)
+                        row = fetchone_dict(cursor)
+                        if row:
+                            d_val = float(row.get("d_sas") or 0)
+                            c_val = float(row.get("c_sas") or 0)
+                            o_val = float(row.get("o_sas") or 0)
+                            sas_num = d_val if d_val > 0 else (c_val if c_val > 0 else o_val)
+                            if sas_num > 0:
+                                if sas_num >= 10000000: sas_in_val = f"₹{(sas_num / 10000000):.2f} Cr"
+                                elif sas_num >= 100000: sas_in_val = f"₹{(sas_num / 100000):.2f} Lac"
+                                else: sas_in_val = f"₹{sas_num:,.2f}"
+                                if o_val > 0:
+                                    s_var = ((c_val - o_val) / o_val) * 100
+                                    sas_variance_val = f"{s_var:+.1f}%"
+                    except Exception as e:
+                        print(f"[Default Metrics] SAS query failed: {e}")
 
-            cols_to_sum = []
-            if dmbtr_sas_col: cols_to_sum.append(f"SUM(COALESCE({q_name(dmbtr_sas_col)}, 0)) AS d_sas")
-            if sas_curr_col: cols_to_sum.append(f"SUM(COALESCE({q_name(sas_curr_col)}, 0)) AS c_sas")
-            if open_sas_col: cols_to_sum.append(f"SUM(COALESCE({q_name(open_sas_col)}, 0)) AS o_sas")
+                att_col = check_col(table_columns[cust_tbl], ["attration", "attrition"])
+                nobill_col = check_col(table_columns[cust_tbl], ["lm_nobill", "l2m_nobill", "l3m_nobill"])
+                target_att_cols = [c for c in [att_col, nobill_col] if c]
+                if target_att_cols:
+                    try:
+                        att_conds = [f"UPPER(TRIM(CAST({q_name(c)} AS NVARCHAR(10)))) IN ('Y', '1', 'X', 'TRUE')" for c in target_att_cols]
+                        q_att_cust = f"SELECT COUNT(*) AS att_count FROM {q_tbl(cust_tbl)} WHERE ({' OR '.join(att_conds)}) {klabc_filter.replace('WHERE', 'AND')}"
+                        execute_query(cursor, q_att_cust, is_hana=is_hana)
+                        row = fetchone_dict(cursor)
+                        if row and row.get("att_count") is not None and int(row["att_count"]) > 0:
+                            attrition = str(row["att_count"])
+                    except Exception as e:
+                        print(f"[Default Metrics] Attrition query failed: {e}")
 
-            if cols_to_sum:
-                try:
-                    q_sas = f"SELECT {', '.join(cols_to_sum)} FROM {q_tbl(cust_tbl)} {klabc_filter}"
-                    execute_query(cursor, q_sas, is_hana=is_hana)
-                    row = fetchone_dict(cursor)
-                    if row:
-                        d_val = float(row.get("d_sas") or 0)
-                        c_val = float(row.get("c_sas") or 0)
-                        o_val = float(row.get("o_sas") or 0)
-                        sas_num = d_val if d_val > 0 else (c_val if c_val > 0 else o_val)
-                        if sas_num > 0:
-                            if sas_num >= 10000000: sas_in_val = f"₹{(sas_num / 10000000):.2f} Cr"
-                            elif sas_num >= 100000: sas_in_val = f"₹{(sas_num / 100000):.2f} Lac"
-                            else: sas_in_val = f"₹{sas_num:,.2f}"
+            if attrition == "N/A":
+                attrition = "0"
 
-                            ref_base = current_year if current_year > 0 else total_revenue
-                            if ref_base > 0:
-                                s_var = ((sas_num / ref_base) * 100) if sas_num < ref_base else (((ref_base - sas_num) / ref_base) * 100)
-                                sas_variance_val = f"{s_var:+.1f}%"
-                        else:
-                            sas_in_val = "₹0.00"
-                            sas_variance_val = "0.0%"
-                except Exception as e:
-                    print(f"[Default Metrics] SAS query failed: {e}")
-
-        # 9. Rotation (Receivables Turnover Ratio = Sales / Outstanding)
-        rotation_val = "N/A"
-        rot_subtext = "Rotation metric"
-        if cust_tbl:
-            sale_tot_col = check_col(table_columns[cust_tbl], ["sale_tot", "saletot", "sale_avg"])
-            out_col = check_col(table_columns[cust_tbl], ["outstand", "outstanding"])
-            klabc_col = check_col(table_columns[cust_tbl], ["klabc"])
-            klabc_filter = f"WHERE ({q_name(klabc_col)} IS NULL OR {q_name(klabc_col)} <> 'X')" if klabc_col else "WHERE 1=1"
-
-            if sale_tot_col and out_col:
-                try:
-                    q_rot = f"""
-                        SELECT 
-                            SUM(COALESCE({q_name(sale_tot_col)}, 0)) AS tot_s,
-                            SUM(COALESCE({q_name(out_col)}, 0)) AS tot_o
-                        FROM {q_tbl(cust_tbl)}
-                        {klabc_filter}
-                    """
-                    execute_query(cursor, q_rot, is_hana=is_hana)
-                    r_row = fetchone_dict(cursor)
-                    if r_row:
-                        ts = float(r_row.get("tot_s") or 0)
-                        to = float(r_row.get("tot_o") or 0)
-                        if to > 0 and ts > 0:
-                            rot_ratio = ts / to
-                            rotation_val = f"{rot_ratio:.1f}x"
-                            rot_subtext = "Receivables turnover"
-                except Exception as e:
-                    print(f"[Default Metrics] Rotation CustomerMaster query failed: {e}")
-
-        if rotation_val == "N/A" and overdue_num > 0:
-            try:
-                ref_sales = current_year if current_year > 0 else total_revenue
-                if ref_sales > 0:
-                    monthly_sales = ref_sales / 12.0
-                    turns = round(monthly_sales / overdue_num, 1)
-                    if turns > 100:
-                        turns = round(ref_sales / overdue_num, 1)
-                    rotation_val = f"{turns:.1f}x"
-                    rot_subtext = "Receivables turnover"
-            except Exception as e:
-                print(f"[Default Metrics] Rotation turnover fallback failed: {e}")
-
-        if rotation_val == "N/A":
-            rotation_val = "12.0x"
-            rot_subtext = "Annual sales cycle"
-
-        # 10. Attrition (Inactive / no billing from last month)
-        attrition = "N/A"
-        att_subtext = "Inactive from last month"
-        if cust_tbl:
-            att_col = check_col(table_columns[cust_tbl], ["attration", "attrition"])
-            nobill_col = check_col(table_columns[cust_tbl], ["lm_nobill", "l2m_nobill", "l3m_nobill"])
-            klabc_col = check_col(table_columns[cust_tbl], ["klabc"])
-            klabc_filter = f"AND ({q_name(klabc_col)} IS NULL OR {q_name(klabc_col)} <> 'X')" if klabc_col else ""
-
-            target_att_cols = [c for c in [att_col, nobill_col] if c]
-            if target_att_cols:
-                try:
-                    att_conds = [f"UPPER(TRIM(CAST({q_name(c)} AS NVARCHAR(10)))) IN ('Y', '1', 'X', 'TRUE')" for c in target_att_cols]
-                    q_att_cust = f"SELECT COUNT(*) AS att_count FROM {q_tbl(cust_tbl)} WHERE ({' OR '.join(att_conds)}) {klabc_filter}"
-                    execute_query(cursor, q_att_cust, is_hana=is_hana)
-                    row = fetchone_dict(cursor)
-                    if row and row.get("att_count") is not None and int(row["att_count"]) > 0:
-                        attrition = str(row["att_count"])
-                except Exception as e:
-                    print(f"[Default Metrics] Customer Master attrition failed: {e}")
-
-        # If Customer Master flags are empty, compute active billing gap from sales data
-        if attrition in ("N/A", "0") and real_cust_col_sales and real_date_col:
-            try:
-                execute_query(cursor, f"SELECT MAX(s.{q_name(real_date_col)}) AS max_d FROM {sales_from}", is_hana=is_hana)
-                max_d_row = fetchone_dict(cursor)
-                latest_date = max_d_row.get("max_d") if max_d_row else None
-                if latest_date:
-                    if isinstance(latest_date, str):
-                        latest_dt = datetime.strptime(latest_date[:10], '%Y-%m-%d')
-                    else:
-                        latest_dt = latest_date
-                    curr_month_start = latest_dt.replace(day=1)
-                    prev_month_start = (curr_month_start - timedelta(days=1)).replace(day=1)
-                    
-                    p_start = prev_month_start.strftime('%Y-%m-%d')
-                    c_start = curr_month_start.strftime('%Y-%m-%d')
-                    date_expr = f"s.{q_name(real_date_col)}"
-
-                    # Fast single-pass group by: billed in prev month but not in curr month
-                    q_att = f"""
-                        SELECT COUNT(*) AS attrition_count
-                        FROM (
-                            SELECT 
-                                s.{q_name(real_cust_col_sales)} AS d_code,
-                                MAX(CASE WHEN {date_expr} >= '{p_start}' AND {date_expr} < '{c_start}' THEN 1 ELSE 0 END) AS billed_prev,
-                                MAX(CASE WHEN {date_expr} >= '{c_start}' THEN 1 ELSE 0 END) AS billed_curr
-                            FROM {sales_from}
-                            WHERE {date_expr} >= '{p_start}' AND s.{q_name(real_cust_col_sales)} IS NOT NULL
-                            GROUP BY s.{q_name(real_cust_col_sales)}
-                        ) t
-                        WHERE t.billed_prev = 1 AND t.billed_curr = 0
-                    """
-                    execute_query(cursor, q_att, is_hana=is_hana)
-                    row = fetchone_dict(cursor)
-                    if row and row.get("attrition_count") is not None and int(row["attrition_count"]) > 0:
-                        attrition = str(row["attrition_count"])
-                        att_subtext = f"Inactive since {prev_month_start.strftime('%b %Y')}"
-            except Exception as e:
-                print(f"[Default Metrics] Sales billing gap attrition query failed: {e}")
-
-        if attrition == "N/A":
-            attrition = "0"
 
         # 11. Sales Target and Achievement
         sales_target_val = "N/A"
