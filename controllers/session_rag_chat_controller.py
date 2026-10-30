@@ -2591,19 +2591,43 @@ def session_rag_chat_controller(get_connection_func):
 
         # Guard: Check for unconstrained heavy multi-dimensional or actual vs plan queries across all history
         if _is_unbounded_heavy_comparison(question):
-            print(f"[GUARD] Unbounded heavy comparison detected for question: '{question}' — requesting time filter.")
-            _heavy_msg = (
-                "The data volume is too high to generate an all-time report across all regions, territories, and product categories.\n\n"
-                "Please add a time limit or period to your question, such as:\n"
-                "- **\"for 2024\"** (or **\"for FY 2024\"**)\n"
-                "- **\"for last 6 months\"**\n"
-                "- **\"for current year\"**"
+            print(f"[GUARD] Unbounded heavy comparison detected for question: '{question}' — generating dynamic LLM response & suggestions.")
+            
+            _guard_sys = (
+                "You are an expert enterprise business intelligence advisor. "
+                "The user asked an analytical question that requires aggregating massive enterprise transactional data "
+                "across multiple dimensions (e.g. regions, territories, categories, products, months) across all historical years without any time constraint. "
+                "State politely, clearly, and concisely in 2 sentences that the data volume across all historical years is too large to process, "
+                "and ask them to specify a time filter (such as a specific fiscal year, recent months, or a quarter). "
+                "Provide 3 tailored, highly relevant follow-up questions specifically adapted to the user's exact business question with concrete time periods "
+                "(e.g., 'for FY 2024', 'for last 6 months', 'for current year', etc.).\n"
+                "Respond ONLY in valid JSON matching this exact structure:\n"
+                "{\n"
+                '  "message": "Polite explanation and request for time filter...",\n'
+                '  "suggestions": ["Follow-up question 1 with time filter", "Follow-up question 2 with time filter", "Follow-up question 3 with time filter"]\n'
+                "}"
             )
-            fuq = [
-                f"{question.rstrip('.')} for 2024",
-                f"{question.rstrip('.')} for last 6 months",
-                f"{question.rstrip('.')} for current year"
-            ]
+            _guard_user = f"User Question: \"{question}\""
+            _guard_res = _mistral(_guard_sys, _guard_user, temperature=0.2)
+
+            if _guard_res and isinstance(_guard_res, dict) and _guard_res.get("message"):
+                _heavy_msg = _guard_res.get("message")
+                raw_sug = _guard_res.get("suggestions", [])
+                fuq = [str(s) for s in raw_sug if s]
+            else:
+                _heavy_msg = (
+                    "The data volume is too high to generate an all-time report across all regions, territories, and product categories.\n\n"
+                    "Please specify a time range or period in your question, such as:\n"
+                    "- **\"for 2024\"** (or **\"for FY 2024\"**)\n"
+                    "- **\"for last 6 months\"**\n"
+                    "- **\"for current year\"**"
+                )
+                fuq = [
+                    f"{question.rstrip('.')} for 2024",
+                    f"{question.rstrip('.')} for last 6 months",
+                    f"{question.rstrip('.')} for current year"
+                ]
+
             _advance_turn(session_id)
             actual_visit = _save_history(
                 get_connection_func, session_id, user_id,
