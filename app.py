@@ -346,7 +346,23 @@ app = Flask(__name__)
 
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+@app.before_request
+def handle_options_preflight():
+    if request.method == "OPTIONS":
+        res = make_response("", 200)
+        res.headers["Access-Control-Allow-Origin"] = "*"
+        res.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        res.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept"
+        return res
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept"
+    return response
 
 
 
