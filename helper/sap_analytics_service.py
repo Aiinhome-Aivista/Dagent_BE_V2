@@ -2638,38 +2638,12 @@ def query_sales_revenue_by_zone_hana(cursor, schema, zone=None):
               AND IFNULL(S."indicator_cancel", '') NOT IN ('X', 'Y', '1')
         ),
 
-        HISTORY_SALES AS
-        (
-            SELECT
-                LPAD(TRIM(S."dealer_code"), 10, '0') AS CUSTOMER_CODE,
-                COALESCE(
-                    S."ndp_value",
-                    S."taxable_value",
-                    S."invoice_value",
-                    0
-                ) AS SALES_VALUE
-            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" S
-            WHERE S."distribution_channel" = '10'
-              AND IFNULL(S."indicator_cancel", '') NOT IN ('X', 'Y', '1')
-        ),
-
-        ALL_SALES AS
-        (
-            SELECT CUSTOMER_CODE, SALES_VALUE
-            FROM CURRENT_SALES
-
-            UNION ALL
-
-            SELECT CUSTOMER_CODE, SALES_VALUE
-            FROM HISTORY_SALES
-        ),
-
         ACTUAL_BY_ZONE AS
         (
             SELECT
                 T."P_ZONE",
                 SUM(S.SALES_VALUE) AS ACTUAL_SALES
-            FROM ALL_SALES S
+            FROM CURRENT_SALES S
             INNER JOIN CUSTOMER_MAP C
                 ON S.CUSTOMER_CODE = C.CUSTOMER_CODE
             INNER JOIN TERRITORY_MAP T
@@ -2687,7 +2661,7 @@ def query_sales_revenue_by_zone_hana(cursor, schema, zone=None):
             FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" P
             INNER JOIN TERRITORY_MAP T
                 ON TRIM(P."TERR_CODE") = TRIM(T."BZIRK")
-            WHERE P."YMONTH" = '202610'
+            WHERE P."YMONTH" LIKE '2026%'
             GROUP BY T."P_ZONE"
         )
 
