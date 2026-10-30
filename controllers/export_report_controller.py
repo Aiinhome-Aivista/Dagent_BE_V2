@@ -1237,7 +1237,7 @@ def export_domestic_sales_preview_controller(get_db_connection):
 
 
 import csv
-from flask import Response
+from flask import Response, make_response
 
 def export_query_csv_controller(get_db_connection):
     """
@@ -1246,6 +1246,13 @@ def export_query_csv_controller(get_db_connection):
     the result as a CSV attachment with EXACT database column names as headers.
     Zero files are saved on disk.
     """
+    if request.method == "OPTIONS":
+        resp = make_response("", 200)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        return resp
+
     conn = None
     hana_conn = None
     tunnel = None
@@ -1258,7 +1265,9 @@ def export_query_csv_controller(get_db_connection):
         user_id = data.get("user_id")
 
         if not sql_query:
-            return jsonify({"status": "error", "message": "Missing sql_query"}), 400
+            resp = jsonify({"status": "error", "message": "Missing sql_query"})
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+            return resp, 400
 
         if not filename:
             filename = f"export_{session_id or 'data'}.csv"
@@ -1270,7 +1279,9 @@ def export_query_csv_controller(get_db_connection):
 
         conn = get_db_connection()
         if not conn:
-            return jsonify({"status": "error", "message": "Failed to connect to database"}), 500
+            resp = jsonify({"status": "error", "message": "Failed to connect to database"})
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+            return resp, 500
 
         from helper.sap_analytics_service import get_sap_connection_for_session
         hana_conn, tunnel, sap_schema = get_sap_connection_for_session(conn, session_id, user_id=user_id)
@@ -1311,18 +1322,24 @@ def export_query_csv_controller(get_db_connection):
 
         print(f"[CSV Export] Streamed {len(rows)} rows with exact columns: {cols} as '{safe_filename}'", flush=True)
 
-        return Response(
+        resp = Response(
             csv_content,
             mimetype="text/csv",
             headers={
                 "Content-Disposition": f"attachment; filename={safe_filename}",
-                "Content-Type": "text/csv; charset=utf-8"
+                "Content-Type": "text/csv; charset=utf-8",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
             }
         )
+        return resp
 
     except Exception as exc:
         print(f"[CSV Export] Query execution failed: {exc}", flush=True)
-        return jsonify({"status": "error", "message": str(exc)}), 500
+        resp = jsonify({"status": "error", "message": str(exc)})
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp, 500
 
     finally:
         if cursor:

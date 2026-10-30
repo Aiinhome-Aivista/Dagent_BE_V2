@@ -854,7 +854,7 @@ def query_domestic_sales_value_achievements_hana(cursor, schema, year, month, da
 
             LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE)
 
-            LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (cs.DEALER_CODE = cm.KUNNR)
+            LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (LPAD(TRIM(TO_VARCHAR(cs.DEALER_CODE)), 10, '0') = LPAD(TRIM(TO_VARCHAR(cm.KUNNR)), 10, '0') OR LTRIM(TO_VARCHAR(cs.DEALER_CODE), '0') = LTRIM(TO_VARCHAR(cm.KUNNR), '0'))
 
             WHERE (cs.DISTRIBUTION_CHANNEL = 10 OR cs.DISTRIBUTION_CHANNEL = '10')
 
@@ -1028,7 +1028,7 @@ def query_domestic_sales_value_achievements_hana(cursor, schema, year, month, da
 
             ) cs
 
-            LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (cs.DEALER_CODE = cm.KUNNR)
+            LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (LPAD(TRIM(TO_VARCHAR(cs.DEALER_CODE)), 10, '0') = LPAD(TRIM(TO_VARCHAR(cm.KUNNR)), 10, '0') OR LTRIM(TO_VARCHAR(cs.DEALER_CODE), '0') = LTRIM(TO_VARCHAR(cm.KUNNR), '0'))
 
             WHERE cs.DISTRIBUTION_CHANNEL IN ('20', 20, '30', 30, '40', 40, 'OEM', 'STU', 'DEF')
 
@@ -1796,7 +1796,7 @@ def query_sales_report_by_values_hana(cursor, schema, year, month, day):
 
         LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE)
 
-        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (cs.DEALER_CODE = cm.KUNNR)
+        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (LPAD(TRIM(TO_VARCHAR(cs.DEALER_CODE)), 10, '0') = LPAD(TRIM(TO_VARCHAR(cm.KUNNR)), 10, '0') OR LTRIM(TO_VARCHAR(cs.DEALER_CODE), '0') = LTRIM(TO_VARCHAR(cm.KUNNR), '0'))
 
         LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
 
@@ -2889,7 +2889,7 @@ def query_sales_by_account_category_hana(cursor, schema, zone=None):
 
         ) cs
 
-        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (cs.DEALER_CODE = cm.KUNNR)
+        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (LPAD(TRIM(TO_VARCHAR(cs.DEALER_CODE)), 10, '0') = LPAD(TRIM(TO_VARCHAR(cm.KUNNR)), 10, '0') OR LTRIM(TO_VARCHAR(cs.DEALER_CODE), '0') = LTRIM(TO_VARCHAR(cm.KUNNR), '0'))
 
         LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
 

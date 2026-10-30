@@ -64,7 +64,7 @@ import os
 
 import mysql.connector 
 
-from flask import Flask, request
+from flask import Flask, request, jsonify, make_response
 
 from flask_cors import CORS
 
@@ -1221,6 +1221,57 @@ def session_chat():
 def store_chat_session():
 
     return store_hub_data_controller(get_db_connection)
+
+
+# ── On-demand CSV Export & System Configuration Routes ──
+from controllers.export_report_controller import export_query_csv_controller
+from helper.system_config_service import get_all_system_configs, set_system_config
+
+@app.route("/export-query-csv", methods=["POST", "OPTIONS"])
+@app.route("/api/export-query-csv", methods=["POST", "OPTIONS"])
+def route_export_query_csv():
+    return export_query_csv_controller(get_db_connection)
+
+@app.route("/api/system-config", methods=["GET", "POST", "OPTIONS"])
+def route_system_config():
+    if request.method == "OPTIONS":
+        resp = make_response("", 200)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        return resp
+
+    conn = get_db_connection()
+    if not conn:
+        resp = jsonify({"status": "error", "message": "Database connection failed"})
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp, 500
+    try:
+        if request.method == "POST":
+            data = request.json or {}
+            key = data.get("key") or data.get("setting_key")
+            value = data.get("value") or data.get("setting_value")
+            desc = data.get("description", "")
+            if not key or value is None:
+                resp = jsonify({"status": "error", "message": "Missing key or value"})
+                resp.headers["Access-Control-Allow-Origin"] = "*"
+                return resp, 400
+            ok = set_system_config(conn, key, value, desc)
+            resp = jsonify({"status": "success" if ok else "error", "message": "Configuration updated"})
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+            return resp, 200 if ok else 400
+        else:
+            configs = get_all_system_configs(conn)
+            resp = jsonify({"status": "success", "data": configs})
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+            return resp, 200
+    except Exception as e:
+        resp = jsonify({"status": "error", "message": str(e)})
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp, 500
+    finally:
+        if conn and hasattr(conn, "is_connected") and conn.is_connected():
+            conn.close()
 
 
 
