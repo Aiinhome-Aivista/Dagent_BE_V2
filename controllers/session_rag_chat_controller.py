@@ -2589,9 +2589,15 @@ def session_rag_chat_controller(get_connection_func):
                 "you MUST join the corresponding Master table to the point and SELECT the human-readable NAME / DESCRIPTION:\n"
                 "- For Customer Name: ALWAYS join (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')) and SELECT COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact.\"dealer_code\") AS customer_name, fact.\"dealer_code\" AS customer_code.\n"
                 "- For Product/SKU: Join fact.\"SKU\" = sk.MATNR and SELECT COALESCE(sk.MAKTX, sk.PROD_TITLE, fact.\"SKU\") AS product_name, fact.\"SKU\" AS sku_code, sk.BRAND.\n"
-                "- For Category: Join sk.CAT_CODE = cat.CAT_CODE and SELECT cat.CAT_DESC AS category_name.\n"
-                "- For Territory/Region/Zone: SELECT tm.NAME AS territory_name, rm.\"region_name\", zm.NAME AS zone_name.\n"
-                "NEVER return bare numeric codes without the descriptive master name/title!"
+                "- For Category: Join sk.CAT_CODE = cat.CAT_CODE and SELECT cat.CAT_DESC AS category_name, cat.CAT_CODE AS category_code.\n"
+                "- For Territory/Region/Zone: SELECT tm.NAME AS territory_name, tm.BZIRK AS territory_code, rm.\"region_name\", rm.\"region_code\", zm.NAME AS zone_name.\n"
+                "ALWAYS select BOTH the human-readable Name (for UI display) AND the Code (for safe JOINs across CTEs/subqueries)!\n\n"
+                "CRITICAL RULES FOR ACTUAL VS TARGET / PLAN COMPARISONS:\n"
+                "1. Target View 'ZIVF_SD_Sales_Plan_Target_01_TR' ALREADY has 'YMONTH' directly on the view! NEVER join 'ZITR_DayAttribute_01_TR' to the target view (DayAttribute has daily rows, so joining on YMONTH creates a catastrophic 30x Cartesian duplicate explosion and takes 200+ seconds)!\n"
+                "2. When comparing Actual Sales vs Target Plans using CTEs:\n"
+                "   - In CTE 1 (actual_sales): Select and group by BOTH the display name and code (e.g. tm.NAME AS territory_name, tm.BZIRK AS territory_code, rm.\"region_name\", rm.\"region_code\", cat.CAT_DESC AS category_name, cat.CAT_CODE AS category_code, da.YMONTH AS month).\n"
+                "   - In CTE 2 (target_plans): Query directly from \"SAP_S4\".\"ZIVF_SD_Sales_Plan_Target_01_TR\" tgt (DO NOT join DayAttribute). Select tgt.TERR_CODE AS territory_code, tgt.REG_CODE AS region_code, tgt.CAT_CODE AS category_code, tgt.YMONTH AS month, SUM(tgt.PLAN_VALUE) AS target_sales_value, SUM(tgt.ORG_PLAN) AS target_qty. Group by tgt.TERR_CODE, tgt.REG_CODE, tgt.CAT_CODE, tgt.YMONTH.\n"
+                "   - In Outer Query: JOIN CTEs on CODES (e.g. a.territory_code = t.territory_code AND a.month = t.month AND a.category_code = t.category_code). NEVER join a Name column to a Code column (e.g. NEVER do a.territory_name = t.terr_code)!"
             )
         else:
             sql_user += "\n\nCRITICAL FINAL RULE: NEVER SELECT or GROUP BY `customer_master.KUNNR` or any other dimension's Primary Key! You MUST SELECT and GROUP BY the Fact Table's Foreign Key (e.g. `sales_data.customer`) instead. Selecting dimension keys causes unmatched rows to lump together as NULLs."
@@ -2891,6 +2897,23 @@ def session_rag_chat_controller(get_connection_func):
                                 run_query = re.sub(
                                     r'(?:cm\.)?\"?KTOKD\"?\s*=\s*\'([^\']+)\'',
                                     r"UPPER(TRIM(cm.KTOKD)) LIKE UPPER('%\1%')",
+                                    run_query,
+                                    flags=re.IGNORECASE
+                                )
+
+                                # Auto-heal: Prevent 30x Cartesian blow-up in Target Fact if LLM joined DayAttribute on YMONTH
+                                if "ZIVF_SD_Sales_Plan_Target_01_TR" in run_query and "ZITR_DayAttribute_01_TR" in run_query:
+                                    run_query = re.sub(
+                                        r'\bJOIN\s+(?:\"?SAP_S4\"?\.)?\"?ZITR_DayAttribute_01_TR\"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)\s+ON\s+[a-zA-Z0-9_]+\.YMONTH\s*=\s*\1\.YMONTH',
+                                        ' ',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+
+                                # Auto-heal: Prevent Name = Code join in CTE comparisons (e.g. a.territory_name = t.terr_code)
+                                run_query = re.sub(
+                                    r'\b([a-zA-Z0-9_]+)\.territory_name\s*=\s*([a-zA-Z0-9_]+)\.(?:terr_code|territory_code)\b',
+                                    r'(\1.territory_name = \2.terr_code OR \1.territory_name = \2.territory_code)',
                                     run_query,
                                     flags=re.IGNORECASE
                                 )
