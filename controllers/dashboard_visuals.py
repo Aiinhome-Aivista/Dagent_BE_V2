@@ -2291,122 +2291,330 @@ def default_dashboard_metrics_controller(get_db_connection):
         # 2. Top Performing Tyre
         top_tyre = "N/A"
         if has_revenue:
-            # Join SKU Master with Category Master (pre-aggregated by SKU for ultra-fast execution)
-            if sku_tbl and cat_tbl:
-                sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
-                sku_mat = check_col(table_columns[sku_tbl], ["matnr", "sku", "material"])
-                sku_cat = check_col(table_columns[sku_tbl], ["cat_code", "catcode", "category_code", "category"])
-                cat_code = check_col(table_columns[cat_tbl], ["cat_code", "catcode", "category_code"])
-                cat_desc = check_col(table_columns[cat_tbl], ["cat_desc", "catdesc", "category_desc", "category_name", "cat_name"])
+            # ── SAP HANA path: full CTE with NOT EXISTS cancellation & dummy-account filters ──
+            if is_hana and curr_sales_tbl and hist_sales_tbl:
+                try:
+                    curr_c2 = table_columns.get(curr_sales_tbl, {})
+                    hist_c2 = table_columns.get(hist_sales_tbl, {})
+                    _h_rev2  = check_col(hist_c2,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _c_rev2  = check_col(curr_c2,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _h_date2 = check_col(hist_c2,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _c_date2 = check_col(curr_c2,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _h_cust2 = check_col(hist_c2,  ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _c_cust2 = check_col(curr_c2,  ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _h_plt2  = check_col(hist_c2,  ["plant", "werks"]) or "plant"
+                    _c_plt2  = check_col(curr_c2,  ["plant", "werks"]) or "plant"
+                    _h_inv2  = check_col(hist_c2,  ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _c_inv2  = check_col(curr_c2,  ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _h_fk2   = check_col(hist_c2,  ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _c_fk2   = check_col(curr_c2,  ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _h_dc2   = check_col(hist_c2,  ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _c_dc2   = check_col(curr_c2,  ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _h_canc2 = check_col(hist_c2,  ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
+                    _c_canc2 = check_col(curr_c2,  ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
+                    _h_sku2  = check_col(hist_c2,  ["sku", "material", "matnr"]) or "SKU"
+                    _c_sku2  = check_col(curr_c2,  ["sku", "material", "matnr"]) or "SKU"
 
-                if sales_mat and sku_mat and sku_cat and cat_code and cat_desc:
-                    try:
-                        q_t = f"""
-                            SELECT
-                                cat.{q_name(cat_desc)} AS vehicle_type,
-                                ROUND(SUM(ms.mat_rev), 2) AS revenue
-                            FROM (
-                                SELECT s.{q_name(sales_mat)} AS mat_id, SUM({join_revenue_expr}) AS mat_rev
-                                FROM {sales_from}
-                                WHERE s.{q_name(sales_mat)} IS NOT NULL
-                                GROUP BY s.{q_name(sales_mat)}
-                            ) ms
-                            JOIN {q_tbl(sku_tbl)} sm ON (ms.mat_id = sm.{q_name(sku_mat)} OR LTRIM(ms.mat_id, '0') = LTRIM(sm.{q_name(sku_mat)}, '0'))
-                            JOIN {q_tbl(cat_tbl)} cat ON sm.{q_name(sku_cat)} = cat.{q_name(cat_code)}
-                            WHERE cat.{q_name(cat_desc)} IS NOT NULL AND cat.{q_name(cat_desc)} <> ''
-                            GROUP BY cat.{q_name(cat_desc)}
-                            ORDER BY revenue DESC
-                            LIMIT 1
-                        """
-                        execute_query(cursor, q_t, is_hana=is_hana)
+                    canc_tbl2 = find_table(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled_sales_invoice", "cancelled"])
+                    cust_tbl2 = find_table(["zivfcustomermaster", "customermaster", "customer"])
+
+                    if sku_tbl and cat_tbl:
+                        sku_mat2 = check_col(table_columns.get(sku_tbl, {}), ["matnr", "sku", "material"]) or "MATNR"
+                        sku_cat2 = check_col(table_columns.get(sku_tbl, {}), ["cat_code", "catcode", "category_code", "category"]) or "CAT_CODE"
+                        cat_code2 = check_col(table_columns.get(cat_tbl, {}), ["cat_code", "catcode", "category_code"]) or "CAT_CODE"
+                        cat_desc2 = check_col(table_columns.get(cat_tbl, {}), ["cat_desc", "catdesc", "category_desc", "category_name", "cat_name"]) or "CAT_DESC"
+
+                        q_tyre_hana = f"""
+WITH base AS (
+    SELECT "{_h_inv2}" AS "invoice_number", "{_h_plt2}" AS "plant", "{_h_fk2}" AS "FKART",
+           "{_h_cust2}" AS "dealer_code", "{_h_date2}" AS "invoice_date",
+           "{_h_dc2}" AS "distribution_channel", "{_h_canc2}" AS "indicator_cancel",
+           "{_h_sku2}" AS "SKU", "{_h_rev2}" AS "invoice_value"
+    FROM {q_tbl(hist_sales_tbl)}
+    UNION ALL
+    SELECT "{_c_inv2}" AS "invoice_number", "{_c_plt2}" AS "plant", "{_c_fk2}" AS "FKART",
+           "{_c_cust2}" AS "dealer_code", "{_c_date2}" AS "invoice_date",
+           "{_c_dc2}" AS "distribution_channel", "{_c_canc2}" AS "indicator_cancel",
+           "{_c_sku2}" AS "SKU", "{_c_rev2}" AS "invoice_value"
+    FROM {q_tbl(curr_sales_tbl)}
+)
+SELECT cat."{cat_desc2}" AS vehicle_type,
+       ROUND(SUM(COALESCE(t."invoice_value", 0)) / 10000000, 2) AS revenue
+FROM base t
+JOIN {q_tbl(sku_tbl)} sk ON sk."{sku_mat2}" = t."SKU"
+LEFT JOIN (SELECT DISTINCT "{cat_code2}", "{cat_desc2}" FROM {q_tbl(cat_tbl)}) cat
+    ON cat."{cat_code2}" = sk."{sku_cat2}"
+WHERE CAST(t."distribution_channel" AS NVARCHAR(10)) = '10'
+  AND COALESCE(t."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+  AND t."invoice_date" >= '2020-01-01'
+  AND cat."{cat_desc2}" IS NOT NULL AND cat."{cat_desc2}" <> ''"""
+
+                        if canc_tbl2:
+                            q_tyre_hana += f"""
+  AND NOT EXISTS (
+      SELECT 1 FROM {q_tbl(canc_tbl2)} c
+      WHERE CAST(c."distribution_channel" AS NVARCHAR(10)) = '10'
+        AND c."invoice_number" = t."invoice_number"
+        AND c."plant" = t."plant" AND c."FKART" = t."FKART"
+  )"""
+                        if cust_tbl2:
+                            q_tyre_hana += f"""
+  AND NOT EXISTS (
+      SELECT 1 FROM {q_tbl(cust_tbl2)} cm
+      WHERE cm."KUNNR" = t."dealer_code" AND UPPER(TRIM(cm."KLABC")) = 'X'
+  )"""
+
+                        q_tyre_hana += """
+GROUP BY cat.\"{cat_desc2_alias}\"
+ORDER BY revenue DESC
+LIMIT 1""".replace('\"{cat_desc2_alias}\"', f'"{cat_desc2}"')
+
+                        execute_query(cursor, q_tyre_hana, is_hana=True)
                         row = fetchone_dict(cursor)
                         if row and row.get("vehicle_type"):
                             top_tyre = row["vehicle_type"]
-                    except Exception as tyre_err:
-                        print(f"[Default Metrics] Category master join query failed: {tyre_err}")
+                            print(f"[Default Metrics] HANA Top Tyre Category: {top_tyre}")
+                except Exception as tyre_hana_err:
+                    print(f"[Default Metrics] HANA Top Tyre query failed: {tyre_hana_err}")
 
-            # Fallback direct category master query
-            if top_tyre == "N/A" and cat_tbl:
-                sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
-                cat_mat = check_col(table_columns[cat_tbl], ["matnr", "sku", "material"])
-                cat_desc = check_col(table_columns[cat_tbl], ["cat_desc", "catdesc", "category_desc", "category_name"])
-                if sales_mat and cat_mat and cat_desc:
-                    try:
-                        q_t2 = f"""
-                            SELECT
-                                cat.{q_name(cat_desc)} AS vehicle_type,
-                                ROUND(SUM(ms.mat_rev), 2) AS revenue
-                            FROM (
-                                SELECT s.{q_name(sales_mat)} AS mat_id, SUM({join_revenue_expr}) AS mat_rev
-                                FROM {sales_from}
-                                WHERE s.{q_name(sales_mat)} IS NOT NULL
-                                GROUP BY s.{q_name(sales_mat)}
-                            ) ms
-                            JOIN {q_tbl(cat_tbl)} cat ON (ms.mat_id = cat.{q_name(cat_mat)} OR LTRIM(ms.mat_id, '0') = LTRIM(cat.{q_name(cat_mat)}, '0'))
-                            WHERE cat.{q_name(cat_desc)} IS NOT NULL AND cat.{q_name(cat_desc)} <> ''
-                            GROUP BY cat.{q_name(cat_desc)}
-                            ORDER BY revenue DESC
-                            LIMIT 1
-                        """
-                        execute_query(cursor, q_t2, is_hana=is_hana)
-                        row = fetchone_dict(cursor)
-                        if row and row.get("vehicle_type"):
-                            top_tyre = row["vehicle_type"]
-                    except Exception as tyre_err:
-                        print(f"[Default Metrics] Direct category master query failed: {tyre_err}")
+            # ── Non-HANA / fallback paths (unchanged) ──
+            if top_tyre == "N/A":
+                if sku_tbl and cat_tbl:
+                    sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
+                    sku_mat = check_col(table_columns[sku_tbl], ["matnr", "sku", "material"])
+                    sku_cat = check_col(table_columns[sku_tbl], ["cat_code", "catcode", "category_code", "category"])
+                    cat_code = check_col(table_columns[cat_tbl], ["cat_code", "catcode", "category_code"])
+                    cat_desc = check_col(table_columns[cat_tbl], ["cat_desc", "catdesc", "category_desc", "category_name", "cat_name"])
 
-            # Fallback SKU tyre_type
-            if top_tyre == "N/A" and sku_tbl:
-                sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
-                sku_mat = check_col(table_columns[sku_tbl], ["matnr", "sku", "material"])
-                sku_tyre = check_col(table_columns[sku_tbl], ["tyre_type", "tyretype", "vehicle_type", "maktx"])
-                if sales_mat and sku_mat and sku_tyre:
-                    try:
-                        q_t3 = f"""
-                            SELECT
-                                sm.{q_name(sku_tyre)} AS vehicle_type,
-                                ROUND(SUM(ms.mat_rev), 2) AS revenue
-                            FROM (
-                                SELECT s.{q_name(sales_mat)} AS mat_id, SUM({join_revenue_expr}) AS mat_rev
-                                FROM {sales_from}
-                                WHERE s.{q_name(sales_mat)} IS NOT NULL
-                                GROUP BY s.{q_name(sales_mat)}
-                            ) ms
-                            JOIN {q_tbl(sku_tbl)} sm ON (ms.mat_id = sm.{q_name(sku_mat)} OR LTRIM(ms.mat_id, '0') = LTRIM(sm.{q_name(sku_mat)}, '0'))
-                            WHERE sm.{q_name(sku_tyre)} IS NOT NULL AND sm.{q_name(sku_tyre)} NOT IN ('', '0', '-')
-                            GROUP BY sm.{q_name(sku_tyre)}
-                            ORDER BY revenue DESC
-                            LIMIT 1
-                        """
-                        execute_query(cursor, q_t3, is_hana=is_hana)
-                        row = fetchone_dict(cursor)
-                        if row and row.get("vehicle_type"):
-                            top_tyre = row["vehicle_type"]
-                    except Exception as tyre_err:
-                        print(f"[Default Metrics] SKU tyre_type query failed: {tyre_err}")
+                    if sales_mat and sku_mat and sku_cat and cat_code and cat_desc:
+                        try:
+                            q_t = f"""
+                                SELECT
+                                    cat.{q_name(cat_desc)} AS vehicle_type,
+                                    ROUND(SUM(ms.mat_rev), 2) AS revenue
+                                FROM (
+                                    SELECT s.{q_name(sales_mat)} AS mat_id, SUM({join_revenue_expr}) AS mat_rev
+                                    FROM {sales_from}
+                                    WHERE s.{q_name(sales_mat)} IS NOT NULL
+                                    GROUP BY s.{q_name(sales_mat)}
+                                ) ms
+                                JOIN {q_tbl(sku_tbl)} sm ON (ms.mat_id = sm.{q_name(sku_mat)} OR LTRIM(ms.mat_id, '0') = LTRIM(sm.{q_name(sku_mat)}, '0'))
+                                JOIN {q_tbl(cat_tbl)} cat ON sm.{q_name(sku_cat)} = cat.{q_name(cat_code)}
+                                WHERE cat.{q_name(cat_desc)} IS NOT NULL AND cat.{q_name(cat_desc)} <> ''
+                                GROUP BY cat.{q_name(cat_desc)}
+                                ORDER BY revenue DESC
+                                LIMIT 1
+                            """
+                            execute_query(cursor, q_t, is_hana=is_hana)
+                            row = fetchone_dict(cursor)
+                            if row and row.get("vehicle_type"):
+                                top_tyre = row["vehicle_type"]
+                        except Exception as tyre_err:
+                            print(f"[Default Metrics] Category master join query failed: {tyre_err}")
+
+                if top_tyre == "N/A" and cat_tbl:
+                    sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
+                    cat_mat = check_col(table_columns[cat_tbl], ["matnr", "sku", "material"])
+                    cat_desc = check_col(table_columns[cat_tbl], ["cat_desc", "catdesc", "category_desc", "category_name"])
+                    if sales_mat and cat_mat and cat_desc:
+                        try:
+                            q_t2 = f"""
+                                SELECT
+                                    cat.{q_name(cat_desc)} AS vehicle_type,
+                                    ROUND(SUM(ms.mat_rev), 2) AS revenue
+                                FROM (
+                                    SELECT s.{q_name(sales_mat)} AS mat_id, SUM({join_revenue_expr}) AS mat_rev
+                                    FROM {sales_from}
+                                    WHERE s.{q_name(sales_mat)} IS NOT NULL
+                                    GROUP BY s.{q_name(sales_mat)}
+                                ) ms
+                                JOIN {q_tbl(cat_tbl)} cat ON (ms.mat_id = cat.{q_name(cat_mat)} OR LTRIM(ms.mat_id, '0') = LTRIM(cat.{q_name(cat_mat)}, '0'))
+                                WHERE cat.{q_name(cat_desc)} IS NOT NULL AND cat.{q_name(cat_desc)} <> ''
+                                GROUP BY cat.{q_name(cat_desc)}
+                                ORDER BY revenue DESC
+                                LIMIT 1
+                            """
+                            execute_query(cursor, q_t2, is_hana=is_hana)
+                            row = fetchone_dict(cursor)
+                            if row and row.get("vehicle_type"):
+                                top_tyre = row["vehicle_type"]
+                        except Exception as tyre_err:
+                            print(f"[Default Metrics] Direct category master query failed: {tyre_err}")
+
+                if top_tyre == "N/A" and sku_tbl:
+                    sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
+                    sku_mat = check_col(table_columns[sku_tbl], ["matnr", "sku", "material"])
+                    sku_tyre = check_col(table_columns[sku_tbl], ["tyre_type", "tyretype", "vehicle_type", "maktx"])
+                    if sales_mat and sku_mat and sku_tyre:
+                        try:
+                            q_t3 = f"""
+                                SELECT
+                                    sm.{q_name(sku_tyre)} AS vehicle_type,
+                                    ROUND(SUM(ms.mat_rev), 2) AS revenue
+                                FROM (
+                                    SELECT s.{q_name(sales_mat)} AS mat_id, SUM({join_revenue_expr}) AS mat_rev
+                                    FROM {sales_from}
+                                    WHERE s.{q_name(sales_mat)} IS NOT NULL
+                                    GROUP BY s.{q_name(sales_mat)}
+                                ) ms
+                                JOIN {q_tbl(sku_tbl)} sm ON (ms.mat_id = sm.{q_name(sku_mat)} OR LTRIM(ms.mat_id, '0') = LTRIM(sm.{q_name(sku_mat)}, '0'))
+                                WHERE sm.{q_name(sku_tyre)} IS NOT NULL AND sm.{q_name(sku_tyre)} NOT IN ('', '0', '-')
+                                GROUP BY sm.{q_name(sku_tyre)}
+                                ORDER BY revenue DESC
+                                LIMIT 1
+                            """
+                            execute_query(cursor, q_t3, is_hana=is_hana)
+                            row = fetchone_dict(cursor)
+                            if row and row.get("vehicle_type"):
+                                top_tyre = row["vehicle_type"]
+                        except Exception as tyre_err:
+                            print(f"[Default Metrics] SKU tyre_type query failed: {tyre_err}")
+
 
         # 3. Leading Region (Prioritize Customer Market Geography over Factory Plant location)
         leading_region = "N/A"
         if has_revenue:
-            # Customer -> Territory -> Region (True customer sales market geography)
-            if cust_tbl and reg_tbl:
-                sales_cust = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
-                cust_id = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
-                r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
+            # ── SAP HANA path: full CTE with LTRIM join + BZIRK→REGIO→region_code path ──
+            if is_hana and curr_sales_tbl and hist_sales_tbl:
+                try:
+                    curr_c3 = table_columns.get(curr_sales_tbl, {})
+                    hist_c3 = table_columns.get(hist_sales_tbl, {})
+                    _h_rev3  = check_col(hist_c3,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _c_rev3  = check_col(curr_c3,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _h_date3 = check_col(hist_c3,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _c_date3 = check_col(curr_c3,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _h_cust3 = check_col(hist_c3,  ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _c_cust3 = check_col(curr_c3,  ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _h_plt3  = check_col(hist_c3,  ["plant", "werks"]) or "plant"
+                    _c_plt3  = check_col(curr_c3,  ["plant", "werks"]) or "plant"
+                    _h_inv3  = check_col(hist_c3,  ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _c_inv3  = check_col(curr_c3,  ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _h_fk3   = check_col(hist_c3,  ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _c_fk3   = check_col(curr_c3,  ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _h_dc3   = check_col(hist_c3,  ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _c_dc3   = check_col(curr_c3,  ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _h_canc3 = check_col(hist_c3,  ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
+                    _c_canc3 = check_col(curr_c3,  ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
 
-                if terr_tbl:
-                    cust_terr = check_col(table_columns[cust_tbl], ["bzirk", "territory", "territory_code"])
-                    terr_code = check_col(table_columns[terr_tbl], ["bzirk", "territory_code", "territory"])
-                    terr_reg = check_col(table_columns[terr_tbl], ["regio", "region_code", "region", "area"])
+                    canc_tbl3 = find_table(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled_sales_invoice", "cancelled"])
+                    cust_tbl3 = find_table(["zivfcustomermaster", "customermaster", "customer"])
+
+                    if cust_tbl3 and terr_tbl and reg_tbl:
+                        r_name3 = check_col(table_columns.get(reg_tbl, {}), ["region_name", "region", "name"]) or "region_name"
+                        r_code3 = check_col(table_columns.get(reg_tbl, {}), ["region_code", "region", "regio"]) or "region_code"
+
+                        q_region_hana = f"""
+WITH base AS (
+    SELECT "{_h_inv3}" AS "invoice_number", "{_h_plt3}" AS "plant", "{_h_fk3}" AS "FKART",
+           "{_h_cust3}" AS "dealer_code", "{_h_date3}" AS "invoice_date",
+           "{_h_dc3}" AS "distribution_channel", "{_h_canc3}" AS "indicator_cancel",
+           "{_h_rev3}" AS "invoice_value"
+    FROM {q_tbl(hist_sales_tbl)}
+    UNION ALL
+    SELECT "{_c_inv3}" AS "invoice_number", "{_c_plt3}" AS "plant", "{_c_fk3}" AS "FKART",
+           "{_c_cust3}" AS "dealer_code", "{_c_date3}" AS "invoice_date",
+           "{_c_dc3}" AS "distribution_channel", "{_c_canc3}" AS "indicator_cancel",
+           "{_c_rev3}" AS "invoice_value"
+    FROM {q_tbl(curr_sales_tbl)}
+)
+SELECT rm."{r_name3}" AS region_name,
+       ROUND(SUM(COALESCE(t."invoice_value", 0)) / 10000000, 2) AS revenue
+FROM base t
+JOIN (
+    SELECT DISTINCT LTRIM("KUNNR", '0') AS "KUNNR", TRIM("BZIRK") AS "BZIRK"
+    FROM {q_tbl(cust_tbl3)}
+    WHERE "VTWEG" = '10'
+) cm ON cm."KUNNR" = LTRIM(t."dealer_code", '0')
+JOIN {q_tbl(terr_tbl)} tm ON tm."BZIRK" = cm."BZIRK"
+JOIN {q_tbl(reg_tbl)} rm ON rm."{r_code3}" = tm."REGIO"
+WHERE CAST(t."distribution_channel" AS NVARCHAR(10)) = '10'
+  AND COALESCE(t."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+  AND t."invoice_date" >= '2020-01-01'
+  AND rm."{r_name3}" IS NOT NULL AND rm."{r_name3}" <> ''"""
+
+                        if canc_tbl3:
+                            q_region_hana += f"""
+  AND NOT EXISTS (
+      SELECT 1 FROM {q_tbl(canc_tbl3)} c
+      WHERE CAST(c."distribution_channel" AS NVARCHAR(10)) = '10'
+        AND c."invoice_number" = t."invoice_number"
+        AND c."plant" = t."plant" AND c."FKART" = t."FKART"
+  )"""
+                        if cust_tbl3:
+                            q_region_hana += f"""
+  AND NOT EXISTS (
+      SELECT 1 FROM {q_tbl(cust_tbl3)} cx
+      WHERE LTRIM(cx."KUNNR", '0') = LTRIM(t."dealer_code", '0')
+        AND cx."KLABC" = 'X'
+  )"""
+
+                        q_region_hana += f"""
+GROUP BY rm."{r_name3}"
+ORDER BY revenue DESC
+LIMIT 1"""
+
+                        execute_query(cursor, q_region_hana, is_hana=True)
+                        row = fetchone_dict(cursor)
+                        if row and row.get("region_name"):
+                            leading_region = row["region_name"]
+                            print(f"[Default Metrics] HANA Leading Region: {leading_region}")
+                except Exception as reg_hana_err:
+                    print(f"[Default Metrics] HANA Leading Region query failed: {reg_hana_err}")
+
+            # ── Non-HANA / fallback paths (unchanged) ──
+            if leading_region == "N/A":
+                if cust_tbl and reg_tbl:
+                    sales_cust = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
+                    cust_id = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
+                    r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
+
+                    if terr_tbl:
+                        cust_terr = check_col(table_columns[cust_tbl], ["bzirk", "territory", "territory_code"])
+                        terr_code = check_col(table_columns[terr_tbl], ["bzirk", "territory_code", "territory"])
+                        terr_reg = check_col(table_columns[terr_tbl], ["regio", "region_code", "region", "area"])
+                        cust_reg = check_col(table_columns[cust_tbl], ["regio", "region_code", "region"])
+                        r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
+
+                        if sales_cust and cust_id and cust_terr and terr_code and terr_reg and r_code and r_name:
+                            try:
+                                q_r3 = f"""
+                                    SELECT
+                                        COALESCE(r.{q_name(r_name)}, r.{q_name(r_code)}, 'Unknown') AS region_name,
+                                        ROUND(SUM(ds.dealer_rev), 2) AS revenue
+                                    FROM (
+                                        SELECT s.{q_name(sales_cust)} AS d_code, SUM({join_revenue_expr}) AS dealer_rev
+                                        FROM {sales_from}
+                                        WHERE s.{q_name(sales_cust)} IS NOT NULL
+                                        GROUP BY s.{q_name(sales_cust)}
+                                    ) ds
+                                    JOIN {q_tbl(cust_tbl)} c ON (ds.d_code = c.{q_name(cust_id)} OR LTRIM(ds.d_code, '0') = LTRIM(c.{q_name(cust_id)}, '0'))
+                                    LEFT JOIN {q_tbl(terr_tbl)} t ON c.{q_name(cust_terr)} = t.{q_name(terr_code)}
+                                    LEFT JOIN {q_tbl(reg_tbl)} r ON (t.{q_name(terr_reg)} = r.{q_name(r_code)} OR c.{q_name(cust_reg)} = r.{q_name(r_code)})
+                                    WHERE (c.{q_name('KLABC')} IS NULL OR c.{q_name('KLABC')} <> 'X')
+                                      AND r.{q_name(r_name)} IS NOT NULL AND r.{q_name(r_name)} <> ''
+                                    GROUP BY COALESCE(r.{q_name(r_name)}, r.{q_name(r_code)}, 'Unknown')
+                                    ORDER BY revenue DESC
+                                    LIMIT 1
+                                """
+                                execute_query(cursor, q_r3, is_hana=is_hana)
+                                row = fetchone_dict(cursor)
+                                if row and row.get("region_name"):
+                                    leading_region = row["region_name"]
+                            except Exception as reg_err:
+                                print(f"[Default Metrics] Customer territory region query failed: {reg_err}")
+
+                if leading_region == "N/A" and cust_tbl and reg_tbl:
+                    sales_cust = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
+                    cust_id = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
                     cust_reg = check_col(table_columns[cust_tbl], ["regio", "region_code", "region"])
                     r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
+                    r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
 
-                    if sales_cust and cust_id and cust_terr and terr_code and terr_reg and r_code and r_name:
+                    if sales_cust and cust_id and cust_reg and r_code and r_name:
                         try:
-                            # Pre-aggregate by dealer_code for fast execution
-                            q_r3 = f"""
+                            q_r_direct = f"""
                                 SELECT
-                                    COALESCE(r.{q_name(r_name)}, r.{q_name(r_code)}, 'Unknown') AS region_name,
+                                    r.{q_name(r_name)} AS region_name,
                                     ROUND(SUM(ds.dealer_rev), 2) AS revenue
                                 FROM (
                                     SELECT s.{q_name(sales_cust)} AS d_code, SUM({join_revenue_expr}) AS dealer_rev
@@ -2415,84 +2623,48 @@ def default_dashboard_metrics_controller(get_db_connection):
                                     GROUP BY s.{q_name(sales_cust)}
                                 ) ds
                                 JOIN {q_tbl(cust_tbl)} c ON (ds.d_code = c.{q_name(cust_id)} OR LTRIM(ds.d_code, '0') = LTRIM(c.{q_name(cust_id)}, '0'))
-                                LEFT JOIN {q_tbl(terr_tbl)} t ON c.{q_name(cust_terr)} = t.{q_name(terr_code)}
-                                LEFT JOIN {q_tbl(reg_tbl)} r ON (t.{q_name(terr_reg)} = r.{q_name(r_code)} OR c.{q_name(cust_reg)} = r.{q_name(r_code)})
+                                JOIN {q_tbl(reg_tbl)} r ON c.{q_name(cust_reg)} = r.{q_name(r_code)}
                                 WHERE (c.{q_name('KLABC')} IS NULL OR c.{q_name('KLABC')} <> 'X')
                                   AND r.{q_name(r_name)} IS NOT NULL AND r.{q_name(r_name)} <> ''
-                                GROUP BY COALESCE(r.{q_name(r_name)}, r.{q_name(r_code)}, 'Unknown')
+                                GROUP BY r.{q_name(r_name)}
                                 ORDER BY revenue DESC
                                 LIMIT 1
                             """
-                            execute_query(cursor, q_r3, is_hana=is_hana)
+                            execute_query(cursor, q_r_direct, is_hana=is_hana)
                             row = fetchone_dict(cursor)
                             if row and row.get("region_name"):
                                 leading_region = row["region_name"]
                         except Exception as reg_err:
-                            print(f"[Default Metrics] Customer territory region query failed: {reg_err}")
+                            print(f"[Default Metrics] Direct customer region query failed: {reg_err}")
 
-            # Fallback direct Customer -> Region
-            if leading_region == "N/A" and cust_tbl and reg_tbl:
-                sales_cust = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
-                cust_id = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
-                cust_reg = check_col(table_columns[cust_tbl], ["regio", "region_code", "region"])
-                r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
-                r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
+                if leading_region == "N/A" and terr_tbl and reg_tbl:
+                    sales_plant = check_col(sales_cols, ["plant", "werks"])
+                    terr_werks = check_col(table_columns[terr_tbl], ["werks", "plant"])
+                    terr_area = check_col(table_columns[terr_tbl], ["area", "region_code", "region", "regio"])
+                    r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
+                    r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
 
-                if sales_cust and cust_id and cust_reg and r_code and r_name:
-                    try:
-                        q_r_direct = f"""
-                            SELECT
-                                r.{q_name(r_name)} AS region_name,
-                                ROUND(SUM(ds.dealer_rev), 2) AS revenue
-                            FROM (
-                                SELECT s.{q_name(sales_cust)} AS d_code, SUM({join_revenue_expr}) AS dealer_rev
+                    if sales_plant and terr_werks and terr_area and r_code and r_name:
+                        try:
+                            q_r2 = f"""
+                                SELECT
+                                    r.{q_name(r_name)} AS region_name,
+                                    ROUND(SUM({join_revenue_expr}), 2) AS revenue
                                 FROM {sales_from}
-                                WHERE s.{q_name(sales_cust)} IS NOT NULL
-                                GROUP BY s.{q_name(sales_cust)}
-                            ) ds
-                            JOIN {q_tbl(cust_tbl)} c ON (ds.d_code = c.{q_name(cust_id)} OR LTRIM(ds.d_code, '0') = LTRIM(c.{q_name(cust_id)}, '0'))
-                            JOIN {q_tbl(reg_tbl)} r ON c.{q_name(cust_reg)} = r.{q_name(r_code)}
-                            WHERE (c.{q_name('KLABC')} IS NULL OR c.{q_name('KLABC')} <> 'X')
-                              AND r.{q_name(r_name)} IS NOT NULL AND r.{q_name(r_name)} <> ''
-                            GROUP BY r.{q_name(r_name)}
-                            ORDER BY revenue DESC
-                            LIMIT 1
-                        """
-                        execute_query(cursor, q_r_direct, is_hana=is_hana)
-                        row = fetchone_dict(cursor)
-                        if row and row.get("region_name"):
-                            leading_region = row["region_name"]
-                    except Exception as reg_err:
-                        print(f"[Default Metrics] Direct customer region query failed: {reg_err}")
+                                JOIN {q_tbl(terr_tbl)} t ON s.{q_name(sales_plant)} = t.{q_name(terr_werks)}
+                                JOIN {q_tbl(reg_tbl)} r ON t.{q_name(terr_area)} = r.{q_name(r_code)}
+                                WHERE r.{q_name(r_name)} IS NOT NULL AND r.{q_name(r_name)} <> ''
+                                GROUP BY r.{q_name(r_name)}
+                                ORDER BY revenue DESC
+                                LIMIT 1
+                            """
+                            execute_query(cursor, q_r2, is_hana=is_hana)
+                            row = fetchone_dict(cursor)
+                            if row and row.get("region_name"):
+                                leading_region = row["region_name"]
+                        except Exception as reg_err:
+                            print(f"[Default Metrics] Plant territory region query failed: {reg_err}")
 
-            # Last resort fallback: Plant -> Territory -> Region (only if Customer Master unavailable)
-            if leading_region == "N/A" and terr_tbl and reg_tbl:
-                sales_plant = check_col(sales_cols, ["plant", "werks"])
-                terr_werks = check_col(table_columns[terr_tbl], ["werks", "plant"])
-                terr_area = check_col(table_columns[terr_tbl], ["area", "region_code", "region", "regio"])
-                r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
-                r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
-
-                if sales_plant and terr_werks and terr_area and r_code and r_name:
-                    try:
-                        q_r2 = f"""
-                            SELECT
-                                r.{q_name(r_name)} AS region_name,
-                                ROUND(SUM({join_revenue_expr}), 2) AS revenue
-                            FROM {sales_from}
-                            JOIN {q_tbl(terr_tbl)} t ON s.{q_name(sales_plant)} = t.{q_name(terr_werks)}
-                            JOIN {q_tbl(reg_tbl)} r ON t.{q_name(terr_area)} = r.{q_name(r_code)}
-                            WHERE r.{q_name(r_name)} IS NOT NULL AND r.{q_name(r_name)} <> ''
-                            GROUP BY r.{q_name(r_name)}
-                            ORDER BY revenue DESC
-                            LIMIT 1
-                        """
-                        execute_query(cursor, q_r2, is_hana=is_hana)
-                        row = fetchone_dict(cursor)
-                        if row and row.get("region_name"):
-                            leading_region = row["region_name"]
-                    except Exception as reg_err:
-                        print(f"[Default Metrics] Plant territory region query failed: {reg_err}")
 
         # 4. YoY Growth
         current_year = 0.0
@@ -2502,43 +2674,134 @@ def default_dashboard_metrics_controller(get_db_connection):
         yoy = 0.0
         yoy_subtext = "No data available"
 
-        if has_revenue and real_date_col:
-            try:
-                year_expr = f"YEAR(s.{q_name(real_date_col)})"
-                date_filter = f"s.{q_name(real_date_col)} IS NOT NULL"
+        if has_revenue:
+            # ── SAP HANA path: full CTE with NOT EXISTS cancellation filters ──
+            if is_hana and curr_sales_tbl and hist_sales_tbl:
+                try:
+                    curr_c4 = table_columns.get(curr_sales_tbl, {})
+                    hist_c4 = table_columns.get(hist_sales_tbl, {})
+                    _h_rev4  = check_col(hist_c4,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _c_rev4  = check_col(curr_c4,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _h_date4 = check_col(hist_c4,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _c_date4 = check_col(curr_c4,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _h_cust4 = check_col(hist_c4,  ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _c_cust4 = check_col(curr_c4,  ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _h_plt4  = check_col(hist_c4,  ["plant", "werks"]) or "plant"
+                    _c_plt4  = check_col(curr_c4,  ["plant", "werks"]) or "plant"
+                    _h_inv4  = check_col(hist_c4,  ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _c_inv4  = check_col(curr_c4,  ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _h_fk4   = check_col(hist_c4,  ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _c_fk4   = check_col(curr_c4,  ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _h_dc4   = check_col(hist_c4,  ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _c_dc4   = check_col(curr_c4,  ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _h_canc4 = check_col(hist_c4,  ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
+                    _c_canc4 = check_col(curr_c4,  ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
 
-                q_yoy = f"""
-                    SELECT {year_expr} AS yr, ROUND(SUM({join_revenue_expr}), 2) AS revenue
-                    FROM {sales_from}
-                    WHERE {date_filter} AND {year_expr} IS NOT NULL AND {year_expr} > 2000
-                    GROUP BY {year_expr}
-                    ORDER BY yr DESC
-                """
-                execute_query(cursor, q_yoy, is_hana=is_hana)
-                year_rows = fetchall_dict(cursor)
+                    canc_tbl4 = find_table(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled_sales_invoice", "cancelled"])
+                    cust_tbl4 = find_table(["zivfcustomermaster", "customermaster", "customer"])
 
-                if year_rows and len(year_rows) > 0:
-                    current_year_row = year_rows[0]
-                    current_year = float(current_year_row.get("revenue") or 0.0)
-                    current_year_num = int(current_year_row["yr"])
+                    q_yoy_hana = f"""
+WITH base AS (
+    SELECT "{_h_inv4}" AS "invoice_number", "{_h_plt4}" AS "plant", "{_h_fk4}" AS "FKART",
+           "{_h_cust4}" AS "dealer_code", "{_h_date4}" AS "invoice_date",
+           "{_h_dc4}" AS "distribution_channel", "{_h_canc4}" AS "indicator_cancel",
+           "{_h_rev4}" AS "invoice_value"
+    FROM {q_tbl(hist_sales_tbl)}
+    UNION ALL
+    SELECT "{_c_inv4}" AS "invoice_number", "{_c_plt4}" AS "plant", "{_c_fk4}" AS "FKART",
+           "{_c_cust4}" AS "dealer_code", "{_c_date4}" AS "invoice_date",
+           "{_c_dc4}" AS "distribution_channel", "{_c_canc4}" AS "indicator_cancel",
+           "{_c_rev4}" AS "invoice_value"
+    FROM {q_tbl(curr_sales_tbl)}
+)
+SELECT YEAR(t."invoice_date") AS yr,
+       ROUND(SUM(COALESCE(t."invoice_value", 0)) / 10000000, 2) AS revenue
+FROM base t
+WHERE CAST(t."distribution_channel" AS NVARCHAR(10)) = '10'
+  AND COALESCE(t."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+  AND t."invoice_date" >= '2020-01-01'"""
 
-                    if len(year_rows) > 1:
-                        prev_year_row = year_rows[1]
-                        previous_year = float(prev_year_row.get("revenue") or 0.0)
-                        prev_year_num = int(prev_year_row["yr"])
+                    if canc_tbl4:
+                        q_yoy_hana += f"""
+  AND NOT EXISTS (
+      SELECT 1 FROM {q_tbl(canc_tbl4)} c
+      WHERE CAST(c."distribution_channel" AS NVARCHAR(10)) = '10'
+        AND c."invoice_number" = t."invoice_number"
+        AND c."plant" = t."plant" AND c."FKART" = t."FKART"
+  )"""
+                    if cust_tbl4:
+                        q_yoy_hana += f"""
+  AND NOT EXISTS (
+      SELECT 1 FROM {q_tbl(cust_tbl4)} cm
+      WHERE cm."KUNNR" = t."dealer_code" AND UPPER(TRIM(cm."KLABC")) = 'X'
+  )"""
 
-                        if previous_year > 0:
-                            yoy = round(((current_year - previous_year) / previous_year) * 100, 2)
-                            if current_year_num - prev_year_num == 1:
+                    q_yoy_hana += """
+GROUP BY YEAR(t."invoice_date")
+ORDER BY yr DESC"""
+
+                    execute_query(cursor, q_yoy_hana, is_hana=True)
+                    year_rows = fetchall_dict(cursor)
+
+                    if year_rows and len(year_rows) > 0:
+                        current_year_row = year_rows[0]
+                        current_year = float(current_year_row.get("revenue") or 0.0)
+                        current_year_num = int(current_year_row["yr"])
+
+                        if len(year_rows) > 1:
+                            prev_year_row = year_rows[1]
+                            previous_year = float(prev_year_row.get("revenue") or 0.0)
+                            prev_year_num = int(prev_year_row["yr"])
+
+                            if previous_year > 0:
+                                yoy = round(((current_year - previous_year) / previous_year) * 100, 2)
                                 yoy_subtext = f"Compared to {prev_year_num}"
                             else:
-                                yoy_subtext = f"Compared to {prev_year_num}"
+                                yoy_subtext = f"{current_year_num} sales only"
                         else:
                             yoy_subtext = f"{current_year_num} sales only"
-                    else:
-                        yoy_subtext = f"{current_year_num} sales only"
-            except Exception as yoy_err:
-                print(f"[Default Metrics] YoY query failed: {yoy_err}")
+                        print(f"[Default Metrics] HANA YoY: {current_year_num}={current_year:.2f}Cr, {prev_year_num}={previous_year:.2f}Cr, growth={yoy:+.2f}%")
+                except Exception as yoy_hana_err:
+                    print(f"[Default Metrics] HANA YoY query failed: {yoy_hana_err}")
+
+            # ── Non-HANA / fallback path (unchanged) ──
+            if current_year == 0.0 and real_date_col:
+                try:
+                    year_expr = f"YEAR(s.{q_name(real_date_col)})"
+                    date_filter = f"s.{q_name(real_date_col)} IS NOT NULL"
+
+                    q_yoy = f"""
+                        SELECT {year_expr} AS yr, ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                        FROM {sales_from}
+                        WHERE {date_filter} AND {year_expr} IS NOT NULL AND {year_expr} > 2000
+                        GROUP BY {year_expr}
+                        ORDER BY yr DESC
+                    """
+                    execute_query(cursor, q_yoy, is_hana=is_hana)
+                    year_rows = fetchall_dict(cursor)
+
+                    if year_rows and len(year_rows) > 0:
+                        current_year_row = year_rows[0]
+                        current_year = float(current_year_row.get("revenue") or 0.0)
+                        current_year_num = int(current_year_row["yr"])
+
+                        if len(year_rows) > 1:
+                            prev_year_row = year_rows[1]
+                            previous_year = float(prev_year_row.get("revenue") or 0.0)
+                            prev_year_num = int(prev_year_row["yr"])
+
+                            if previous_year > 0:
+                                yoy = round(((current_year - previous_year) / previous_year) * 100, 2)
+                                if current_year_num - prev_year_num == 1:
+                                    yoy_subtext = f"Compared to {prev_year_num}"
+                                else:
+                                    yoy_subtext = f"Compared to {prev_year_num}"
+                            else:
+                                yoy_subtext = f"{current_year_num} sales only"
+                        else:
+                            yoy_subtext = f"{current_year_num} sales only"
+                except Exception as yoy_err:
+                    print(f"[Default Metrics] YoY query failed: {yoy_err}")
 
         # 5. Billing Scope (Distinct active customers billed)
         billing_scope = "N/A"
