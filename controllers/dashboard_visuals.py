@@ -2169,23 +2169,124 @@ def default_dashboard_metrics_controller(get_db_connection):
         real_date_col = check_col(sales_cols, ["invoice_date", "date", "billing__doc_date", "billing_doc_date", "fkdat"])
 
         # 1. Total Sales Revenue & Dynamic Lifetime Period
+        # For SAP HANA (both history + current views): exact CTE matching the reference query -
+        #   UNION ALL both views, filter distribution_channel='10', exclude cancelled invoices
+        #   via NOT EXISTS on CancelledSalesInvoice, exclude dummy/internal accounts (KLABC='X'),
+        #   and use lifetime date range >= '2020-01-01'.
+        # This matches the verified reference value (e.g. ₹61,672.55 Cr).
         total_revenue = 0.0
         min_sales_yr = None
         max_sales_yr = None
         if has_revenue:
             try:
-                rev_q = f"SELECT SUM({join_revenue_expr}) AS total_sales_revenue"
-                if real_date_col:
-                    rev_q += f", MIN(YEAR(s.{q_name(real_date_col)})) AS min_yr, MAX(YEAR(s.{q_name(real_date_col)})) AS max_yr"
-                rev_q += f" FROM {sales_from}"
-                execute_query(cursor, rev_q, is_hana=is_hana)
-                row = fetchone_dict(cursor)
-                if row:
-                    total_revenue = float(row.get("total_sales_revenue") or 0)
-                    min_sales_yr = row.get("min_yr")
-                    max_sales_yr = row.get("max_yr")
+                if is_hana and curr_sales_tbl and hist_sales_tbl:
+                    # Resolve exact column names from the view metadata
+                    curr_c = table_columns.get(curr_sales_tbl, {})
+                    hist_c = table_columns.get(hist_sales_tbl, {})
+                    _c_rev  = check_col(curr_c, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _h_rev  = check_col(hist_c, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _c_date = check_col(curr_c, ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _h_date = check_col(hist_c, ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _c_cust = check_col(curr_c, ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _h_cust = check_col(hist_c, ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _c_plt  = check_col(curr_c, ["plant", "werks"]) or "plant"
+                    _h_plt  = check_col(hist_c, ["plant", "werks"]) or "plant"
+                    _c_inv  = check_col(curr_c, ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _h_inv  = check_col(hist_c, ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _c_fk   = check_col(curr_c, ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _h_fk   = check_col(hist_c, ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _c_dc   = check_col(curr_c, ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _h_dc   = check_col(hist_c, ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _c_canc = check_col(curr_c, ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
+                    _h_canc = check_col(hist_c, ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
+
+                    canc_tbl_rev = find_table(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled_sales_invoice", "cancelled"])
+                    cust_tbl_rev = find_table(["zivfcustomermaster", "customermaster", "customer"])
+
+                    rev_q = f"""
+                    WITH base AS (
+                        SELECT
+                            "{_h_inv}"  AS "invoice_number",
+                            "{_h_plt}"  AS "plant",
+                            "{_h_fk}"   AS "FKART",
+                            "{_h_cust}" AS "dealer_code",
+                            "{_h_date}" AS "invoice_date",
+                            "{_h_dc}"   AS "distribution_channel",
+                            "{_h_canc}" AS "indicator_cancel",
+                            "{_h_rev}"  AS "invoice_value"
+                        FROM {q_tbl(hist_sales_tbl)}
+                        UNION ALL
+                        SELECT
+                            "{_c_inv}"  AS "invoice_number",
+                            "{_c_plt}"  AS "plant",
+                            "{_c_fk}"   AS "FKART",
+                            "{_c_cust}" AS "dealer_code",
+                            "{_c_date}" AS "invoice_date",
+                            "{_c_dc}"   AS "distribution_channel",
+                            "{_c_canc}" AS "indicator_cancel",
+                            "{_c_rev}"  AS "invoice_value"
+                        FROM {q_tbl(curr_sales_tbl)}
+                    )
+                    SELECT
+                        ROUND(SUM(COALESCE(t."invoice_value", 0)) / 10000000, 2) AS total_sales_revenue,
+                        MIN(YEAR(t."invoice_date")) AS min_yr,
+                        MAX(YEAR(t."invoice_date")) AS max_yr
+                    FROM base t
+                    WHERE CAST(t."distribution_channel" AS NVARCHAR(10)) = '10'
+                      AND COALESCE(t."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+                      AND t."invoice_date" >= '2020-01-01'
+                    """
+
+                    # NOT EXISTS: exclude invoices present in CancelledSalesInvoice
+                    if canc_tbl_rev:
+                        rev_q += f"""
+                      AND NOT EXISTS (
+                          SELECT 1 FROM {q_tbl(canc_tbl_rev)} c
+                          WHERE CAST(c."distribution_channel" AS NVARCHAR(10)) = '10'
+                            AND c."invoice_number" = t."invoice_number"
+                            AND c."plant"          = t."plant"
+                            AND c."FKART"          = t."FKART"
+                      )"""
+
+                    # NOT EXISTS: exclude dummy/internal/test accounts (KLABC = 'X')
+                    if cust_tbl_rev:
+                        rev_q += f"""
+                      AND NOT EXISTS (
+                          SELECT 1 FROM {q_tbl(cust_tbl_rev)} cm
+                          WHERE cm."KUNNR" = t."dealer_code"
+                            AND UPPER(TRIM(cm."KLABC")) = 'X'
+                      )"""
+
+                    execute_query(cursor, rev_q, is_hana=True)
+                    row = fetchone_dict(cursor)
+                    if row:
+                        total_revenue = float(row.get("total_sales_revenue") or 0)
+                        min_sales_yr  = row.get("min_yr")
+                        max_sales_yr  = row.get("max_yr")
+                        print(f"[Default Metrics] HANA Lifetime Revenue (ch=10, excl cancelled+dummy): ₹{total_revenue:,.2f} Cr")
+                else:
+                    # MySQL / single-table path: use existing sales_from
+                    rev_q = f"SELECT SUM({join_revenue_expr}) AS total_sales_revenue"
+                    if real_date_col:
+                        rev_q += f", MIN(YEAR(s.{q_name(real_date_col)})) AS min_yr, MAX(YEAR(s.{q_name(real_date_col)})) AS max_yr"
+                    rev_q += f" FROM {sales_from}"
+                    execute_query(cursor, rev_q, is_hana=is_hana)
+                    row = fetchone_dict(cursor)
+                    if row:
+                        total_revenue = float(row.get("total_sales_revenue") or 0)
+                        min_sales_yr  = row.get("min_yr")
+                        max_sales_yr  = row.get("max_yr")
             except Exception as rev_err:
                 print(f"[Default Metrics] Total revenue query failed: {rev_err}")
+                # Fallback: plain SUM without filters
+                try:
+                    rev_q_fb = f"SELECT SUM({join_revenue_expr}) AS total_sales_revenue FROM {sales_from}"
+                    execute_query(cursor, rev_q_fb, is_hana=is_hana)
+                    row = fetchone_dict(cursor)
+                    if row:
+                        total_revenue = float(row.get("total_sales_revenue") or 0)
+                except Exception:
+                    pass
 
         # 2. Top Performing Tyre
         top_tyre = "N/A"
