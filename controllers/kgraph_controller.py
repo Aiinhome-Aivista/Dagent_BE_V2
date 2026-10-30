@@ -560,10 +560,10 @@ def rollback_kgraph_controller(get_db_connection):
 def get_all_kgraphs_controller(get_db_connection):
     try:
         conn = get_db_connection()
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
         
         try:
-            cursor.execute("SELECT id, session_name, graph_url, created_at FROM graph ORDER BY created_at DESC")
+            cursor.execute("SELECT id, session_name, graph_url FROM graph ORDER BY id DESC")
             graphs = cursor.fetchall()
             return jsonify({"status": "success", "graphs": graphs}), 200
         except Exception as e:
