@@ -60,7 +60,15 @@ from database.llm_service import LLMService
 from database.database_service import DatabaseService
 from controllers.orchestrator_controller import process_books
 from controllers.admin_login import staff_login_controller, create_staff_account_controller,get_all_staff_controller
-from controllers.kgraph_controller import rollback_kgraph_controller, get_all_kgraphs_controller, get_kgraph_ontology_analysis_controller
+from controllers.kgraph_controller import (
+    rollback_kgraph_controller,
+    get_all_kgraphs_controller,
+    get_kgraph_ontology_analysis_controller,
+    create_kgraph_backup_controller,
+    list_kgraph_backups_controller,
+    restore_kgraph_backup_controller,
+    delete_kgraph_backup_controller
+)
 load_dotenv()
 from controllers.captcha_controller import generate_captcha_controller
 from flask import send_from_directory
@@ -1028,9 +1036,29 @@ def delete_scheduled_report(schedule_id):
 
 
 
-@app.route("/kgraph-rollback", methods=["POST"])
-def rollback_kgraph():
-    return rollback_kgraph_controller(get_db_connection)
+@app.route("/kgraph-rollback", methods=["POST"])
+def rollback_kgraph():
+    return rollback_kgraph_controller(get_db_connection)
+
+@app.route("/api/kgraph/backup", methods=["POST"])
+@app.route("/api/kgraph/create-backup", methods=["POST"])
+def create_kgraph_backup():
+    return create_kgraph_backup_controller(get_db_connection)
+
+@app.route("/api/kgraph/backups", methods=["GET", "POST"])
+@app.route("/api/kgraph/list-backups", methods=["GET", "POST"])
+def list_kgraph_backups():
+    return list_kgraph_backups_controller(get_db_connection)
+
+@app.route("/api/kgraph/restore", methods=["POST"])
+@app.route("/api/kgraph/restore-backup", methods=["POST"])
+def restore_kgraph_backup():
+    return restore_kgraph_backup_controller(get_db_connection)
+
+@app.route("/api/kgraph/delete-backup", methods=["POST", "DELETE"])
+@app.route("/api/kgraph/backup", methods=["DELETE"])
+def delete_kgraph_backup():
+    return delete_kgraph_backup_controller(get_db_connection)
 
 @app.route("/api/kgraph/ontology-analysis", methods=["GET", "POST"])
 def get_kgraph_ontology_analysis():
