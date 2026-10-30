@@ -3230,7 +3230,7 @@ ORDER BY yr DESC"""
             },
             "metric_4": {
                 "label": "Year-over-Year Growth", 
-                "value": f"{yoy:+0.1f}%" if previous_year > 0 else ("0.0%" if current_year > 0 else "N/A"), 
+                "value": f"{yoy:+0.2f}%" if previous_year > 0 else ("0.00%" if current_year > 0 else "N/A"), 
                 "subtext": yoy_subtext
             },
             "metric_5": {"label": "Achievement", "value": achievement_val, "subtext": ach_subtext},
