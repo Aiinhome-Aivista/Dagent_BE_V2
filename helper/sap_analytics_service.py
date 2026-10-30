@@ -2603,95 +2603,146 @@ def query_sales_summary_in_no_and_values_hana(cursor, schema, year, month, day):
 
 
 def query_sales_revenue_by_zone_hana(cursor, schema, zone=None):
-
     if not zone or zone in ('', 'null', 'All'):
-
         hana_sql = f"""
+        WITH
+        CUSTOMER_MAP AS
+        (
+            SELECT DISTINCT
+                LPAD(TO_NVARCHAR(C."KUNNR"), 10, '0') AS CUSTOMER_CODE,
+                C."BZIRK"
+            FROM "{schema}"."ZIVF_CustomerMaster_01_MD" C
+            WHERE IFNULL(C."KLABC", '') <> 'X'
+        ),
 
-        SELECT 
+        TERRITORY_MAP AS
+        (
+            SELECT DISTINCT
+                T."BZIRK",
+                T."P_ZONE"
+            FROM "{schema}"."ZIVF_TerritoryMaster_01_TR" T
+        ),
 
-            zm.NAME AS "zone", 
+        CURRENT_SALES AS
+        (
+            SELECT
+                LPAD(TRIM(S."dealer_code"), 10, '0') AS CUSTOMER_CODE,
+                COALESCE(
+                    S."ndp_value",
+                    S."taxable_value",
+                    S."invoice_value",
+                    0
+                ) AS SALES_VALUE
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" S
+            WHERE S."distribution_channel" = '10'
+              AND IFNULL(S."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+        ),
 
-            ROUND(SUM(COALESCE(cs.NDP_VALUE, cs.TAXABLE_VALUE, cs.INVOICE_VALUE, 0)) / 10000000, 2) AS "saleValueCr",
+        HISTORY_SALES AS
+        (
+            SELECT
+                LPAD(TRIM(S."dealer_code"), 10, '0') AS CUSTOMER_CODE,
+                COALESCE(
+                    S."ndp_value",
+                    S."taxable_value",
+                    S."invoice_value",
+                    0
+                ) AS SALES_VALUE
+            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" S
+            WHERE S."distribution_channel" = '10'
+              AND IFNULL(S."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+        ),
 
-            0 AS "planValueCr",
-
-            0 AS "achievValuePct"
-
-        FROM (
-
-            SELECT s.DEALER_CODE, s.PLANT, s.INVOICE_VALUE, s.TAXABLE_VALUE, s.NDP_VALUE, s.INDICATOR_CANCEL, s.DISTRIBUTION_CHANNEL 
-
-            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
-
-            WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
-
-              AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
+        ALL_SALES AS
+        (
+            SELECT CUSTOMER_CODE, SALES_VALUE
+            FROM CURRENT_SALES
 
             UNION ALL
 
-            SELECT s.DEALER_CODE, s.PLANT, s.INVOICE_VALUE, s.TAXABLE_VALUE, s.NDP_VALUE, s.INDICATOR_CANCEL, s.DISTRIBUTION_CHANNEL 
+            SELECT CUSTOMER_CODE, SALES_VALUE
+            FROM HISTORY_SALES
+        ),
 
-            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+        ACTUAL_BY_ZONE AS
+        (
+            SELECT
+                T."P_ZONE",
+                SUM(S.SALES_VALUE) AS ACTUAL_SALES
+            FROM ALL_SALES S
+            INNER JOIN CUSTOMER_MAP C
+                ON S.CUSTOMER_CODE = C.CUSTOMER_CODE
+            INNER JOIN TERRITORY_MAP T
+                ON C."BZIRK" = T."BZIRK"
+            GROUP BY T."P_ZONE"
+        ),
 
-            WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
+        PLAN_BY_ZONE AS
+        (
+            SELECT
+                T."P_ZONE",
+                SUM(IFNULL(P."PLAN_VALUE", 0)) AS ORIGINAL_PLAN,
+                SUM(IFNULL(P."REV_PLAN_VAL", 0)) AS REVISED_PLAN,
+                COUNT(*) AS TARGET_RECORDS
+            FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" P
+            INNER JOIN TERRITORY_MAP T
+                ON TRIM(P."TERR_CODE") = TRIM(T."BZIRK")
+            WHERE P."YMONTH" = '202610'
+            GROUP BY T."P_ZONE"
+        )
 
-              AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
+        SELECT
+            CASE Z."P_ZONE"
+                WHEN 'CZ' THEN 'Central Zone'
+                WHEN 'EZ' THEN 'EAST'
+                WHEN 'NZ' THEN 'NORTH'
+                WHEN 'NP' THEN 'Nepal'
+                WHEN 'SZ' THEN 'SOUTH'
+                WHEN 'TZ' THEN 'South Zone - II'
+                WHEN 'WZ' THEN 'WEST'
+                ELSE Z."NAME"
+            END AS "zone",
 
-        ) cs
+            ROUND(IFNULL(A.ACTUAL_SALES, 0) / 10000000, 2)
+                AS "saleValueCr",
 
-        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cust ON (LPAD(TRIM(cs.DEALER_CODE), 10, '0') = cust.KUNNR OR LTRIM(cs.DEALER_CODE, '0') = LTRIM(cust.KUNNR, '0'))
+            ROUND(IFNULL(P.ORIGINAL_PLAN, 0) / 10000000, 2)
+                AS "planValueCr",
 
-        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
+            ROUND(IFNULL(P.REVISED_PLAN, 0) / 10000000, 2)
+                AS "revisedPlanValueCr",
 
-        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cust.BZIRK = tm_bzirk.BZIRK)
+            ROUND(
+                CASE
+                    WHEN IFNULL(P.ORIGINAL_PLAN, 0) = 0 THEN 0
+                    ELSE IFNULL(A.ACTUAL_SALES, 0) / P.ORIGINAL_PLAN * 100
+                END, 2
+            ) AS "achievValuePct",
 
-        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cust.REGIO)), '')))
+            ROUND(
+                CASE
+                    WHEN IFNULL(P.REVISED_PLAN, 0) = 0 THEN 0
+                    ELSE IFNULL(A.ACTUAL_SALES, 0) / P.REVISED_PLAN * 100
+                END, 2
+            ) AS "revisedAchievValuePct",
 
-        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(
+            Z."P_ZONE" AS "zoneCode",
+            IFNULL(P.TARGET_RECORDS, 0) AS "targetRecords"
 
-            NULLIF(TRIM(tm_plant.P_ZONE), ''),
+        FROM "{schema}"."ZIVF_ZoneMaster_01_TR" Z
 
-            NULLIF(TRIM(tm_bzirk.P_ZONE), ''),
+        LEFT JOIN ACTUAL_BY_ZONE A
+            ON Z."P_ZONE" = A."P_ZONE"
 
-            NULLIF(TRIM(rm.ZONE_CODE), ''),
-
-            CASE 
-
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 2) IN ('36', '71', '72') THEN 'CZ'
-
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '3' THEN 'NZ'
-
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '1' THEN 'EZ'
-
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '8' THEN 'NP'
-
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 2) IN ('51', '52') THEN 'TZ'
-
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '5' THEN 'SZ'
-
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '7' THEN 'WZ'
-
-                ELSE 'CZ'
-
-            END
-
-        ))
-
-        WHERE (cust.KLABC IS NULL OR UPPER(TRIM(cust.KLABC)) <> 'X')
-
-          AND zm.NAME IS NOT NULL
-
-        GROUP BY zm.NAME
+        LEFT JOIN PLAN_BY_ZONE P
+            ON Z."P_ZONE" = P."P_ZONE"
 
         ORDER BY "saleValueCr" DESC
-
         """
 
         sanitize_and_execute_hana(cursor, schema, hana_sql)
 
     else:
-
         hana_sql = f"""
 
         SELECT 
