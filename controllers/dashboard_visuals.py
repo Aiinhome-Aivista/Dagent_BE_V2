@@ -1006,6 +1006,7 @@ def sales_by_zone_data_controller(get_db_connection):
     tunnel = None
     cursor = None
     chart_data = []
+    error_msg = ""
 
     try:
         conn = get_db_connection()
@@ -1026,167 +1027,337 @@ def sales_by_zone_data_controller(get_db_connection):
             sap_schema = None
             sap_table_cols = None
 
-        def has_valid_filters(filters):
-            return any(f and str(f).strip().lower() != "all" for f in filters)
+        if is_hana:
+            # ── Dedicated SAP HANA Path (CTE based on verified reference query) ──
+            try:
+                schema = sap_schema or "SAP_S4"
 
-        required_metrics = {
-            "zone": ["name", "p_zone", "Zone", "zone"],
-            "invoice_value": ["invoice_value", "ndp_value", "Invoice_Value", "taxable_value", "Invoice_Value_INR"]
-        }
-        optional_dims = {}
-        if has_valid_filters(selected_years) or has_valid_filters(selected_months):
-            optional_dims["invoice_date"] = ["invoice_date", "date", "billing__doc_date", "fkdat"]
-        if product_type and str(product_type).lower() != 'all':
-            optional_dims["customer_category"] = ["cat_code", "cat_desc", "category", "product_category", "catg", "prd_cat"]
-        if vehicle_type and str(vehicle_type).lower() != 'all':
-            optional_dims["vehicle_type"] = ["cat_code", "cat_desc", "tyre_type", "vehicle_type", "tyre_type_name", "maktx"]
-        if construction_type and str(construction_type).lower() != 'all':
-            optional_dims["construction_type"] = ["constuction", "CONSTRUCTION", "construction_type", "construction"]
+                def find_hana_tbl(candidates):
+                    if sap_table_cols:
+                        for c in candidates:
+                            for tbl in sap_table_cols.keys():
+                                if c.lower() in tbl.lower():
+                                    return tbl
+                    return None
 
-        from_clause, user_db, cols = get_query_context_for_session(
-            cursor, session_id, required_metrics, optional_dims,
-            is_hana=is_hana, hana_schema=sap_schema, hana_table_columns=sap_table_cols,
-            mysql_conn=conn, selected_years=selected_years
-        )
+                cust_tbl = find_hana_tbl(["zivfcustomermaster", "customermaster", "customer"]) or "ZIVF_CustomerMaster_01_MD"
+                terr_tbl = find_hana_tbl(["zivfterritorymaster", "territorymaster", "territory"]) or "ZIVF_TerritoryMaster_01_TR"
+                zone_tbl = find_hana_tbl(["zivfzonemaster", "zonemaster", "zone"]) or "ZIVF_ZoneMaster_01_TR"
+                sku_tbl  = find_hana_tbl(["zivrskumaster", "skumaster", "sku"]) or "ZIVR_SKUMaster_01_TR"
+                cat_tbl  = find_hana_tbl(["zivfcategorymaster", "categorymaster", "category"]) or "ZIVF_CategoryMaster_01_TR"
+                canc_tbl = find_hana_tbl(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled"]) or "ZPVF_SD_CancelledSalesInvoice_01_TR"
+                hist_tbl = find_hana_tbl(["zpvfsdsaleshistory", "saleshistory"]) or "ZPVF_SD_SalesHistory_01_TR"
+                curr_tbl = find_hana_tbl(["zpvfsdcurrentsales", "currentsales"]) or "ZPVF_SD_CurrentSales_01_TR"
 
-        if not from_clause:
-            return jsonify({"status": "success", "data": chart_data, "message": "Required metrics (zone, invoice_value) not found."}), 200
+                filter_conds = [
+                    'S."distribution_channel" = \'10\'',
+                    "COALESCE(S.\"indicator_cancel\", '') NOT IN ('X', 'Y', '1')"
+                ]
 
-        if not is_hana:
+                # Year filter
+                valid_years = []
+                if selected_years:
+                    for y in selected_years:
+                        if not y or str(y).strip().lower() == "all": continue
+                        try: valid_years.append(int(y))
+                        except ValueError: pass
+                if valid_years:
+                    yrs_str = ", ".join(str(y) for y in valid_years)
+                    filter_conds.append(f'YEAR(S."invoice_date") IN ({yrs_str})')
+
+                # Month filter
+                valid_months = []
+                if selected_months:
+                    month_to_num = {calendar.month_name[i].lower(): i for i in range(1, 13)}
+                    for m in selected_months:
+                        if not m or str(m).strip().lower() == "all": continue
+                        sm = str(m).strip().lower()
+                        if sm in month_to_num: valid_months.append(month_to_num[sm])
+                        elif sm.isdigit(): valid_months.append(int(sm))
+                if valid_months:
+                    mths_str = ", ".join(str(m) for m in valid_months)
+                    filter_conds.append(f'MONTH(S."invoice_date") IN ({mths_str})')
+
+                # Product Type filter
+                if product_type and str(product_type).strip().lower() != 'all':
+                    p_val = str(product_type).strip().replace("'", "''")
+                    filter_conds.append(f"""EXISTS (
+                        SELECT 1 FROM "{schema}"."{sku_tbl}" SKU
+                        WHERE SKU."MATNR" = S."SKU"
+                          AND (SKU."TT_TYPE" = '{p_val}' OR SKU."CAT_CODE" = '{p_val}')
+                    )""")
+
+                # Construction Type filter
+                if construction_type and str(construction_type).strip().lower() != 'all':
+                    label_to_id = {
+                        "bias": "1", "radial": "2", "tubeless bias": "3", "tubeless radial": "4",
+                        "radial (tube type)": "5", "radial (tubeless)": "6", "solid / otr": "7"
+                    }
+                    c_val = str(construction_type).strip()
+                    c_val_mapped = label_to_id.get(c_val.lower(), c_val).replace("'", "''")
+                    c_val_raw = c_val.replace("'", "''")
+                    filter_conds.append(f"""EXISTS (
+                        SELECT 1 FROM "{schema}"."{sku_tbl}" SKU
+                        WHERE SKU."MATNR" = S."SKU"
+                          AND (SKU."CONSTUCTION" = '{c_val_mapped}' OR UPPER(TRIM(SKU."CONSTUCTION")) = '{c_val_raw.upper()}')
+                    )""")
+
+                # Vehicle / Tyre Type filter
+                if vehicle_type and str(vehicle_type).strip().lower() != 'all':
+                    v_val = str(vehicle_type).strip().replace("'", "''")
+                    filter_conds.append(f"""EXISTS (
+                        SELECT 1 FROM "{schema}"."{sku_tbl}" SKU
+                        LEFT JOIN "{schema}"."{cat_tbl}" CAT ON CAT."CAT_CODE" = SKU."CAT_CODE"
+                        WHERE SKU."MATNR" = S."SKU"
+                          AND (CAT."CAT_DESC" = '{v_val}' OR SKU."CAT_CODE" = '{v_val}' OR SKU."TT_TYPE" = '{v_val}')
+                    )""")
+
+                # Cancelled invoices exclusion
+                filter_conds.append(f"""NOT EXISTS (
+                    SELECT 1 FROM "{schema}"."{canc_tbl}" C
+                    WHERE CAST(C."distribution_channel" AS NVARCHAR(10)) = '10'
+                      AND C."invoice_number" = S."invoice_number"
+                      AND C."plant" = S."plant"
+                      AND C."FKART" = S."FKART"
+                )""")
+
+                # Sales source selection
+                if valid_years and all(y <= 2025 for y in valid_years):
+                    sales_src_sql = f"""SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
+                                   "distribution_channel", "indicator_cancel", "invoice_value", "Tyre_Quantity"
+                            FROM "{schema}"."{hist_tbl}" """
+                else:
+                    sales_src_sql = f"""SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
+                                   "distribution_channel", "indicator_cancel", "invoice_value", "Tyre_Quantity"
+                            FROM "{schema}"."{hist_tbl}"
+                            UNION ALL
+                            SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
+                                   "distribution_channel", "indicator_cancel", "invoice_value", "Tyre_Quantity"
+                            FROM "{schema}"."{curr_tbl}" """
+
+                where_combined = " AND ".join(filter_conds)
+
+                hana_zone_sql = f"""
+WITH CUSTOMER_MAP AS (
+    SELECT DISTINCT
+        "KUNNR",
+        "BZIRK"
+    FROM "{schema}"."{cust_tbl}"
+    WHERE IFNULL("KLABC", '') <> 'X'
+),
+TERRITORY_MAP AS (
+    SELECT DISTINCT
+        "BZIRK",
+        "P_ZONE"
+    FROM "{schema}"."{terr_tbl}"
+),
+ZONE_MAP AS (
+    SELECT DISTINCT
+        "P_ZONE",
+        "NAME"
+    FROM "{schema}"."{zone_tbl}"
+),
+SALES_SOURCE AS (
+    {sales_src_sql}
+),
+SALES_AGGREGATED AS (
+    SELECT
+        TM."P_ZONE",
+        SUM(IFNULL(S."invoice_value", 0)) AS "TOTAL_SALES",
+        SUM(IFNULL(S."Tyre_Quantity", 0)) AS "TOTAL_QUANTITY",
+        COUNT(*) AS "TOTAL_RECORDS",
+        COUNT(DISTINCT S."invoice_number") AS "TOTAL_INVOICES",
+        COUNT(DISTINCT S."dealer_code") AS "TOTAL_DEALERS"
+    FROM SALES_SOURCE S
+    INNER JOIN CUSTOMER_MAP CM
+        ON LPAD(TRIM(S."dealer_code"), 10, '0') = CM."KUNNR"
+    INNER JOIN TERRITORY_MAP TM
+        ON CM."BZIRK" = TM."BZIRK"
+    WHERE
+        {where_combined}
+    GROUP BY TM."P_ZONE"
+)
+SELECT
+    ZM."P_ZONE" AS "ZONE_CODE",
+    ZM."NAME" AS "ZONE_NAME",
+    IFNULL(SA."TOTAL_SALES", 0) AS "TOTAL_SALES",
+    IFNULL(SA."TOTAL_QUANTITY", 0) AS "TOTAL_QUANTITY",
+    IFNULL(SA."TOTAL_RECORDS", 0) AS "TOTAL_RECORDS",
+    IFNULL(SA."TOTAL_INVOICES", 0) AS "TOTAL_INVOICES",
+    IFNULL(SA."TOTAL_DEALERS", 0) AS "TOTAL_DEALERS"
+FROM ZONE_MAP ZM
+LEFT JOIN SALES_AGGREGATED SA
+    ON ZM."P_ZONE" = SA."P_ZONE"
+ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
+"""
+                try:
+                    execute_query(cursor, hana_zone_sql, is_hana=True)
+                    results = fetchall_dict(cursor)
+                except Exception as union_e:
+                    print(f"[Sales by Zone] HANA union query failed: {union_e}, retrying with SalesHistory only...")
+                    # Fallback to SalesHistory only if UNION hits memory limit
+                    sales_src_sql_fb = f"""SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
+                                       "distribution_channel", "indicator_cancel", "invoice_value", "Tyre_Quantity"
+                                FROM "{schema}"."{hist_tbl}" """
+                    hana_zone_sql_fb = hana_zone_sql.replace(sales_src_sql, sales_src_sql_fb)
+                    execute_query(cursor, hana_zone_sql_fb, is_hana=True)
+                    results = fetchall_dict(cursor)
+
+                zone_map = {
+                    'WZ': 'West Zone', 'EZ': 'East Zone', 'NZ': 'North Zone',
+                    'SZ': 'South Zone I', 'TZ': 'South Zone II', 'CZ': 'Central Zone', 'NP': 'Nepal'
+                }
+
+                valid_selected_zones = [str(z).strip().upper() for z in selected_zones if z and str(z).strip().lower() != "all"]
+                if valid_selected_zones:
+                    results = [r for r in results if str(r.get('ZONE_CODE') or '').strip().upper() in valid_selected_zones]
+
+                total_sales = sum(float(r.get('TOTAL_SALES') or 0.0) for r in results)
+
+                for r in results:
+                    raw_code = str(r.get('ZONE_CODE') or '').strip().upper()
+                    raw_name = str(r.get('ZONE_NAME') or '').strip()
+                    val = float(r.get('TOTAL_SALES') or 0.0)
+                    r['zone'] = raw_code
+                    r['name'] = raw_name if raw_name else zone_map.get(raw_code, raw_code)
+                    r['sales_value'] = val
+                    r['value'] = val
+                    r['quantity'] = float(r.get('TOTAL_QUANTITY') or 0.0)
+                    r['percentage'] = round((val / total_sales) * 100, 1) if total_sales > 0 else 0.0
+
+                chart_data = [r for r in results if r['value'] > 0] or results
+                print(f"[Sales by Zone] HANA query returned {len(chart_data)} zones, total sales: ₹{total_sales/10000000:,.2f} Cr")
+            except Exception as hana_err:
+                print(f"[Sales by Zone] Dedicated HANA query failed: {hana_err}")
+                error_msg = str(hana_err)
+
+        else:
+            # ── Non-HANA / MySQL Fallback Path ──
+            def has_valid_filters(filters):
+                return any(f and str(f).strip().lower() != "all" for f in filters)
+
+            required_metrics = {
+                "zone": ["name", "p_zone", "Zone", "zone"],
+                "invoice_value": ["invoice_value", "ndp_value", "Invoice_Value", "taxable_value", "Invoice_Value_INR"]
+            }
+            optional_dims = {}
+            if has_valid_filters(selected_years) or has_valid_filters(selected_months):
+                optional_dims["invoice_date"] = ["invoice_date", "date", "billing__doc_date", "fkdat"]
+            if product_type and str(product_type).lower() != 'all':
+                optional_dims["customer_category"] = ["cat_code", "cat_desc", "category", "product_category", "catg", "prd_cat"]
+            if vehicle_type and str(vehicle_type).lower() != 'all':
+                optional_dims["vehicle_type"] = ["cat_code", "cat_desc", "tyre_type", "vehicle_type", "tyre_type_name", "maktx"]
+            if construction_type and str(construction_type).lower() != 'all':
+                optional_dims["construction_type"] = ["constuction", "CONSTRUCTION", "construction_type", "construction"]
+
+            from_clause, user_db, cols = get_query_context_for_session(
+                cursor, session_id, required_metrics, optional_dims,
+                is_hana=is_hana, hana_schema=sap_schema, hana_table_columns=sap_table_cols,
+                mysql_conn=conn, selected_years=selected_years
+            )
+
+            if not from_clause:
+                return jsonify({"status": "success", "data": chart_data, "message": "Required metrics (zone, invoice_value) not found."}), 200
+
             cursor.execute(f"USE `{user_db}`")
 
-        actual_zone = cols["zone"]
-        actual_invoice_value = cols["invoice_value"]
-        revenue_expr = f"CAST(REPLACE(TRIM({actual_invoice_value}), ',', '') AS DECIMAL(18,2))"
+            actual_zone = cols["zone"]
+            actual_invoice_value = cols["invoice_value"]
+            revenue_expr = f"CAST(REPLACE(TRIM({actual_invoice_value}), ',', '') AS DECIMAL(18,2))"
 
-        actual_invoice_date = cols.get("invoice_date")
-        actual_cat = cols.get("customer_category")
-        actual_const = cols.get("construction_type")
-        actual_tyre = cols.get("vehicle_type")
+            actual_invoice_date = cols.get("invoice_date")
+            actual_cat = cols.get("customer_category")
+            actual_const = cols.get("construction_type")
+            actual_tyre = cols.get("vehicle_type")
 
-        where_clauses = [f"{actual_zone} IS NOT NULL", f"{actual_zone} <> ''"]
-        if "cm" in from_clause:
-            klabc_col = 'cm."KLABC"' if is_hana else 'cm.`klabc`'
-            where_clauses.append(f"({klabc_col} IS NULL OR UPPER(TRIM({klabc_col})) <> 'X')")
-        params = []
+            where_clauses = [f"{actual_zone} IS NOT NULL", f"{actual_zone} <> ''"]
+            if "cm" in from_clause:
+                klabc_col = 'cm.`klabc`'
+                where_clauses.append(f"({klabc_col} IS NULL OR UPPER(TRIM({klabc_col})) <> 'X')")
+            params = []
 
-        if product_type and str(product_type).lower() != 'all' and actual_cat:
-            if "catm" in from_clause:
-                desc_col = 'catm."CAT_DESC"' if is_hana else 'catm.`cat_desc`'
-                code_col = 'catm."CAT_CODE"' if is_hana else 'catm.`cat_code`'
-                where_clauses.append(f"({actual_cat} = %s OR {desc_col} = %s OR {code_col} = %s)")
-                params.extend([product_type, product_type, product_type])
-            else:
+            if product_type and str(product_type).lower() != 'all' and actual_cat:
                 where_clauses.append(f"{actual_cat} = %s")
                 params.append(product_type)
 
-        if construction_type and str(construction_type).lower() != 'all' and actual_const:
-            label_to_id = {
-                "bias": "1", "radial": "2", "tubeless bias": "3", "tubeless radial": "4",
-                "radial (tube type)": "5", "radial (tubeless)": "6", "solid / otr": "7"
-            }
-            c_val = str(construction_type).strip()
-            c_val = label_to_id.get(c_val.lower(), c_val)
-            where_clauses.append(f"{actual_const} = %s")
-            params.append(c_val)
+            if construction_type and str(construction_type).lower() != 'all' and actual_const:
+                label_to_id = {
+                    "bias": "1", "radial": "2", "tubeless bias": "3", "tubeless radial": "4",
+                    "radial (tube type)": "5", "radial (tubeless)": "6", "solid / otr": "7"
+                }
+                c_val = str(construction_type).strip()
+                c_val = label_to_id.get(c_val.lower(), c_val)
+                where_clauses.append(f"{actual_const} = %s")
+                params.append(c_val)
 
-        if vehicle_type and str(vehicle_type).lower() != 'all' and actual_tyre:
-            if "catm" in from_clause:
-                desc_col = 'catm."CAT_DESC"' if is_hana else 'catm.`cat_desc`'
-                code_col = 'catm."CAT_CODE"' if is_hana else 'catm.`cat_code`'
-                where_clauses.append(f"({actual_tyre} = %s OR {desc_col} = %s OR {code_col} = %s)")
-                params.extend([vehicle_type, vehicle_type, vehicle_type])
-            else:
+            if vehicle_type and str(vehicle_type).lower() != 'all' and actual_tyre:
                 where_clauses.append(f"{actual_tyre} = %s")
                 params.append(vehicle_type)
 
-        # Years filter
-        if actual_invoice_date and selected_years:
-            valid_years = []
-            for y in selected_years:
-                if str(y).strip().lower() == "all": continue
-                try: valid_years.append(int(y))
-                except ValueError: pass
-            if valid_years:
-                placeholders = ",".join(["%s"] * len(valid_years))
-                where_clauses.append(f"YEAR({actual_invoice_date}) IN ({placeholders})")
-                params.extend(valid_years)
+            # Years filter
+            if actual_invoice_date and selected_years:
+                valid_years = []
+                for y in selected_years:
+                    if str(y).strip().lower() == "all": continue
+                    try: valid_years.append(int(y))
+                    except ValueError: pass
+                if valid_years:
+                    placeholders = ",".join(["%s"] * len(valid_years))
+                    where_clauses.append(f"YEAR({actual_invoice_date}) IN ({placeholders})")
+                    params.extend(valid_years)
 
-        # Months filter
-        if actual_invoice_date and selected_months:
-            month_to_num = {calendar.month_name[i].lower(): i for i in range(1, 13)}
-            valid_month_nums = []
-            for m in selected_months:
-                if not m or str(m).strip().lower() == "all": continue
-                sm = str(m).strip().lower()
-                if sm in month_to_num: valid_month_nums.append(month_to_num[sm])
-                elif sm.isdigit(): valid_month_nums.append(int(sm))
-            if valid_month_nums:
-                placeholders = ",".join(["%s"] * len(valid_month_nums))
-                where_clauses.append(f"MONTH({actual_invoice_date}) IN ({placeholders})")
-                params.extend(valid_month_nums)
+            # Months filter
+            if actual_invoice_date and selected_months:
+                month_to_num = {calendar.month_name[i].lower(): i for i in range(1, 13)}
+                valid_month_nums = []
+                for m in selected_months:
+                    if not m or str(m).strip().lower() == "all": continue
+                    sm = str(m).strip().lower()
+                    if sm in month_to_num: valid_month_nums.append(month_to_num[sm])
+                    elif sm.isdigit(): valid_month_nums.append(int(sm))
+                if valid_month_nums:
+                    placeholders = ",".join(["%s"] * len(valid_month_nums))
+                    where_clauses.append(f"MONTH({actual_invoice_date}) IN ({placeholders})")
+                    params.extend(valid_month_nums)
 
-        # Zones filter
-        if actual_zone and selected_zones:
-            valid_zones = [str(z).strip() for z in selected_zones if z and str(z).strip().lower() != "all"]
-            if valid_zones:
-                placeholders = ",".join(["%s"] * len(valid_zones))
-                where_clauses.append(f"{actual_zone} IN ({placeholders})")
-                params.extend(valid_zones)
+            # Zones filter
+            if actual_zone and selected_zones:
+                valid_zones = [str(z).strip() for z in selected_zones if z and str(z).strip().lower() != "all"]
+                if valid_zones:
+                    placeholders = ",".join(["%s"] * len(valid_zones))
+                    where_clauses.append(f"{actual_zone} IN ({placeholders})")
+                    params.extend(valid_zones)
 
-        where_sql = " AND ".join(where_clauses)
-        error_msg = ""
+            where_sql = " AND ".join(where_clauses)
 
-        try:
-            query = f"""
-                SELECT
-                    {actual_zone} as zone,
-                    ROUND(SUM({revenue_expr}), 2) AS sales_value
-                FROM {from_clause}
-                WHERE {where_sql}
-                GROUP BY {actual_zone}
-                ORDER BY sales_value DESC
-            """
-            execute_query(cursor, query, params, is_hana=is_hana)
-            results = fetchall_dict(cursor)
+            try:
+                query = f"""
+                    SELECT
+                        {actual_zone} as zone,
+                        ROUND(SUM({revenue_expr}), 2) AS sales_value
+                    FROM {from_clause}
+                    WHERE {where_sql}
+                    GROUP BY {actual_zone}
+                    ORDER BY sales_value DESC
+                """
+                execute_query(cursor, query, params, is_hana=False)
+                results = fetchall_dict(cursor)
 
-            total_sales = sum(float(r.get('sales_value') or 0.0) for r in results)
-            zone_map = {
-                'WZ': 'West Zone', 'EZ': 'East Zone', 'NZ': 'North Zone',
-                'SZ': 'South Zone I', 'TZ': 'South Zone II', 'CZ': 'Central Zone', 'NP': 'Nepal'
-            }
+                total_sales = sum(float(r.get('sales_value') or 0.0) for r in results)
+                zone_map = {
+                    'WZ': 'West Zone', 'EZ': 'East Zone', 'NZ': 'North Zone',
+                    'SZ': 'South Zone I', 'TZ': 'South Zone II', 'CZ': 'Central Zone', 'NP': 'Nepal'
+                }
 
-            for r in results:
-                raw_zone = str(r.get('zone') or '').strip()
-                r['name'] = zone_map.get(raw_zone.upper(), raw_zone)
-                r['value'] = float(r.get('sales_value') or 0.0)
-                r['percentage'] = round((r['value'] / total_sales) * 100, 1) if total_sales > 0 else 0.0
+                for r in results:
+                    raw_zone = str(r.get('zone') or '').strip()
+                    r['name'] = zone_map.get(raw_zone.upper(), raw_zone)
+                    r['value'] = float(r.get('sales_value') or 0.0)
+                    r['percentage'] = round((r['value'] / total_sales) * 100, 1) if total_sales > 0 else 0.0
 
-            chart_data = results
-        except Exception as e:
-            print(f"[Sales by Zone] Execution error: {e}")
-            if is_hana and ("cannot allocate enough memory" in str(e).lower() or "allocation failed" in str(e).lower()):
-                try:
-                    print("[Sales by Zone] Retrying with lightweight current sales view due to HANA memory limit...")
-                    lean_from = f"(SELECT * FROM \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\" WHERE (distribution_channel=10 OR distribution_channel='10') AND (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1'))) s"
-                    retry_query = re.sub(r'FROM\s+\(.*?\)\s+s', f'FROM {lean_from}', query, count=1, flags=re.DOTALL)
-                    execute_query(cursor, retry_query, params, is_hana=is_hana)
-                    results = fetchall_dict(cursor)
-                    total_sales = sum(float(r.get('sales_value') or 0.0) for r in results)
-                    zone_map = {
-                        'WZ': 'West Zone', 'EZ': 'East Zone', 'NZ': 'North Zone',
-                        'SZ': 'South Zone I', 'TZ': 'South Zone II', 'CZ': 'Central Zone', 'NP': 'Nepal'
-                    }
-                    for r in results:
-                        raw_zone = str(r.get('zone') or '').strip()
-                        r['name'] = zone_map.get(raw_zone.upper(), raw_zone)
-                        r['value'] = float(r.get('sales_value') or 0.0)
-                        r['percentage'] = round((r['value'] / total_sales) * 100, 1) if total_sales > 0 else 0.0
-                    chart_data = results
-                    error_msg = ""
-                except Exception as retry_e:
-                    error_msg = str(e)
-            else:
+                chart_data = results
+            except Exception as e:
+                print(f"[Sales by Zone] MySQL Execution error: {e}")
                 error_msg = str(e)
 
         visualizations = []

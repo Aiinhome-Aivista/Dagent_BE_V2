@@ -2640,7 +2640,7 @@ def query_sales_revenue_by_zone_hana(cursor, schema, zone=None):
 
         ) cs
 
-        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cust ON (cs.DEALER_CODE = cust.KUNNR)
+        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cust ON (LPAD(TRIM(cs.DEALER_CODE), 10, '0') = cust.KUNNR OR LTRIM(cs.DEALER_CODE, '0') = LTRIM(cust.KUNNR, '0'))
 
         LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
 
@@ -2726,7 +2726,7 @@ def query_sales_revenue_by_zone_hana(cursor, schema, zone=None):
 
         ) cs
 
-        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cust ON (cs.DEALER_CODE = cust.KUNNR)
+        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cust ON (LPAD(TRIM(cs.DEALER_CODE), 10, '0') = cust.KUNNR OR LTRIM(cs.DEALER_CODE, '0') = LTRIM(cust.KUNNR, '0'))
 
         LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
 
