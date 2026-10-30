@@ -3414,21 +3414,29 @@ def session_rag_chat_controller(get_connection_func):
             has_time = any(t in k for k in keys_lower for t in ['month', 'date', 'year'])
             
             total_rows = len(sql_results)
-            MAX_TABLE_ROWS = 100
-            table_data = sql_results[:MAX_TABLE_ROWS]
-            table_title = "Data Table"
-            if total_rows > MAX_TABLE_ROWS:
-                table_title = f"Data Table (Showing top {MAX_TABLE_ROWS} of {total_rows:,} records)"
+            # Read configurable threshold from system_configurations
+            csv_threshold = 30
+            try:
+                _cconn = get_connection_func()
+                from helper.system_config_service import get_system_config
+                csv_threshold = get_system_config(_cconn, "csv_export_threshold", default=30)
+                try: _cconn.close()
+                except: pass
+            except Exception:
+                csv_threshold = 30
 
             columns = [{"key": k, "label": str(k).replace("_", " ").title()} for k in keys]
-            table_vis = {
-                "type": "table",
-                "title": table_title,
-                "columns": columns,
-                "data": table_data,
-                "total_records": total_rows,
-                "displayed_records": len(table_data)
-            }
+            table_vis = None
+            if total_rows <= csv_threshold:
+                # If row count <= threshold: show ALL rows in chat table
+                table_vis = {
+                    "type": "table",
+                    "title": f"Data Table ({total_rows:,} records)",
+                    "columns": columns,
+                    "data": sql_results,
+                    "total_records": total_rows,
+                    "displayed_records": total_rows
+                }
             
             # Align and sanitize chart xKey, yKey, and data against actual SQL keys
             # Charts display top 25 data points to guarantee clean readability and instant DOM rendering
@@ -3453,8 +3461,9 @@ def session_rag_chat_controller(get_connection_func):
                 # Keep all non-table charts (like line_chart)
                 visualizations = [v for v in visualizations if v.get("type") != "table"]
                 
-            # ALWAYS append the perfectly formatted Python table, replacing any broken LLM table
-            visualizations.append(table_vis)
+            # ALWAYS append the perfectly formatted Python table ONLY if row count <= threshold
+            if table_vis:
+                visualizations.append(table_vis)
 
     # If user explicitly asked for table → keep only table
     if "table" in question.lower():
@@ -3478,6 +3487,38 @@ def session_rag_chat_controller(get_connection_func):
                   login_token=login_token, visualizations=visualizations,
                   chat_id=active_chat_id)
 
+    # ── Configurable CSV Export Check ──
+    from helper.system_config_service import get_system_config, generate_relevant_filename
+    _conf_th = 30
+    try:
+        _cconn = get_connection_func()
+        _conf_th = get_system_config(_cconn, "csv_export_threshold", default=30)
+        try: _cconn.close()
+        except: pass
+    except Exception:
+        _conf_th = 30
+
+    is_csv_export = False
+    csv_filename = ""
+    total_sql_count = len(sql_results) if sql_results else 0
+
+    if total_sql_count > _conf_th:
+        is_csv_export = True
+        csv_filename = generate_relevant_filename(question)
+        # Suppress table from chat when exceeding threshold
+        visualizations = [v for v in visualizations if v.get("type") != "table"]
+        csv_vis = {
+            "type": "csv_export",
+            "title": f"Data Export ({total_sql_count:,} records)",
+            "filename": csv_filename,
+            "total_records": total_sql_count,
+            "threshold": _conf_th,
+            "sql_query": sql_query,
+            "session_id": session_id
+        }
+        visualizations.append(csv_vis)
+        clean_answer = f"Total {total_sql_count:,} records found matching your query. Since the result exceeds the {_conf_th}-record display limit, the complete dataset is available for download as a CSV file below."
+
     return jsonify({
         "status":              "success",
         "statusCode":          200,
@@ -3485,6 +3526,9 @@ def session_rag_chat_controller(get_connection_func):
         "sql_query":           sql_query,
         "follow_up_questions": fuq,
         "visualizations":      visualizations,
+        "is_csv_export":       is_csv_export,
+        "csv_filename":        csv_filename,
+        "total_records":       total_sql_count,
         "chat_id":             active_chat_id,
         "visit_number":        actual_visit
     }), 200
