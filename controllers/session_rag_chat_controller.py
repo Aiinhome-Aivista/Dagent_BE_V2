@@ -2388,6 +2388,33 @@ def _grouping_hint(question, biz):
 def _safe_visualizations(vizs):
     return [v for v in vizs if isinstance(v,dict) and v.get("type") and v.get("title")]
 
+def _is_unbounded_heavy_comparison(question: str) -> bool:
+    """
+    Detects if the query is an actual vs target/plan comparison or heavy multi-dimensional
+    monthly report that spans all historical data without any time limit or period constraint.
+    """
+    q = (question or "").lower()
+    
+    # Check if question asks for actual vs target/plan or multi-dimensional monthly performance
+    is_plan_comparison = bool(re.search(
+        r'\b(?:actual\s+(?:sales\s+)?(?:vs|against)\s+(?:sales\s+)?plan|target\s+vs\s+actual|actual\s+vs\s+target|achievement\s+percentage|performance\s+report)\b',
+        q, re.I
+    ))
+    
+    dim_count = sum(1 for dim in ['region', 'territory', 'category', 'product', 'customer', 'dealer', 'zone', 'sku'] if dim in q)
+    is_heavy_monthly = ('monthly' in q or 'by month' in q or 'month-wise' in q or 'month wise' in q) and dim_count >= 2
+    
+    if not (is_plan_comparison or is_heavy_monthly):
+        return False
+
+    # Check if question specifies ANY time range or period constraint
+    has_time_limit = bool(re.search(
+        r'\b(?:201[89]|202[0-9]|last\s+\d+\s+months?|past\s+\d+\s+months?|last\s+\d+\s+years?|last\s+quarter|past\s+quarter|q[1-4]|fy\s*\d{2,4}|financial\s+year|fiscal\s+year|current\s+year|this\s+year|current\s+month|this\s+month|last\s+month|previous\s+month|mtd|ytd|qtd|today|yesterday|january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b',
+        q, re.I
+    ))
+    
+    return not has_time_limit
+
 def session_rag_chat_controller(get_connection_func):
     data       = request.json or {}
     session_id     = (data.get("session_id")     or "").strip()
@@ -2561,6 +2588,38 @@ def session_rag_chat_controller(get_connection_func):
     # ─────────────────────────────────────────────
     if intent == "AGGREGATION":
         print(" Bypassing VectorDB. Routing to Structured Database (SQL/AQL)...")
+
+        # Guard: Check for unconstrained heavy multi-dimensional or actual vs plan queries across all history
+        if _is_unbounded_heavy_comparison(question):
+            print(f"[GUARD] Unbounded heavy comparison detected for question: '{question}' — requesting time filter.")
+            _heavy_msg = (
+                "The data volume is too high to generate an all-time report across all regions, territories, and product categories.\n\n"
+                "Please add a time limit or period to your question, such as:\n"
+                "- **\"for 2024\"** (or **\"for FY 2024\"**)\n"
+                "- **\"for last 6 months\"**\n"
+                "- **\"for current year\"**"
+            )
+            fuq = [
+                f"{question.rstrip('.')} for 2024",
+                f"{question.rstrip('.')} for last 6 months",
+                f"{question.rstrip('.')} for current year"
+            ]
+            _advance_turn(session_id)
+            actual_visit = _save_history(
+                get_connection_func, session_id, user_id,
+                question, _heavy_msg, fuq, understanding.get("intent", "AGGREGATION"), "answer",
+                login_token=login_token, visualizations=[], chat_id=active_chat_id
+            )
+            return jsonify({
+                "status":              "success",
+                "statusCode":          200,
+                "answer":              _heavy_msg,
+                "sql_query":           "",
+                "follow_up_questions": fuq,
+                "visualizations":      [],
+                "chat_id":             active_chat_id,
+                "visit_number":        actual_visit
+            }), 200
         schema_chunks = [c["text"] for c in all_chunks if c["kind"] in ("schema", "count")]
         schema_context = "\n".join(schema_chunks)
 
@@ -3187,14 +3246,20 @@ def session_rag_chat_controller(get_connection_func):
         if intent == "AGGREGATION" and not sql_results:
             _detail = f" (error: {agg_sql_error})" if agg_sql_error else ""
             print(f"[AGGREGATION] No SQL rows returned! agg_sql_error={agg_sql_error!r} — setting clean zero-row context")
-            context = (
-                f"SQL Execution Note: Direct SQL computation returned 0 rows (no matching records found in the database){_detail}.\n"
-                f"Attempted Query: {sql_query if 'sql_query' in locals() else 'N/A'}\n"
-                f"Question: {question}\n\n"
-                "CRITICAL INSTRUCTION: State clearly, politely, and directly in 1 or 2 sentences that no records or transactions were found matching the specified criteria in the database. "
-                "DO NOT generate lengthy paragraphs, diagnostic checklists, troubleshooting steps, or alternative query approaches. "
-                "DO NOT explain database schemas or internal table architectures. Keep your response direct, concise, and professional."
-            )
+            if agg_sql_error and any(w in agg_sql_error.lower() for w in ["memory", "allocation", "timeout", "timed out", "statement"]):
+                context = (
+                    "CRITICAL INSTRUCTION: State clearly and politely that the data volume is too high to process this query. "
+                    "Instruct the user to add a time limit to their question, such as 'for 2024', 'for last 6 months', or 'current year'."
+                )
+            else:
+                context = (
+                    f"SQL Execution Note: Direct SQL computation returned 0 rows (no matching records found in the database){_detail}.\n"
+                    f"Attempted Query: {sql_query if 'sql_query' in locals() else 'N/A'}\n"
+                    f"Question: {question}\n\n"
+                    "CRITICAL INSTRUCTION: State clearly, politely, and directly in 1 or 2 sentences that no records or transactions were found matching the specified criteria in the database. "
+                    "DO NOT generate lengthy paragraphs, diagnostic checklists, troubleshooting steps, or alternative query approaches. "
+                    "DO NOT explain database schemas or internal table architectures. Keep your response direct, concise, and professional."
+                )
 
     # Graph
     if _is_graph(question):
