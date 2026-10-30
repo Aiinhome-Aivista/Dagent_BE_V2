@@ -1247,12 +1247,17 @@ def _mistral(system, user, retries=2, temperature=0.15):
     
     for attempt in range(retries + 1):
         try:
+            _t0 = time.time()
             response = call_llm_chat(messages, json_mode=True, temperature=temperature)
+            _t1 = time.time()
+            print(f"[LLM] call_llm_chat completed in {_t1 - _t0:.3f}s (attempt {attempt+1})")
             if response:
                 return json.loads(response)
             return None
         except Exception as e:
-            print(f"[LLM] error attempt {attempt+1}: {e}")
+            import traceback
+            print(f"[LLM] error attempt {attempt+1}: {type(e).__name__}: {e}")
+            print(f"[LLM] Traceback:\n{traceback.format_exc()}")
             if attempt == retries: return None
             import time
             time.sleep(1)
@@ -2913,8 +2918,16 @@ def session_rag_chat_controller(get_connection_func):
 
                                 print(f"[SQL_EXEC] Executing on SAP HANA:\n{run_query}")
 
+                            _t_exec_start = time.time()
                             cur_sql.execute(run_query)
+                            _t_exec_done = time.time()
+                            print(f"[SQL_EXEC] cur_sql.execute() finished in {_t_exec_done - _t_exec_start:.3f}s. Fetching all rows...")
+
+                            _t_fetch_start = time.time()
                             rows = cur_sql.fetchall()
+                            _t_fetch_done = time.time()
+                            print(f"[SQL_EXEC] cur_sql.fetchall() finished in {_t_fetch_done - _t_fetch_start:.3f}s. Rows fetched: {len(rows) if rows else 0}")
+
                             if is_hana:
                                 cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
                                 sql_results = [dict(zip(cols, r)) for r in rows]
@@ -2924,6 +2937,7 @@ def session_rag_chat_controller(get_connection_func):
                                     sql_results = [dict(zip(cols, r)) for r in rows]
                                 else:
                                     sql_results = [dict(r) for r in rows]
+                            print(f"[SQL_EXEC] Dictionary mapping done. sql_results count = {len(sql_results)}")
 
                             # ── SMART 0-ROW FALLBACK (SAP HANA) ──
                             if is_hana and not sql_results:
@@ -3035,8 +3049,10 @@ def session_rag_chat_controller(get_connection_func):
                             print(f"[SQL_EXEC] Success! Returned {len(sql_results)} rows.")
                             break
                         except Exception as ex:
-                            agg_sql_error = str(ex)
-                            print(f"[SQL_EXEC] Attempt {_attempt + 1} failed: {ex}")
+                            import traceback
+                            agg_sql_error = f"{type(ex).__name__}: {ex}"
+                            print(f"[SQL_EXEC] Attempt {_attempt + 1} FAILED! Type: {type(ex).__name__} | Error: {ex}")
+                            print(f"[SQL_EXEC] Traceback:\n{traceback.format_exc()}")
 
                             # Self-healing for HANA memory limits and column reference errors
                             if is_hana and ("cannot allocate enough memory" in str(ex).lower() or "allocation failed" in str(ex).lower()):
@@ -3097,8 +3113,10 @@ def session_rag_chat_controller(get_connection_func):
                             else:
                                 break
             except Exception as e:
-                agg_sql_error = str(e)
-                print(f"[SQL_EXEC] Execution failed: {e}")
+                import traceback
+                agg_sql_error = f"{type(e).__name__}: {e}"
+                print(f"[SQL_EXEC] Outer execution block FAILED! Type: {type(e).__name__} | Error: {e}")
+                print(f"[SQL_EXEC] Traceback:\n{traceback.format_exc()}")
             finally:
                 if cur_sql: 
                     try: cur_sql.close() 
@@ -3144,7 +3162,7 @@ def session_rag_chat_controller(get_connection_func):
         # Fallback if no SQL rows were produced
         if intent == "AGGREGATION" and not sql_results:
             _detail = f" (error: {agg_sql_error})" if agg_sql_error else ""
-            print(f"[AGGREGATION] No SQL rows returned{_detail} — setting clean zero-row context")
+            print(f"[AGGREGATION] No SQL rows returned! agg_sql_error={agg_sql_error!r} — setting clean zero-row context")
             context = (
                 f"SQL Execution Note: Direct SQL computation returned 0 rows (no matching records found in the database){_detail}.\n"
                 f"Attempted Query: {sql_query if 'sql_query' in locals() else 'N/A'}\n"
