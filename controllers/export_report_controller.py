@@ -1234,3 +1234,106 @@ def export_domestic_sales_preview_controller(get_db_connection):
             try: conn.close()
             except: pass
 
+
+
+import csv
+from flask import Response
+
+def export_query_csv_controller(get_db_connection):
+    """
+    On-demand streaming CSV export for query results.
+    Executes the SQL query on live database (SAP HANA or MySQL) and streams 
+    the result as a CSV attachment with EXACT database column names as headers.
+    Zero files are saved on disk.
+    """
+    conn = None
+    hana_conn = None
+    tunnel = None
+    cursor = None
+    try:
+        data = request.json or {}
+        session_id = data.get("session_id")
+        sql_query = data.get("sql_query", "").strip()
+        filename = data.get("filename", "").strip()
+        user_id = data.get("user_id")
+
+        if not sql_query:
+            return jsonify({"status": "error", "message": "Missing sql_query"}), 400
+
+        if not filename:
+            filename = f"export_{session_id or 'data'}.csv"
+        if not filename.endswith(".csv"):
+            filename += ".csv"
+
+        # Sanitize filename
+        safe_filename = re.sub(r'[^a-zA-Z0-9_.-]+', '_', filename)
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({"status": "error", "message": "Failed to connect to database"}), 500
+
+        from helper.sap_analytics_service import get_sap_connection_for_session
+        hana_conn, tunnel, sap_schema = get_sap_connection_for_session(conn, session_id, user_id=user_id)
+        is_hana = bool(hana_conn)
+
+        if is_hana:
+            cursor = hana_conn.cursor()
+            schema = sap_schema or "SAP_S4"
+            try:
+                cursor.execute(f'SET SCHEMA "{schema}"')
+            except Exception:
+                pass
+            cursor.execute(sql_query)
+        else:
+            cursor = conn.cursor()
+            cursor.execute(sql_query)
+
+        # Extract EXACT column names from database cursor
+        cols = [desc[0] for desc in cursor.description] if cursor.description else []
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(cols)
+
+        # Write data rows
+        rows = cursor.fetchall()
+        for r in rows:
+            if isinstance(r, (list, tuple)):
+                row_vals = [str(val) if val is not None else "" for val in r]
+            elif isinstance(r, dict):
+                row_vals = [str(r.get(c)) if r.get(c) is not None else "" for c in cols]
+            else:
+                row_vals = [str(r)]
+            writer.writerow(row_vals)
+
+        csv_content = output.getvalue()
+        output.close()
+
+        print(f"[CSV Export] Streamed {len(rows)} rows with exact columns: {cols} as '{safe_filename}'", flush=True)
+
+        return Response(
+            csv_content,
+            mimetype="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename={safe_filename}",
+                "Content-Type": "text/csv; charset=utf-8"
+            }
+        )
+
+    except Exception as exc:
+        print(f"[CSV Export] Query execution failed: {exc}", flush=True)
+        return jsonify({"status": "error", "message": str(exc)}), 500
+
+    finally:
+        if cursor:
+            try: cursor.close()
+            except Exception: pass
+        if hana_conn:
+            try: hana_conn.close()
+            except Exception: pass
+        if tunnel:
+            try: tunnel.stop()
+            except Exception: pass
+        if conn and hasattr(conn, "is_connected") and conn.is_connected():
+            try: conn.close()
+            except Exception: pass
