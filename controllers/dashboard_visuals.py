@@ -1210,19 +1210,19 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
 
                 valid_selected_zones = [str(z).strip().upper() for z in selected_zones if z and str(z).strip().lower() != "all"]
                 if valid_selected_zones:
-                    results = [r for r in results if str(r.get('ZONE_CODE') or '').strip().upper() in valid_selected_zones]
+                    results = [r for r in results if str(r.get('zone_code') or r.get('ZONE_CODE') or '').strip().upper() in valid_selected_zones]
 
-                total_sales = sum(float(r.get('TOTAL_SALES') or 0.0) for r in results)
+                total_sales = sum(float(r.get('total_sales') or r.get('TOTAL_SALES') or r.get('sales_value') or 0.0) for r in results)
 
                 for r in results:
-                    raw_code = str(r.get('ZONE_CODE') or '').strip().upper()
-                    raw_name = str(r.get('ZONE_NAME') or '').strip()
-                    val = float(r.get('TOTAL_SALES') or 0.0)
+                    raw_code = str(r.get('zone_code') or r.get('ZONE_CODE') or r.get('zone') or '').strip().upper()
+                    raw_name = str(r.get('zone_name') or r.get('ZONE_NAME') or r.get('name') or '').strip()
+                    val = float(r.get('total_sales') or r.get('TOTAL_SALES') or r.get('sales_value') or 0.0)
                     r['zone'] = raw_code
                     r['name'] = raw_name if raw_name else zone_map.get(raw_code, raw_code)
                     r['sales_value'] = val
                     r['value'] = val
-                    r['quantity'] = float(r.get('TOTAL_QUANTITY') or 0.0)
+                    r['quantity'] = float(r.get('total_quantity') or r.get('TOTAL_QUANTITY') or r.get('quantity') or 0.0)
                     r['percentage'] = round((val / total_sales) * 100, 1) if total_sales > 0 else 0.0
 
                 chart_data = [r for r in results if r['value'] > 0] or results
