@@ -87,16 +87,22 @@ def get_all_system_configs(conn):
 def generate_relevant_filename(question):
     """
     Generates a clean, slugified filename relevant to the user question.
-    E.g. "What is the sales of all dealers in West Zone?" -> "dealers_sales_west_zone_20261030.csv"
+    Strips out command phrases like 'write query', 'sql', 'list', etc.
     """
     from datetime import datetime
     stop_words = {
         'what', 'is', 'the', 'of', 'for', 'show', 'give', 'me', 'all', 'list',
         'in', 'and', 'to', 'a', 'an', 'please', 'can', 'you', 'how', 'many',
-        'much', 'from', 'with', 'by', 'at', 'on', 'tell', 'get'
+        'much', 'from', 'with', 'by', 'at', 'on', 'tell', 'get',
+        'write', 'query', 'queries', 'sql', 'run', 'find', 'fetch', 'select',
+        'generate', 'their', 'our', 'my', 'his', 'her', 'its', 'them',
+        'this', 'that', 'these', 'those', 'data', 'details', 'report', 'as'
     }
     raw = re.sub(r'[^a-zA-Z0-9]+', ' ', str(question or '').strip().lower())
-    words = [w for w in raw.split() if w and w not in stop_words]
+    words = [w for w in raw.split() if w and w not in stop_words and len(w) > 1]
     slug = "_".join(words[:5]) if words else "export_data"
+    slug = re.sub(r'^(write_query_|query_|sql_)+', '', slug)
+    if not slug:
+        slug = "export_data"
     date_str = datetime.now().strftime('%Y%m%d_%H%M%S')
     return f"{slug}_{date_str}.csv"
