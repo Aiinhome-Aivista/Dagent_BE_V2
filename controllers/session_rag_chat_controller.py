@@ -3495,12 +3495,6 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
     if "table" in question.lower():
         visualizations = [v for v in visualizations if v.get("type") == "table"]
 
-    _advance_turn(session_id)
-    actual_visit = _save_history(get_connection_func, session_id, user_id,
-                  question, clean_answer, fuq, understanding["intent"], "answer",
-                  login_token=login_token, visualizations=visualizations,
-                  chat_id=active_chat_id)
-
     # ── Configurable CSV Export Check ──
     from helper.system_config_service import get_system_config, generate_relevant_filename
     _conf_th = 30
@@ -3532,6 +3526,12 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
         }
         visualizations.append(csv_vis)
         clean_answer = f"Total {total_sql_count:,} records found matching your query. The complete dataset is available for download as a CSV file below."
+
+    _advance_turn(session_id)
+    actual_visit = _save_history(get_connection_func, session_id, user_id,
+                  question, clean_answer, fuq, understanding["intent"], "answer",
+                  login_token=login_token, visualizations=visualizations,
+                  chat_id=active_chat_id)
 
     return jsonify({
         "status":              "success",
