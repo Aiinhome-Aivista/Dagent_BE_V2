@@ -27,7 +27,7 @@ def _execute_sync_task():
     try:
         cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
         cur.execute("""
-            SELECT session_id, user_id, name 
+            SELECT session_id, MAX(user_id) AS user_id, MAX(name) AS name 
             FROM workspaces 
             WHERE session_id IS NOT NULL AND session_id != ''
             GROUP BY session_id
@@ -85,17 +85,14 @@ def parse_schedule_trigger(schedule_time: str, frequency: str = "daily"):
 
     freq = (frequency or "daily").lower().strip()
     if freq in ("twice_daily", "2_times_daily"):
-        # e.g. 7 AM and 7 PM (hour and (hour + 12) % 24)
         hour_str = f"{hour},{(hour + 12) % 24}"
         return CronTrigger(hour=hour_str, minute=minute)
     elif freq in ("thrice_daily", "3_times_daily"):
-        # e.g. 3 times spread out by 8 hours
         hour_str = f"{hour},{(hour + 8) % 24},{(hour + 16) % 24}"
         return CronTrigger(hour=hour_str, minute=minute)
     elif freq == "hourly":
         return CronTrigger(minute=minute)
     else:
-        # daily at specified hour:minute
         return CronTrigger(hour=hour, minute=minute)
 
 
@@ -168,4 +165,3 @@ def trigger_now_in_background():
     t = threading.Thread(target=_execute_sync_task, daemon=True)
     t.start()
     return True
-

@@ -2077,9 +2077,6 @@ def default_dashboard_metrics_controller(get_db_connection):
     user_id = data.get("user_id")
     force_refresh = bool(data.get("force_refresh", False))
 
-    if not session_id:
-        return jsonify({"error": "Missing session_id"}), 400
-
     conn = None
     hana_conn = None
     tunnel = None
@@ -2110,6 +2107,18 @@ def default_dashboard_metrics_controller(get_db_connection):
             return jsonify({"error": "Failed to connect to database."}), 500
 
         from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data
+
+        if not session_id:
+            try:
+                cur_ws = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_ws.execute("SELECT session_id FROM workspaces WHERE session_id IS NOT NULL AND session_id != '' ORDER BY id ASC LIMIT 1")
+                ws_row = cur_ws.fetchone()
+                if ws_row and ws_row.get("session_id"):
+                    session_id = ws_row["session_id"]
+                cur_ws.close()
+            except Exception:
+                pass
+
         if not force_refresh:
             cached_res = get_cached_component_data(conn, session_id, "key_metrics", "all")
             if cached_res and cached_res.get("data"):
@@ -2119,6 +2128,9 @@ def default_dashboard_metrics_controller(get_db_connection):
                     "_cached": True,
                     "_last_synced_at": cached_res.get("_last_synced_at")
                 }), 200
+
+        if not session_id:
+            return jsonify({"error": "Missing session_id"}), 400
 
         import time
         start_calc_t = time.time()

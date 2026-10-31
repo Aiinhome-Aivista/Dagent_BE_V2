@@ -62,20 +62,34 @@ def get_cached_component_data(conn, session_id: str, component_key: str, filter_
     Retrieves pre-calculated component data from MySQL cache table.
     Returns python dict with data or None.
     """
-    if not conn or not session_id or not component_key:
+    if not conn or not component_key:
         return None
 
     cur = None
     try:
         ensure_cache_tables(conn)
         cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
-        cur.execute("""
-            SELECT payload, last_synced_at, sync_status
-            FROM dashboard_cached_metrics
-            WHERE session_id = %s AND component_key = %s AND filter_context = %s
-            LIMIT 1
-        """, (str(session_id), str(component_key), str(filter_context)))
-        row = cur.fetchone()
+        row = None
+        if session_id:
+            cur.execute("""
+                SELECT payload, last_synced_at, sync_status
+                FROM dashboard_cached_metrics
+                WHERE session_id = %s AND component_key = %s AND filter_context = %s
+                LIMIT 1
+            """, (str(session_id), str(component_key), str(filter_context)))
+            row = cur.fetchone()
+
+        if not row:
+            # Fallback: check most recent cached record for this component across sessions
+            cur.execute("""
+                SELECT payload, last_synced_at, sync_status
+                FROM dashboard_cached_metrics
+                WHERE component_key = %s AND filter_context = %s
+                ORDER BY last_synced_at DESC
+                LIMIT 1
+            """, (str(component_key), str(filter_context)))
+            row = cur.fetchone()
+
         if row and row.get("payload"):
             payload = json.loads(row["payload"])
             return {
@@ -184,15 +198,19 @@ def record_scheduler_run(conn, job_name: str, status: str, duration_sec: float =
         return False
     cur = None
     try:
+        ensure_cache_tables(conn)
         cur = conn.cursor()
         cur.execute("""
-            UPDATE scheduler_configurations
-            SET last_run_at = NOW(),
-                last_run_status = %s,
-                last_run_duration_sec = %s,
-                next_run_at = %s
-            WHERE job_name = %s
-        """, (status, duration_sec, next_run_at, job_name))
+            INSERT INTO scheduler_configurations
+                (job_name, title, schedule_time, frequency, is_active, last_run_at, last_run_status, last_run_duration_sec, next_run_at, updated_at)
+            VALUES (%s, 'Dashboard Key Metrics & Analytics Sync', '19:00', 'daily', TRUE, NOW(), %s, %s, %s, NOW())
+            ON DUPLICATE KEY UPDATE
+                last_run_at = NOW(),
+                last_run_status = VALUES(last_run_status),
+                last_run_duration_sec = VALUES(last_run_duration_sec),
+                next_run_at = VALUES(next_run_at),
+                updated_at = NOW();
+        """, (str(job_name).strip(), str(status), float(duration_sec), next_run_at))
         conn.commit()
         return True
     except Exception as e:
