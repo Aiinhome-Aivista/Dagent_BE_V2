@@ -560,40 +560,50 @@ def rollback_kgraph_controller(get_db_connection):
 def visualize_kgraph_controller(get_db_connection, session_id):
     """
     Dynamically generates and returns an interactive Vis.js HTML graph of the
-    workspace's ArangoDB session_nodes and session_edges.
+    workspace's ArangoDB session_nodes and session_edges (or specified backup collections).
     """
     try:
         from pyvis.network import Network
 
-        db_name = _resolve_workspace_arango_db(get_db_connection, session_id=session_id)
+        explicit_db = request.args.get("db")
+        node_col_name = request.args.get("node_col") or "session_nodes"
+        edge_col_name = request.args.get("edge_col") or "session_edges"
+
+        db_name = explicit_db or _resolve_workspace_arango_db(get_db_connection, session_id=session_id)
         db, err = _get_arango_db_handle(db_name)
         if err or not db:
-            return f"<h3>Database error: {err}</h3>", 404
+            return f"<div style='font-family:sans-serif;padding:24px;color:#f87171;background:#0f172a;'><h3>Database Error</h3><p>{err}</p></div>", 404
 
         net = Network(height='100%', width='100%', bgcolor='#0f172a', font_color='white', directed=True)
         net.set_options("""
         var options = {
           "physics": {
             "forceAtlas2Based": {
-              "gravitationalConstant": -50,
-              "centralGravity": 0.01,
-              "springLength": 100,
+              "gravitationalConstant": -60,
+              "centralGravity": 0.012,
+              "springLength": 110,
               "springConstant": 0.08
             },
             "maxVelocity": 50,
             "solver": "forceAtlas2Based",
             "timestep": 0.35,
-            "stabilization": {"iterations": 150}
+            "stabilization": {"iterations": 180}
+          },
+          "interaction": {
+            "hover": true,
+            "tooltipDelay": 150,
+            "navigationButtons": true,
+            "keyboard": true
           }
         }
         """)
 
         nodes = []
         edges = []
-        if db.has_collection("session_nodes"):
-            nodes = list(db.aql.execute("FOR doc IN `session_nodes` RETURN doc"))
-        if db.has_collection("session_edges"):
-            edges = list(db.aql.execute("FOR doc IN `session_edges` RETURN doc"))
+        if db.has_collection(node_col_name):
+            nodes = list(db.aql.execute(f"FOR doc IN `{node_col_name}` RETURN doc"))
+        if db.has_collection(edge_col_name):
+            edges = list(db.aql.execute(f"FOR doc IN `{edge_col_name}` RETURN doc"))
 
         type_colors = {
             'ProductCategory': '#ff4081',
@@ -617,8 +627,8 @@ def visualize_kgraph_controller(get_db_connection, session_id):
             net.add_node(str(nid), label=str(lbl), title=f"{ntype}: {lbl}", color=color)
 
         for e in edges:
-            src = str(e.get('_from', '')).replace('session_nodes/', '')
-            dst = str(e.get('_to', '')).replace('session_nodes/', '')
+            src = str(e.get('_from', '')).replace(f"{node_col_name}/", '').replace('session_nodes/', '')
+            dst = str(e.get('_to', '')).replace(f"{node_col_name}/", '').replace('session_nodes/', '')
             rel = e.get('label') or e.get('title') or ''
             if src and dst:
                 try:
@@ -630,51 +640,135 @@ def visualize_kgraph_controller(get_db_connection, session_id):
         return html_content, 200, {'Content-Type': 'text/html; charset=utf-8'}
     except Exception as e:
         traceback.print_exc()
-        return f"<h3>Failed to generate graph: {str(e)}</h3>", 500
+        return f"<div style='font-family:sans-serif;padding:24px;color:#f87171;background:#0f172a;'><h3>Failed to generate graph</h3><p>{str(e)}</p></div>", 500
 
 
 def get_all_kgraphs_controller(get_db_connection):
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        session_id = request.args.get("session_id")
+        workspace_id = request.args.get("workspace_id")
+
+        active_db_name = _resolve_workspace_arango_db(get_db_connection, session_id, workspace_id)
         
+        graphs = []
+        seen_keys = set()
+
+        # 1. Fetch active workspace info and all workspaces from MySQL
+        conn = get_db_connection()
+        active_workspace = None
+        all_workspaces = []
         try:
-            cursor.execute("""
-                SELECT 
-                    w.id,
-                    w.workspace_name AS session_name,
-                    w.session_id,
-                    w.workspace_arango_db,
-                    sac.graph_url,
-                    sac.created_at
-                FROM workspaces w
-                LEFT JOIN session_analysis_cache sac ON w.session_id = sac.session_id
-                WHERE w.workspace_arango_db IS NOT NULL
-                ORDER BY (sac.graph_url IS NOT NULL) DESC, w.id DESC
-            """)
-            workspaces = cursor.fetchall()
+            with conn.cursor(dictionary=True) as cur:
+                cur.execute("""
+                    SELECT 
+                        w.id,
+                        w.workspace_name AS session_name,
+                        w.session_id,
+                        w.workspace_arango_db,
+                        sac.graph_url,
+                        sac.created_at
+                    FROM workspaces w
+                    LEFT JOIN session_analysis_cache sac ON w.session_id = sac.session_id
+                    WHERE w.workspace_arango_db IS NOT NULL
+                    ORDER BY (w.workspace_arango_db = %s) DESC, w.id DESC
+                """, (active_db_name,))
+                all_workspaces = cur.fetchall()
+        finally:
+            if conn:
+                try: conn.close()
+                except Exception: pass
 
-            graphs = []
-            for w in workspaces:
-                s_id = w.get("session_id")
-                graph_url = f"/api/kgraph/visualize/{s_id}" if s_id else (w.get("graph_url") or "")
-                created_str = str(w["created_at"]) if w.get("created_at") else None
+        # Get node and edge count for active db
+        active_db, _ = _get_arango_db_handle(active_db_name)
+        active_nodes = 0
+        active_edges = 0
+        if active_db:
+            try:
+                if active_db.has_collection("session_nodes"):
+                    active_nodes = next(active_db.aql.execute("RETURN LENGTH(`session_nodes`)"), 0) or 0
+                if active_db.has_collection("session_edges"):
+                    active_edges = next(active_db.aql.execute("RETURN LENGTH(`session_edges`)"), 0) or 0
+            except Exception:
+                pass
 
+        # 2. Add active workspace at the top (marked clearly)
+        active_ws_name = active_db_name.replace("_arango_db", "").replace("_", " ").title()
+        active_session_id = None
+        for w in all_workspaces:
+            if w.get("workspace_arango_db") == active_db_name:
+                active_workspace = w
+                active_ws_name = w.get("session_name") or active_ws_name
+                active_session_id = w.get("session_id")
+                break
+
+        primary_graph = {
+            "id": active_workspace.get("id") if active_workspace else 1,
+            "session_name": f"{active_ws_name} (Active)",
+            "session_id": active_session_id or active_db_name,
+            "workspace_arango_db": active_db_name,
+            "nodes_count": active_nodes,
+            "edges_count": active_edges,
+            "graph_url": f"/api/kgraph/visualize/{active_session_id or active_db_name}?db={active_db_name}",
+            "is_active": True,
+            "in_use": True,
+            "badge": "CURRENTLY IN USE",
+            "created_at": "Live Graph"
+        }
+        graphs.append(primary_graph)
+        seen_keys.add(active_db_name)
+
+        # 3. Add available snapshot backups for the active database
+        if active_db and active_db.has_collection(METADATA_COLLECTION):
+            try:
+                cursor = active_db.aql.execute(f"FOR doc IN `{METADATA_COLLECTION}` SORT doc.created_at DESC RETURN doc")
+                for doc in cursor:
+                    b_name = doc.get("backup_name")
+                    node_col = doc.get("nodes_collection")
+                    edge_col = doc.get("edges_collection")
+                    if b_name and node_col and active_db.has_collection(node_col):
+                        graphs.append({
+                            "id": f"backup_{b_name}",
+                            "session_name": f"Snapshot: {b_name}",
+                            "session_id": active_session_id or active_db_name,
+                            "workspace_arango_db": active_db_name,
+                            "nodes_count": doc.get("nodes_count", 0),
+                            "edges_count": doc.get("edges_count", 0),
+                            "graph_url": f"/api/kgraph/visualize/{active_session_id or active_db_name}?db={active_db_name}&node_col={node_col}&edge_col={edge_col}",
+                            "is_active": False,
+                            "in_use": False,
+                            "badge": "SNAPSHOT BACKUP",
+                            "created_at": doc.get("created_date") or doc.get("created_at") or "Snapshot"
+                        })
+            except Exception as bkp_err:
+                print(f"[KGraph] Warning listing backups in visual graphs: {bkp_err}")
+
+        # 4. Add other workspaces
+        for w in all_workspaces:
+            w_db = w.get("workspace_arango_db")
+            if w_db and w_db not in seen_keys:
+                seen_keys.add(w_db)
+                s_id = w.get("session_id") or w_db
                 graphs.append({
                     "id": w["id"],
                     "session_name": w.get("session_name") or f"Workspace {w['id']}",
                     "session_id": s_id,
-                    "graph_url": graph_url,
-                    "created_at": created_str,
-                    "workspace_arango_db": w.get("workspace_arango_db")
+                    "workspace_arango_db": w_db,
+                    "nodes_count": 0,
+                    "edges_count": 0,
+                    "graph_url": f"/api/kgraph/visualize/{s_id}?db={w_db}",
+                    "is_active": False,
+                    "in_use": False,
+                    "badge": "WORKSPACE GRAPH",
+                    "created_at": str(w["created_at"]) if w.get("created_at") else "Workspace"
                 })
 
-            return jsonify({"status": "success", "graphs": graphs}), 200
-        except Exception as e:
-            return jsonify({"status": "error", "message": str(e)}), 500
-        finally:
-            cursor.close()
-            conn.close()
+        return jsonify({
+            "status": "success",
+            "active_graph": primary_graph,
+            "active_db": active_db_name,
+            "graphs": graphs
+        }), 200
+
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
