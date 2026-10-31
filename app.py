@@ -2232,6 +2232,33 @@ def api_store_hub_data():
 
     return store_hub_data_controller(get_db_connection)
 
+from controllers.scheduler_controller import (
+    get_scheduler_config_controller,
+    update_scheduler_config_controller,
+    run_scheduler_now_controller,
+)
+
+@app.route("/api/scheduler/config", methods=["GET"])
+def get_scheduler_config_route():
+    return get_scheduler_config_controller(get_db_connection)
+
+@app.route("/api/scheduler/config", methods=["POST"])
+def update_scheduler_config_route():
+    return update_scheduler_config_controller(get_db_connection)
+
+@app.route("/api/scheduler/run-now", methods=["POST"])
+def run_scheduler_now_route():
+    return run_scheduler_now_controller(get_db_connection)
+
+# --- In-App Background Scheduler Initialization ---
+try:
+    from helper.scheduler_service import init_scheduler
+    init_scheduler(app, get_db_connection)
+except Exception as _sched_err:
+    print(f"[App] Scheduler init note: {_sched_err}", flush=True)
+
+
+
 
 
 

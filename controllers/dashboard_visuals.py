@@ -2075,6 +2075,7 @@ def default_dashboard_metrics_controller(get_db_connection):
     data = request.json or {}
     session_id = data.get("session_id", "").strip()
     user_id = data.get("user_id")
+    force_refresh = bool(data.get("force_refresh", False))
 
     if not session_id:
         return jsonify({"error": "Missing session_id"}), 400
@@ -2107,6 +2108,20 @@ def default_dashboard_metrics_controller(get_db_connection):
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
+
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data
+        if not force_refresh:
+            cached_res = get_cached_component_data(conn, session_id, "key_metrics", "all")
+            if cached_res and cached_res.get("data"):
+                return jsonify({
+                    "status": "success",
+                    "data": cached_res["data"],
+                    "_cached": True,
+                    "_last_synced_at": cached_res.get("_last_synced_at")
+                }), 200
+
+        import time
+        start_calc_t = time.time()
 
         hana_conn, tunnel, sap_schema = get_sap_connection_for_session(conn, session_id, user_id=user_id)
         is_hana = bool(hana_conn)
@@ -3494,6 +3509,11 @@ ORDER BY yr DESC"""
             "metric_15": {"label": "New Dealer", "value": new_dealer_val, "subtext": new_dealer_subtext},
             "metric_16": {"label": "Attrition", "value": attrition, "subtext": att_subtext}
         }
+        try:
+            calc_sec = round(time.time() - start_calc_t, 2) if 'start_calc_t' in locals() else 0.0
+            set_cached_component_data(conn, session_id, "key_metrics", metrics_data, "all", duration_sec=calc_sec)
+        except Exception:
+            pass
         return jsonify({"status": "success", "data": metrics_data}), 200
 
     except Exception as exc:
