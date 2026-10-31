@@ -129,7 +129,8 @@ from controllers.kgraph_controller import (
     create_kgraph_backup_controller,
     list_kgraph_backups_controller,
     restore_kgraph_backup_controller,
-    delete_kgraph_backup_controller
+    delete_kgraph_backup_controller,
+    visualize_kgraph_controller
 )
 
 load_dotenv()
@@ -2151,6 +2152,10 @@ def list_kgraph_backups():
 @app.route("/api/kgraph/restore-backup", methods=["POST"])
 def restore_kgraph_backup():
     return restore_kgraph_backup_controller(get_db_connection)
+
+@app.route("/api/kgraph/visualize/<session_id>", methods=["GET"])
+def route_visualize_kgraph(session_id):
+    return visualize_kgraph_controller(get_db_connection, session_id)
 
 @app.route("/api/kgraph/delete-backup", methods=["POST", "DELETE"])
 @app.route("/api/kgraph/backup", methods=["DELETE"])

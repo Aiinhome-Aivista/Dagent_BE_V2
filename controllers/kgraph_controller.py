@@ -557,14 +557,118 @@ def rollback_kgraph_controller(get_db_connection):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+def visualize_kgraph_controller(get_db_connection, session_id):
+    """
+    Dynamically generates and returns an interactive Vis.js HTML graph of the
+    workspace's ArangoDB session_nodes and session_edges.
+    """
+    try:
+        from pyvis.network import Network
+
+        db_name = _resolve_workspace_arango_db(get_db_connection, session_id=session_id)
+        db, err = _get_arango_db_handle(db_name)
+        if err or not db:
+            return f"<h3>Database error: {err}</h3>", 404
+
+        net = Network(height='100%', width='100%', bgcolor='#0f172a', font_color='white', directed=True)
+        net.set_options("""
+        var options = {
+          "physics": {
+            "forceAtlas2Based": {
+              "gravitationalConstant": -50,
+              "centralGravity": 0.01,
+              "springLength": 100,
+              "springConstant": 0.08
+            },
+            "maxVelocity": 50,
+            "solver": "forceAtlas2Based",
+            "timestep": 0.35,
+            "stabilization": {"iterations": 150}
+          }
+        }
+        """)
+
+        nodes = []
+        edges = []
+        if db.has_collection("session_nodes"):
+            nodes = list(db.aql.execute("FOR doc IN `session_nodes` RETURN doc"))
+        if db.has_collection("session_edges"):
+            edges = list(db.aql.execute("FOR doc IN `session_edges` RETURN doc"))
+
+        type_colors = {
+            'ProductCategory': '#ff4081',
+            'Construction': '#e040fb',
+            'TyreType': '#2979ff',
+            'Material': '#9ccc65',
+            'Customer': '#ffc107',
+            'CustomerClass': '#ff9800',
+            'Zone': '#e65100',
+            'Region': '#fb8c00',
+            'Territory': '#f57c00',
+            'Brand': '#ab47bc',
+            'TargetPlan': '#00e676'
+        }
+
+        for n in nodes:
+            nid = n.get('_key') or n.get('original_id')
+            lbl = n.get('label') or nid
+            ntype = n.get('type', 'Node')
+            color = type_colors.get(ntype, '#38bdf8')
+            net.add_node(str(nid), label=str(lbl), title=f"{ntype}: {lbl}", color=color)
+
+        for e in edges:
+            src = str(e.get('_from', '')).replace('session_nodes/', '')
+            dst = str(e.get('_to', '')).replace('session_nodes/', '')
+            rel = e.get('label') or e.get('title') or ''
+            if src and dst:
+                try:
+                    net.add_edge(src, dst, title=rel, label=rel)
+                except Exception:
+                    pass
+
+        html_content = net.generate_html()
+        return html_content, 200, {'Content-Type': 'text/html; charset=utf-8'}
+    except Exception as e:
+        traceback.print_exc()
+        return f"<h3>Failed to generate graph: {str(e)}</h3>", 500
+
+
 def get_all_kgraphs_controller(get_db_connection):
     try:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         
         try:
-            cursor.execute("SELECT id, session_name, graph_url FROM graph ORDER BY id DESC")
-            graphs = cursor.fetchall()
+            cursor.execute("""
+                SELECT 
+                    w.id,
+                    w.workspace_name AS session_name,
+                    w.session_id,
+                    w.workspace_arango_db,
+                    sac.graph_url,
+                    sac.created_at
+                FROM workspaces w
+                LEFT JOIN session_analysis_cache sac ON w.session_id = sac.session_id
+                WHERE w.workspace_arango_db IS NOT NULL
+                ORDER BY (sac.graph_url IS NOT NULL) DESC, w.id DESC
+            """)
+            workspaces = cursor.fetchall()
+
+            graphs = []
+            for w in workspaces:
+                s_id = w.get("session_id")
+                graph_url = f"/api/kgraph/visualize/{s_id}" if s_id else (w.get("graph_url") or "")
+                created_str = str(w["created_at"]) if w.get("created_at") else None
+
+                graphs.append({
+                    "id": w["id"],
+                    "session_name": w.get("session_name") or f"Workspace {w['id']}",
+                    "session_id": s_id,
+                    "graph_url": graph_url,
+                    "created_at": created_str,
+                    "workspace_arango_db": w.get("workspace_arango_db")
+                })
+
             return jsonify({"status": "success", "graphs": graphs}), 200
         except Exception as e:
             return jsonify({"status": "error", "message": str(e)}), 500
