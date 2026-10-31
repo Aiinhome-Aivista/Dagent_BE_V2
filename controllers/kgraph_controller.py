@@ -579,21 +579,45 @@ def visualize_kgraph_controller(get_db_connection, session_id):
         var options = {
           "physics": {
             "forceAtlas2Based": {
-              "gravitationalConstant": -60,
-              "centralGravity": 0.012,
-              "springLength": 110,
-              "springConstant": 0.08
+              "gravitationalConstant": -160,
+              "centralGravity": 0.005,
+              "springLength": 220,
+              "springConstant": 0.05,
+              "damping": 0.45
             },
-            "maxVelocity": 50,
+            "maxVelocity": 60,
             "solver": "forceAtlas2Based",
             "timestep": 0.35,
-            "stabilization": {"iterations": 180}
+            "stabilization": {"iterations": 200}
+          },
+          "nodes": {
+            "font": {
+              "size": 14,
+              "color": "#ffffff"
+            },
+            "scaling": {
+              "min": 18,
+              "max": 40
+            }
+          },
+          "edges": {
+            "smooth": {
+              "type": "continuous",
+              "forceDirection": "none"
+            },
+            "font": {
+              "size": 11,
+              "color": "#94a3b8",
+              "strokeWidth": 0
+            }
           },
           "interaction": {
             "hover": true,
-            "tooltipDelay": 150,
+            "tooltipDelay": 120,
             "navigationButtons": false,
-            "keyboard": true
+            "keyboard": true,
+            "zoomView": true,
+            "dragView": true
           }
         }
         """)
