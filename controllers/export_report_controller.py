@@ -2526,11 +2526,23 @@ def export_query_csv_controller(get_db_connection):
 
         sql_query = data.get("sql_query", "").strip()
 
+        query_b64 = data.get("query_b64") or data.get("sql_query_b64") or ""
+        if not sql_query and query_b64:
+            import base64
+            try:
+                sql_query = base64.b64decode(query_b64).decode("utf-8").strip()
+            except Exception as e:
+                print(f"[CSV Export] Base64 decode error: {e}", flush=True)
+
         filename = data.get("filename", "").strip()
 
         user_id = data.get("user_id") or request.headers.get("user-id") or request.headers.get("user_id")
 
-        sql_query = sql_query.rstrip("; \t\n\r")
+        # Strip markdown code blocks and trailing semicolons
+        sql_query = re.sub(r"^```(?:sql)?\s*", "", sql_query, flags=re.IGNORECASE)
+        sql_query = re.sub(r"\s*```$", "", sql_query)
+        sql_query = sql_query.strip().rstrip("; \t\n\r")
+        print(f"[CSV Export] Prepared query for execution (len {len(sql_query)}): {sql_query[:100]}...", flush=True)
 
 
 
