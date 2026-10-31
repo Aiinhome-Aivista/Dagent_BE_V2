@@ -1237,6 +1237,7 @@ def export_domestic_sales_preview_controller(get_db_connection):
 
 
 import csv
+import re
 from flask import Response, make_response
 
 def export_query_csv_controller(get_db_connection):
