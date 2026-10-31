@@ -1224,12 +1224,66 @@ def get_saved_credentials():
 
 
 @app.route("/session-chat", methods=["POST"])
-
 def session_chat():
+    req_json = request.get_json(silent=True) or {}
+    is_stream = (
+        request.args.get('stream') == 'true' or 
+        req_json.get('stream') is True or 
+        'text/event-stream' in request.headers.get('Accept', '')
+    )
+    if not is_stream:
+        return session_rag_chat_controller(get_db_connection)
 
-    # Dynamic DB controller execution is bypassed to always run local controller code
+    import queue
+    import threading
+    from flask import Response, stream_with_context, copy_current_request_context
+    from helper.rag_status_helper import format_sse, get_friendly_status
 
-    return session_rag_chat_controller(get_db_connection)
+    q = queue.Queue()
+    question = req_json.get("question", "")
+
+    def status_callback(stage, **kwargs):
+        label = get_friendly_status(stage, question=question, **kwargs)
+        q.put({"type": "status", "step": label})
+
+    @copy_current_request_context
+    def worker():
+        try:
+            flask_res = session_rag_chat_controller(get_db_connection, status_callback=status_callback)
+            if isinstance(flask_res, tuple):
+                resp_obj, status_code = flask_res
+            else:
+                resp_obj, status_code = flask_res, 200
+
+            result_data = resp_obj.get_json() if hasattr(resp_obj, "get_json") else resp_obj
+            q.put({"type": "done", "result": result_data, "statusCode": status_code})
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            q.put({"type": "error", "message": str(e), "statusCode": 500})
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def generate():
+        while True:
+            try:
+                item = q.get(timeout=180)
+                yield format_sse(item)
+                if item.get("type") in ("done", "error"):
+                    break
+            except Exception:
+                yield format_sse({"type": "error", "message": "Query processing timed out"})
+                break
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive"
+        }
+    )
 
 
 
