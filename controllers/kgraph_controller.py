@@ -592,7 +592,7 @@ def visualize_kgraph_controller(get_db_connection, session_id):
           "interaction": {
             "hover": true,
             "tooltipDelay": 150,
-            "navigationButtons": true,
+            "navigationButtons": false,
             "keyboard": true
           }
         }
@@ -637,6 +637,33 @@ def visualize_kgraph_controller(get_db_connection, session_id):
                     pass
 
         html_content = net.generate_html()
+        css_injection = """
+        <style>
+          html, body {
+            width: 100% !important;
+            height: 100% !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden !important;
+            background-color: #0f172a !important;
+          }
+          #mynetwork {
+            width: 100% !important;
+            height: 100% !important;
+            position: absolute !important;
+            top: 0 !important;
+            left: 0 !important;
+            right: 0 !important;
+            bottom: 0 !important;
+            border: none !important;
+            background-color: #0f172a !important;
+          }
+        </style>
+        """
+        if "</head>" in html_content:
+            html_content = html_content.replace("</head>", f"{css_injection}</head>")
+        else:
+            html_content = f"{css_injection}{html_content}"
         return html_content, 200, {'Content-Type': 'text/html; charset=utf-8'}
     except Exception as e:
         traceback.print_exc()
@@ -712,35 +739,70 @@ def get_all_kgraphs_controller(get_db_connection):
             "is_active": True,
             "in_use": True,
             "badge": "CURRENTLY IN USE",
-            "created_at": "Live Graph"
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         graphs.append(primary_graph)
         seen_keys.add(active_db_name)
 
         # 3. Add available snapshot backups for the active database
-        if active_db and active_db.has_collection(METADATA_COLLECTION):
+        recorded_node_cols = set()
+        if active_db:
+            if active_db.has_collection(METADATA_COLLECTION):
+                try:
+                    cursor = active_db.aql.execute(f"FOR doc IN `{METADATA_COLLECTION}` SORT doc.created_at DESC RETURN doc")
+                    for doc in cursor:
+                        b_name = doc.get("backup_name")
+                        node_col = doc.get("nodes_collection")
+                        edge_col = doc.get("edges_collection")
+                        if b_name and node_col and active_db.has_collection(node_col):
+                            recorded_node_cols.add(node_col)
+                            graphs.append({
+                                "id": f"backup_{b_name}",
+                                "session_name": f"Snapshot: {b_name}",
+                                "session_id": active_session_id or active_db_name,
+                                "workspace_arango_db": active_db_name,
+                                "nodes_count": doc.get("nodes_count", 0),
+                                "edges_count": doc.get("edges_count", 0),
+                                "graph_url": f"/api/kgraph/visualize/{active_session_id or active_db_name}?db={active_db_name}&node_col={node_col}&edge_col={edge_col}",
+                                "is_active": False,
+                                "in_use": False,
+                                "badge": "SNAPSHOT BACKUP",
+                                "created_at": doc.get("created_date") or doc.get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            })
+                except Exception as bkp_err:
+                    print(f"[KGraph] Warning listing backups in visual graphs: {bkp_err}")
+
+            # Also discover legacy backup collections
             try:
-                cursor = active_db.aql.execute(f"FOR doc IN `{METADATA_COLLECTION}` SORT doc.created_at DESC RETURN doc")
-                for doc in cursor:
-                    b_name = doc.get("backup_name")
-                    node_col = doc.get("nodes_collection")
-                    edge_col = doc.get("edges_collection")
-                    if b_name and node_col and active_db.has_collection(node_col):
+                for c in active_db.collections():
+                    cname = c["name"]
+                    if "_backup_" in cname and cname.startswith("session_nodes") and cname not in recorded_node_cols and not cname.startswith("_"):
+                        edge_col_candidate = cname.replace("session_nodes_", "session_edges_")
+                        try:
+                            n_count = next(active_db.aql.execute(f"RETURN LENGTH(`{cname}`)"), 0) or 0
+                        except Exception:
+                            n_count = 0
+                        try:
+                            e_count = next(active_db.aql.execute(f"RETURN LENGTH(`{edge_col_candidate}`)"), 0) or 0 if active_db.has_collection(edge_col_candidate) else 0
+                        except Exception:
+                            e_count = 0
+
+                        display_name = cname.replace("session_nodes_backup_", "kg-")
                         graphs.append({
-                            "id": f"backup_{b_name}",
-                            "session_name": f"Snapshot: {b_name}",
+                            "id": f"backup_{display_name}",
+                            "session_name": f"Snapshot: {display_name}",
                             "session_id": active_session_id or active_db_name,
                             "workspace_arango_db": active_db_name,
-                            "nodes_count": doc.get("nodes_count", 0),
-                            "edges_count": doc.get("edges_count", 0),
-                            "graph_url": f"/api/kgraph/visualize/{active_session_id or active_db_name}?db={active_db_name}&node_col={node_col}&edge_col={edge_col}",
+                            "nodes_count": n_count,
+                            "edges_count": e_count,
+                            "graph_url": f"/api/kgraph/visualize/{active_session_id or active_db_name}?db={active_db_name}&node_col={cname}&edge_col={edge_col_candidate if active_db.has_collection(edge_col_candidate) else ''}",
                             "is_active": False,
                             "in_use": False,
                             "badge": "SNAPSHOT BACKUP",
-                            "created_at": doc.get("created_date") or doc.get("created_at") or "Snapshot"
+                            "created_at": "Historical Snapshot"
                         })
-            except Exception as bkp_err:
-                print(f"[KGraph] Warning listing backups in visual graphs: {bkp_err}")
+            except Exception as legacy_err:
+                print(f"[KGraph] Warning discovering legacy backups: {legacy_err}")
 
         # 4. Add other workspaces
         for w in all_workspaces:
