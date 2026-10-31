@@ -1250,7 +1250,7 @@ def export_query_csv_controller(get_db_connection):
         resp = make_response("", 200)
         resp.headers["Access-Control-Allow-Origin"] = "*"
         resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept, user-id, user_id, *"
         return resp
 
     conn = None
@@ -1330,7 +1330,7 @@ def export_query_csv_controller(get_db_connection):
                 "Content-Type": "text/csv; charset=utf-8",
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With, Accept, user-id, user_id, *",
             }
         )
         return resp
