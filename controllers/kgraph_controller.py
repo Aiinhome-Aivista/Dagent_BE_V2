@@ -574,7 +574,7 @@ def visualize_kgraph_controller(get_db_connection, session_id):
         if err or not db:
             return f"<div style='font-family:sans-serif;padding:24px;color:#f87171;background:#0f172a;'><h3>Database Error</h3><p>{err}</p></div>", 404
 
-        net = Network(height='100%', width='100%', bgcolor='#0f172a', font_color='white', directed=True)
+        net = Network(height='100vh', width='100%', bgcolor='#0f172a', font_color='white', directed=True)
         net.set_options("""
         var options = {
           "physics": {
@@ -641,24 +641,49 @@ def visualize_kgraph_controller(get_db_connection, session_id):
         <style>
           html, body {
             width: 100% !important;
-            height: 100% !important;
+            height: 100vh !important;
+            min-height: 100% !important;
             margin: 0 !important;
             padding: 0 !important;
             overflow: hidden !important;
             background-color: #0f172a !important;
           }
+          .card {
+            width: 100% !important;
+            height: 100vh !important;
+            min-height: 100% !important;
+            border: none !important;
+            background-color: #0f172a !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            display: flex !important;
+            flex-direction: column !important;
+          }
+          .card-body {
+            padding: 0 !important;
+            flex: 1 1 auto !important;
+          }
           #mynetwork {
             width: 100% !important;
-            height: 100% !important;
-            position: absolute !important;
-            top: 0 !important;
-            left: 0 !important;
-            right: 0 !important;
-            bottom: 0 !important;
+            height: 100vh !important;
+            min-height: 100% !important;
+            position: relative !important;
             border: none !important;
             background-color: #0f172a !important;
           }
+          #loadingBar {
+            display: none !important;
+          }
         </style>
+        <script>
+          window.addEventListener('load', function() {
+            setTimeout(function() {
+              if (typeof network !== 'undefined' && network && typeof network.fit === 'function') {
+                network.fit({ animation: { duration: 600 } });
+              }
+            }, 300);
+          });
+        </script>
         """
         if "</head>" in html_content:
             html_content = html_content.replace("</head>", f"{css_injection}</head>")
