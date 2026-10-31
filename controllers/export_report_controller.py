@@ -2640,46 +2640,69 @@ def export_query_csv_controller(get_db_connection):
 
 
         # Extract EXACT column names from database cursor
-
         cols = [desc[0] for desc in cursor.description] if cursor.description else []
 
-
-
         output = io.StringIO()
-
-        writer = csv.writer(output)
-
+        writer = csv.writer(output, lineterminator="\r\n")
         writer.writerow(cols)
 
-
-
         # Write data rows
-
         rows = cursor.fetchall()
-
         for r in rows:
-
-            if isinstance(r, (list, tuple)):
-
-                row_vals = [str(val) if val is not None else "" for val in r]
-
+            if r is None:
+                row_vals = ["" for _ in cols]
             elif isinstance(r, dict):
-
                 row_vals = [str(r.get(c)) if r.get(c) is not None else "" for c in cols]
-
             else:
+                # Handle stringified tuple/list representation if present
+                if isinstance(r, str):
+                    s = r.strip()
+                    if (s.startswith("(") and s.endswith(")")) or (s.startswith("[") and s.endswith("]")):
+                        import ast
+                        try:
+                            parsed = ast.literal_eval(s)
+                            if isinstance(parsed, (list, tuple)):
+                                r = parsed
+                        except Exception:
+                            try:
+                                import csv as _csv, io as _io
+                                parsed = next(_csv.reader(_io.StringIO(s[1:-1]), quotechar="'", skipinitialspace=True))
+                                if parsed:
+                                    r = parsed
+                            except Exception:
+                                pass
 
-                row_vals = [str(r)]
+                # Handle tuple, list, hdbcli ResultRow, pyodbc.Row, or any sequence/iterable
+                if isinstance(r, (list, tuple)) or (hasattr(r, "__iter__") and not isinstance(r, (str, bytes, dict))):
+                    vals = list(r)
+                    # Check if single item in vals was a stringified tuple
+                    if len(vals) == 1 and len(cols) > 1 and isinstance(vals[0], str):
+                        s = vals[0].strip()
+                        if (s.startswith("(") and s.endswith(")")) or (s.startswith("[") and s.endswith("]")):
+                            import ast
+                            try:
+                                parsed = ast.literal_eval(s)
+                                if isinstance(parsed, (list, tuple)):
+                                    vals = list(parsed)
+                            except Exception:
+                                try:
+                                    import csv as _csv, io as _io
+                                    parsed = next(_csv.reader(_io.StringIO(s[1:-1]), quotechar="'", skipinitialspace=True))
+                                    if parsed:
+                                        vals = list(parsed)
+                                except Exception:
+                                    pass
+                    row_vals = [str(val) if val is not None else "" for val in vals]
+                elif hasattr(r, "__getitem__") and hasattr(r, "__len__") and len(r) == len(cols):
+                    row_vals = [str(r[i]) if r[i] is not None else "" for i in range(len(cols))]
+                else:
+                    row_vals = [str(r)]
 
             writer.writerow(row_vals)
 
-
-
-        csv_content = output.getvalue()
-
+        # Prepend UTF-8 BOM so Microsoft Excel correctly renders all columns and UTF-8 characters
+        csv_content = "\ufeff" + output.getvalue()
         output.close()
-
-
 
         print(f"[CSV Export] Streamed {len(rows)} rows with exact columns: {cols} as '{safe_filename}'", flush=True)
 
