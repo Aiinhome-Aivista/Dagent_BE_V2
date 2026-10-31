@@ -96,7 +96,7 @@ def get_sap_connection_for_session(mysql_conn, session_id, user_id=None):
         return hana_conn, tunnel, schema
 
     except Exception as e:
-        print(f"[SAP-CONN] Live HANA connection failed for session {session_id}: {e}")
+        # print(f"[SAP-CONN] Live HANA connection failed for session {session_id}: {e}")
         return None, None, None
 
 
@@ -135,7 +135,8 @@ def get_sap_table_columns(mysql_conn, hana_conn, schema, session_id):
                             cols_dict[clean] = c_name
                     table_columns[v_name] = cols_dict
         except Exception as e:
-            print(f"[SAP-COLS] Error reading metadata cache: {e}")
+            # print(f"[SAP-COLS] Error reading metadata cache: {e}")
+            pass
 
     # Fallback to querying SYS.VIEW_COLUMNS live from HANA
     if not table_columns and hana_conn:
@@ -168,7 +169,8 @@ def get_sap_table_columns(mysql_conn, hana_conn, schema, session_id):
                 table_columns[t_name][clean] = c_name
             h_cur.close()
         except Exception as e:
-            print(f"[SAP-COLS] Error fetching columns from HANA catalog: {e}")
+            # print(f"[SAP-COLS] Error fetching columns from HANA catalog: {e}")
+            pass
 
     return table_columns
 
@@ -270,7 +272,7 @@ If you cannot find 4 metrics, return null for the remaining metric fields (e.g.,
                 
         return jsonify({"status": "success", "data": metrics}), 200
     except Exception as e:
-        print(f"[Graph] Error extracting metrics: {e}")
+        # print(f"[Graph] Error extracting metrics: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -334,7 +336,7 @@ Return EXACTLY a valid JSON object in this format, with no markdown formatting o
         chart_data = json.loads(response)
         return jsonify({"status": "success", "data": chart_data}), 200
     except Exception as e:
-        print(f"[Graph] Error extracting chart data: {e}")
+        # print(f"[Graph] Error extracting chart data: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -380,7 +382,8 @@ def get_actual_column_name(cursor, table_name, expected_name, is_hana=False):
                     return f'"{col}"' if is_hana else f"`{col}`"
                 
     except Exception as e:
-        print(f"Error fetching columns for {table_name}: {e}")
+        # print(f"Error fetching columns for {table_name}: {e}")
+        pass
         
     return None
 
@@ -913,10 +916,10 @@ def tyre_sales_data_controller(get_db_connection):
                     r["category"] = r["vehicle_type"]
                 r["sales_value"] = float(r.get("sales_value") or 0.0)
         except Exception as e:
-            print(f"[Tyre Sales Data] Execution error: {e}")
+            # print(f"[Tyre Sales Data] Execution error: {e}")
             if is_hana and ("cannot allocate enough memory" in str(e).lower() or "allocation failed" in str(e).lower()):
                 try:
-                    print("[Tyre Sales Data] Retrying with lightweight current sales view due to HANA memory limit...")
+                    # print("[Tyre Sales Data] Retrying with lightweight current sales view due to HANA memory limit...")
                     lean_from = f"(SELECT * FROM \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\" WHERE (distribution_channel=10 OR distribution_channel='10') AND (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1'))) s"
                     retry_query = re.sub(r'FROM\s+\(.*?\)\s+s', f'FROM {lean_from}', query, count=1, flags=re.DOTALL)
                     execute_query(cursor, retry_query, params, is_hana=is_hana)
@@ -953,7 +956,7 @@ def tyre_sales_data_controller(get_db_connection):
         }), 200 if not error_msg else 400
 
     except Exception as exc:
-        print(f"[Tyre Sales Data] Database query failed: {exc}")
+        # print(f"[Tyre Sales Data] Database query failed: {exc}")
         return jsonify({"status": "error", "message": "Database query failed.", "details": str(exc)}), 500
 
     finally:
@@ -1194,7 +1197,7 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
                     execute_query(cursor, hana_zone_sql, is_hana=True)
                     results = fetchall_dict(cursor)
                 except Exception as union_e:
-                    print(f"[Sales by Zone] HANA union query failed: {union_e}, retrying with SalesHistory only...")
+                    # print(f"[Sales by Zone] HANA union query failed: {union_e}, retrying with SalesHistory only...")
                     # Fallback to SalesHistory only if UNION hits memory limit
                     sales_src_sql_fb = f"""SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
                                        "distribution_channel", "indicator_cancel", "invoice_value", "Tyre_Quantity"
@@ -1226,9 +1229,9 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
                     r['percentage'] = round((val / total_sales) * 100, 1) if total_sales > 0 else 0.0
 
                 chart_data = [r for r in results if r['value'] > 0] or results
-                print(f"[Sales by Zone] HANA query returned {len(chart_data)} zones, total sales: ₹{total_sales/10000000:,.2f} Cr")
+                # print(f"[Sales by Zone] HANA query returned {len(chart_data)} zones, total sales: ₹{total_sales/10000000:,.2f} Cr")
             except Exception as hana_err:
-                print(f"[Sales by Zone] Dedicated HANA query failed: {hana_err}")
+                # print(f"[Sales by Zone] Dedicated HANA query failed: {hana_err}")
                 error_msg = str(hana_err)
 
         else:
@@ -1357,7 +1360,7 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
 
                 chart_data = results
             except Exception as e:
-                print(f"[Sales by Zone] MySQL Execution error: {e}")
+                # print(f"[Sales by Zone] MySQL Execution error: {e}")
                 error_msg = str(e)
 
         visualizations = []
@@ -1380,7 +1383,7 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
         }), 200 if not error_msg else 400
 
     except Exception as exc:
-        print(f"[Sales by Zone] Database query failed: {exc}")
+        # print(f"[Sales by Zone] Database query failed: {exc}")
         return jsonify({"status": "error", "message": "Database query failed.", "details": str(exc)}), 500
 
     finally:
@@ -1595,7 +1598,7 @@ def year_wise_sales_comparison_controller(get_db_connection):
         }), 200
 
     except Exception as exc:
-        print(f"[Year-wise Sales Comparison] Database query failed: {exc}")
+        # print(f"[Year-wise Sales Comparison] Database query failed: {exc}")
         return jsonify({"status": "error", "message": "Database query failed.", "details": str(exc)}), 500
 
     finally:
@@ -1722,7 +1725,8 @@ def available_years_controller(get_db_connection):
                             if 1 <= m_idx <= 12:
                                 month_set.add(m_idx)
                 except Exception as e:
-                    print(f"[Available Years] Date query error for {tbl}: {e}")
+                    # print(f"[Available Years] Date query error for {tbl}: {e}")
+                    pass
 
         if all_years:
             years = sorted(list(all_years))
@@ -1740,7 +1744,8 @@ def available_years_controller(get_db_connection):
                     zones = [r["val"] for r in fetchall_dict(cursor) if r.get("val")]
                     if zones: break
                 except Exception as e:
-                    print(f"[Available Years] Zone error: {e}")
+                    # print(f"[Available Years] Zone error: {e}")
+                    pass
 
         # 3. Fetch Regions (Prioritize RegionMaster and text names over numeric codes)
         sorted_region_tables = sorted(all_tables, key=lambda t: 0 if "regionmaster" in t.lower() else (1 if "region" in t.lower() else 2))
@@ -1758,7 +1763,8 @@ def available_years_controller(get_db_connection):
                         if has_alpha:
                             break
                 except Exception as e:
-                    print(f"[Available Years] Region error: {e}")
+                    # print(f"[Available Years] Region error: {e}")
+                    pass
 
         # 4. Fetch Customer Types
         for tbl in all_tables:
@@ -1771,7 +1777,8 @@ def available_years_controller(get_db_connection):
                     customer_types = [r["val"] for r in fetchall_dict(cursor) if r.get("val")]
                     if customer_types: break
                 except Exception as e:
-                    print(f"[Available Years] Customer types error: {e}")
+                    # print(f"[Available Years] Customer types error: {e}")
+                    pass
 
         # 5. Fetch Construction Types
         construction_labels = {
@@ -1795,7 +1802,8 @@ def available_years_controller(get_db_connection):
                         construction_types.append({"value": raw_val, "label": lbl})
                     if construction_types: break
                 except Exception as e:
-                    print(f"[Available Years] Construction types error: {e}")
+                    # print(f"[Available Years] Construction types error: {e}")
+                    pass
 
         return jsonify({
             "status": "success",
@@ -1808,7 +1816,7 @@ def available_years_controller(get_db_connection):
         }), 200
 
     except Exception as exc:
-        print(f"[Available Years] Database query failed: {exc}")
+        # print(f"[Available Years] Database query failed: {exc}")
         return jsonify({"status": "error", "message": "Database query failed.", "details": str(exc)}), 500
 
     finally:
@@ -1914,7 +1922,8 @@ def dashboard_filters_controller(get_db_connection):
                             filters_data["categories"] = res
                             break
                     except Exception as e:
-                        print(f"[Filters] Categories error for {tbl}: {e}")
+                        # print(f"[Filters] Categories error for {tbl}: {e}")
+                        pass
 
         if not filters_data["categories"]:
             for tbl in tables:
@@ -1929,7 +1938,8 @@ def dashboard_filters_controller(get_db_connection):
                             filters_data["categories"] = res
                             break
                     except Exception as e:
-                        print(f"[Filters] Categories fallback error: {e}")
+                        # print(f"[Filters] Categories fallback error: {e}")
+                        pass
 
         # 2. Constructions
         construction_labels = {
@@ -1956,7 +1966,8 @@ def dashboard_filters_controller(get_db_connection):
                         filters_data["constructions"] = res
                         break
                 except Exception as e:
-                    print(f"[Filters] Constructions error: {e}")
+                    # print(f"[Filters] Constructions error: {e}")
+                    pass
 
         # 3. Tyre Types
         for tbl in tables:
@@ -1973,7 +1984,8 @@ def dashboard_filters_controller(get_db_connection):
                             filters_data["tyreTypes"] = res
                             break
                     except Exception as e:
-                        print(f"[Filters] Tyre types error: {e}")
+                        # print(f"[Filters] Tyre types error: {e}")
+                        pass
 
         if not filters_data["tyreTypes"]:
             for tbl in tables:
@@ -1988,7 +2000,8 @@ def dashboard_filters_controller(get_db_connection):
                             filters_data["tyreTypes"] = res
                             break
                     except Exception as e:
-                        print(f"[Filters] Tyre fallback error: {e}")
+                        # print(f"[Filters] Tyre fallback error: {e}")
+                        pass
 
         # 4. Years and Months
         all_years = set()
@@ -2018,7 +2031,8 @@ def dashboard_filters_controller(get_db_connection):
                             if 1 <= m_idx <= 12:
                                 month_set.add(m_idx)
                 except Exception as e:
-                    print(f"[Filters] Date error: {e}")
+                    # print(f"[Filters] Date error: {e}")
+                    pass
 
         if all_years:
             filters_data["years"] = sorted(list(all_years))
@@ -2028,7 +2042,7 @@ def dashboard_filters_controller(get_db_connection):
         return jsonify({"status": "success", **filters_data}), 200
 
     except Exception as exc:
-        print(f"[Dashboard Filters] query failed: {exc}")
+        # print(f"[Dashboard Filters] query failed: {exc}")
         return jsonify({"status": "success", **filters_data}), 200
 
     finally:
@@ -2122,7 +2136,7 @@ def default_dashboard_metrics_controller(get_db_connection):
             sync_row = cursor.fetchone()
 
             if not sync_row:
-                print(f"[Default Metrics] No dynamic table found for session {session_id}")
+                # print(f"[Default Metrics] No dynamic table found for session {session_id}")
                 return jsonify({"status": "success", "data": metrics_data}), 200
 
             user_db = sync_row["new_user_db"]
@@ -2140,7 +2154,8 @@ def default_dashboard_metrics_controller(get_db_connection):
                         for c in cols
                     }
                 except Exception as e:
-                    print(f"[Default Metrics] Describe table {tbl} failed: {e}")
+                    # print(f"[Default Metrics] Describe table {tbl} failed: {e}")
+                    pass
 
         def check_col(cols_dict, opts_list):
             if not cols_dict:
@@ -2259,7 +2274,8 @@ def default_dashboard_metrics_controller(get_db_connection):
                 if b_row and b_row.get("max_h"):
                     boundary_date = str(b_row["max_h"])[:10]
             except Exception as b_err:
-                print(f"[Default Metrics] Boundary date query fallback: {b_err}")
+                # print(f"[Default Metrics] Boundary date query fallback: {b_err}")
+                pass
             if not boundary_date:
                 boundary_date = "2026-09-27"
 
@@ -2434,7 +2450,7 @@ def default_dashboard_metrics_controller(get_db_connection):
                         total_revenue = float(row.get("total_sales_revenue") or 0)
                         min_sales_yr  = row.get("min_yr")
                         max_sales_yr  = row.get("max_yr")
-                        print(f"[Default Metrics] HANA Lifetime Revenue (ch=10, excl cancelled+dummy): ₹{total_revenue:,.2f} Cr")
+                        # print(f"[Default Metrics] HANA Lifetime Revenue (ch=10, excl cancelled+dummy): ₹{total_revenue:,.2f} Cr")
                 else:
                     # MySQL / single-table path: use existing sales_from
                     rev_q = f"SELECT SUM({join_revenue_expr}) AS total_sales_revenue"
@@ -2448,7 +2464,7 @@ def default_dashboard_metrics_controller(get_db_connection):
                         min_sales_yr  = row.get("min_yr")
                         max_sales_yr  = row.get("max_yr")
             except Exception as rev_err:
-                print(f"[Default Metrics] Total revenue query failed: {rev_err}")
+                # print(f"[Default Metrics] Total revenue query failed: {rev_err}")
                 # Fallback: plain SUM without filters
                 try:
                     rev_q_fb = f"SELECT SUM({join_revenue_expr}) AS total_sales_revenue FROM {sales_from}"
@@ -2544,9 +2560,10 @@ LIMIT 1""".replace('\"{cat_desc2_alias}\"', f'"{cat_desc2}"')
                         row = fetchone_dict(cursor)
                         if row and row.get("vehicle_type"):
                             top_tyre = row["vehicle_type"]
-                            print(f"[Default Metrics] HANA Top Tyre Category: {top_tyre}")
+                            # print(f"[Default Metrics] HANA Top Tyre Category: {top_tyre}")
                 except Exception as tyre_hana_err:
-                    print(f"[Default Metrics] HANA Top Tyre query failed: {tyre_hana_err}")
+                    # print(f"[Default Metrics] HANA Top Tyre query failed: {tyre_hana_err}")
+                    pass
 
             # ── Non-HANA / fallback paths (unchanged) ──
             if top_tyre == "N/A":
@@ -2581,7 +2598,8 @@ LIMIT 1""".replace('\"{cat_desc2_alias}\"', f'"{cat_desc2}"')
                             if row and row.get("vehicle_type"):
                                 top_tyre = row["vehicle_type"]
                         except Exception as tyre_err:
-                            print(f"[Default Metrics] Category master join query failed: {tyre_err}")
+                            # print(f"[Default Metrics] Category master join query failed: {tyre_err}")
+                            pass
 
                 if top_tyre == "N/A" and cat_tbl:
                     sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
@@ -2610,7 +2628,8 @@ LIMIT 1""".replace('\"{cat_desc2_alias}\"', f'"{cat_desc2}"')
                             if row and row.get("vehicle_type"):
                                 top_tyre = row["vehicle_type"]
                         except Exception as tyre_err:
-                            print(f"[Default Metrics] Direct category master query failed: {tyre_err}")
+                            # print(f"[Default Metrics] Direct category master query failed: {tyre_err}")
+                            pass
 
                 if top_tyre == "N/A" and sku_tbl:
                     sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
@@ -2639,7 +2658,8 @@ LIMIT 1""".replace('\"{cat_desc2_alias}\"', f'"{cat_desc2}"')
                             if row and row.get("vehicle_type"):
                                 top_tyre = row["vehicle_type"]
                         except Exception as tyre_err:
-                            print(f"[Default Metrics] SKU tyre_type query failed: {tyre_err}")
+                            # print(f"[Default Metrics] SKU tyre_type query failed: {tyre_err}")
+                            pass
 
 
         # 3. Leading Region (Prioritize Customer Market Geography over Factory Plant location)
@@ -2728,9 +2748,10 @@ LIMIT 1"""
                         row = fetchone_dict(cursor)
                         if row and row.get("region_name"):
                             leading_region = row["region_name"]
-                            print(f"[Default Metrics] HANA Leading Region: {leading_region}")
+                            # print(f"[Default Metrics] HANA Leading Region: {leading_region}")
                 except Exception as reg_hana_err:
-                    print(f"[Default Metrics] HANA Leading Region query failed: {reg_hana_err}")
+                    # print(f"[Default Metrics] HANA Leading Region query failed: {reg_hana_err}")
+                    pass
 
             # ── Non-HANA / fallback paths (unchanged) ──
             if leading_region == "N/A":
@@ -2772,7 +2793,8 @@ LIMIT 1"""
                                 if row and row.get("region_name"):
                                     leading_region = row["region_name"]
                             except Exception as reg_err:
-                                print(f"[Default Metrics] Customer territory region query failed: {reg_err}")
+                                # print(f"[Default Metrics] Customer territory region query failed: {reg_err}")
+                                pass
 
                 if leading_region == "N/A" and cust_tbl and reg_tbl:
                     sales_cust = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
@@ -2806,7 +2828,8 @@ LIMIT 1"""
                             if row and row.get("region_name"):
                                 leading_region = row["region_name"]
                         except Exception as reg_err:
-                            print(f"[Default Metrics] Direct customer region query failed: {reg_err}")
+                            # print(f"[Default Metrics] Direct customer region query failed: {reg_err}")
+                            pass
 
                 if leading_region == "N/A" and terr_tbl and reg_tbl:
                     sales_plant = check_col(sales_cols, ["plant", "werks"])
@@ -2834,7 +2857,8 @@ LIMIT 1"""
                             if row and row.get("region_name"):
                                 leading_region = row["region_name"]
                         except Exception as reg_err:
-                            print(f"[Default Metrics] Plant territory region query failed: {reg_err}")
+                            # print(f"[Default Metrics] Plant territory region query failed: {reg_err}")
+                            pass
 
 
         # 4. YoY Growth
@@ -2931,9 +2955,10 @@ ORDER BY yr DESC"""
                                 yoy_subtext = f"{current_year_num} sales only"
                         else:
                             yoy_subtext = f"{current_year_num} sales only"
-                        print(f"[Default Metrics] HANA YoY: {current_year_num}={current_year:.2f}Cr, {prev_year_num}={previous_year:.2f}Cr, growth={yoy:+.2f}%")
+                        # print(f"[Default Metrics] HANA YoY: {current_year_num}={current_year:.2f}Cr, {prev_year_num}={previous_year:.2f}Cr, growth={yoy:+.2f}%")
                 except Exception as yoy_hana_err:
-                    print(f"[Default Metrics] HANA YoY query failed: {yoy_hana_err}")
+                    # print(f"[Default Metrics] HANA YoY query failed: {yoy_hana_err}")
+                    pass
 
             # ── Non-HANA / fallback path (unchanged) ──
             if current_year == 0.0 and real_date_col:
@@ -2972,7 +2997,8 @@ ORDER BY yr DESC"""
                         else:
                             yoy_subtext = f"{current_year_num} sales only"
                 except Exception as yoy_err:
-                    print(f"[Default Metrics] YoY query failed: {yoy_err}")
+                    # print(f"[Default Metrics] YoY query failed: {yoy_err}")
+                    pass
 
         # 5. Billing Scope, Dealer Spread, Financials & Network Health KPIs
         billing_scope = "N/A"
@@ -3028,9 +3054,10 @@ ORDER BY yr DESC"""
                 b_row = fetchone_dict(cursor)
                 if b_row and b_row.get("cust_count") is not None:
                     billing_scope = str(b_row["cust_count"])
-                    print(f"[Default Metrics] HANA Billing Scope: {billing_scope}")
+                    # print(f"[Default Metrics] HANA Billing Scope: {billing_scope}")
             except Exception as b_err:
-                print(f"[Default Metrics] HANA Billing Scope failed: {b_err}")
+                # print(f"[Default Metrics] HANA Billing Scope failed: {b_err}")
+                pass
 
             # 6 to 10 & 12: CustomerMaster-based KPIs in a single fast query
             if cust_tbl_h:
@@ -3137,9 +3164,10 @@ ORDER BY yr DESC"""
                             attrition = "0"
                             att_subtext = f"Inactive since Sep {target_yr_str}"
 
-                        print(f"[Default Metrics] HANA KPIs: Dealers={dealer_spread}, Overdue={overdue_val}, Exposure={exposure_val}, New={new_dealer_val}, Attrition={attrition}")
+                        # print(f"[Default Metrics] HANA KPIs: Dealers={dealer_spread}, Overdue={overdue_val}, Exposure={exposure_val}, New={new_dealer_val}, Attrition={attrition}")
                 except Exception as cm_err:
-                    print(f"[Default Metrics] HANA CustomerMaster KPIs query failed: {cm_err}")
+                    # print(f"[Default Metrics] HANA CustomerMaster KPIs query failed: {cm_err}")
+                    pass
 
         else:
             # ── Non-HANA / MySQL Fallback Path ──
@@ -3151,7 +3179,8 @@ ORDER BY yr DESC"""
                     if row and row.get("cust_count") is not None:
                         billing_scope = str(row["cust_count"])
                 except Exception as e:
-                    print(f"[Default Metrics] Billing scope query failed: {e}")
+                    # print(f"[Default Metrics] Billing scope query failed: {e}")
+                    pass
 
             if real_cust_col_sales and cust_tbl:
                 cust_id_col = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
@@ -3187,7 +3216,7 @@ ORDER BY yr DESC"""
                         elif billing_scope != "N/A":
                             dealer_spread = billing_scope
                     except Exception as e:
-                        print(f"[Default Metrics] Dealer spread query failed: {e}")
+                        # print(f"[Default Metrics] Dealer spread query failed: {e}")
                         if billing_scope != "N/A":
                             dealer_spread = billing_scope
 
@@ -3207,7 +3236,8 @@ ORDER BY yr DESC"""
                             elif exposure_num >= 100000: exposure_val = f"₹{(exposure_num / 100000):.2f} Lac"
                             else: exposure_val = f"₹{exposure_num:,.2f}"
                     except Exception as e:
-                        print(f"[Default Metrics] Exposure query failed: {e}")
+                        # print(f"[Default Metrics] Exposure query failed: {e}")
+                        pass
 
                 if out_col:
                     try:
@@ -3219,7 +3249,8 @@ ORDER BY yr DESC"""
                             elif overdue_num >= 100000: overdue_val = f"₹{(overdue_num / 100000):.2f} Lac"
                             else: overdue_val = f"₹{overdue_num:,.2f}"
                     except Exception as e:
-                        print(f"[Default Metrics] Outstanding query failed: {e}")
+                        # print(f"[Default Metrics] Outstanding query failed: {e}")
+                        pass
 
                 dmbtr_sas_col = check_col(table_columns[cust_tbl], ["dmbtr_sas", "dmbtrsas"])
                 sas_curr_col = check_col(table_columns[cust_tbl], ["sas_curr", "sascurr"])
@@ -3246,7 +3277,8 @@ ORDER BY yr DESC"""
                                     s_var = ((c_val - o_val) / o_val) * 100
                                     sas_variance_val = f"{s_var:+.1f}%"
                     except Exception as e:
-                        print(f"[Default Metrics] SAS query failed: {e}")
+                        # print(f"[Default Metrics] SAS query failed: {e}")
+                        pass
 
                 att_col = check_col(table_columns[cust_tbl], ["attration", "attrition"])
                 nobill_col = check_col(table_columns[cust_tbl], ["lm_nobill", "l2m_nobill", "l3m_nobill"])
@@ -3260,7 +3292,8 @@ ORDER BY yr DESC"""
                         if row and row.get("att_count") is not None and int(row["att_count"]) > 0:
                             attrition = str(row["att_count"])
                     except Exception as e:
-                        print(f"[Default Metrics] Attrition query failed: {e}")
+                        # print(f"[Default Metrics] Attrition query failed: {e}")
+                        pass
 
             if attrition == "N/A":
                 attrition = "0"
@@ -3325,7 +3358,8 @@ ORDER BY yr DESC"""
                                 ach = (ref_sales / t_val) * 100
                                 achievement_val = f"{ach:.2f}%"
             except Exception as e:
-                print(f"[Default Metrics] Sales target query failed: {e}")
+                # print(f"[Default Metrics] Sales target query failed: {e}")
+                pass
 
         # 12. New Dealer (Onboarded in current operational year, e.g. 2026)
         new_dealer_val = "N/A"
@@ -3389,7 +3423,8 @@ ORDER BY yr DESC"""
                             new_dealer_val = str(row_p["nd_count"])
                             new_dealer_subtext = f"Onboarded in {prev_yr_str}"
                 except Exception as e:
-                    print(f"[Default Metrics] New dealer query failed: {e}")
+                    # print(f"[Default Metrics] New dealer query failed: {e}")
+                    pass
 
         # Format total revenue
         # Total Sales Revenue
@@ -3462,7 +3497,7 @@ ORDER BY yr DESC"""
         return jsonify({"status": "success", "data": metrics_data}), 200
 
     except Exception as exc:
-        print(f"[Default Metrics] Database query failed: {exc}")
+        # print(f"[Default Metrics] Database query failed: {exc}")
         return jsonify({
             "status": "error",
             "message": "Database query failed.",
