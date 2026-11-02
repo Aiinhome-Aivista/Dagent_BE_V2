@@ -157,29 +157,45 @@ def _execute_sync_task():
                 print(f"[Scheduler] Error syncing exposure_pct for '{ws_name}': {e}", flush=True)
 
             # 6. Pre-calculate and save common Filter Combinations in advance
-            COMMON_ZONES = ["WEST", "NORTH", "Central Zone", "EAST", "South Zone - II", "SOUTH", "Nepal"]
+            ZONE_PAIRS = [
+                ("CZ", "Central Zone"),
+                ("EZ", "EAST"),
+                ("NZ", "NORTH"),
+                ("WZ", "WEST"),
+                ("SZ", "SOUTH"),
+                ("TZ", "South Zone - II"),
+                ("NP", "Nepal"),
+            ]
             COMMON_YEARS = [2026, 2025]
 
             print(f"[Scheduler] Pre-caching filter variations for '{ws_name}'...", flush=True)
-            for z in COMMON_ZONES:
+            for z_code, z_name in ZONE_PAIRS:
+                # 1. Real region breakdown drill-down for Sales Revenue
                 try:
-                    if rev and isinstance(rev, list):
-                        z_rev = [r for r in rev if r.get("zone", "").strip().lower() == z.strip().lower() or r.get("zoneCode", "").strip().lower() == z.strip().lower()]
-                        if z_rev:
-                            set_cached_component_data(conn, s_id, "sales_revenue", z_rev, f"zone:{z}")
-                except Exception: pass
+                    z_rev = execute_sales_revenue_by_zone(conn, s_id, zone=z_code)
+                    if z_rev:
+                        set_cached_component_data(conn, s_id, "sales_revenue", z_rev, f"zone:{z_code}")
+                        set_cached_component_data(conn, s_id, "sales_revenue", z_rev, f"zone:{z_name}")
+                except Exception as e:
+                    print(f"[Scheduler] Error pre-caching sales revenue drilldown for {z_code}: {e}", flush=True)
 
+                # 2. Category sales filtered by zone
                 try:
-                    z_cats = execute_category_sales(conn, s_id, zone=z)
+                    z_cats = execute_category_sales(conn, s_id, zone=z_name)
                     if z_cats:
-                        set_cached_component_data(conn, s_id, "category_sales", z_cats, f"zone:{z}")
+                        set_cached_component_data(conn, s_id, "category_sales", z_cats, f"zone:{z_code}")
+                        set_cached_component_data(conn, s_id, "category_sales", z_cats, f"zone:{z_name}")
                 except Exception: pass
 
+                # 3. Account category sales filtered by zone
                 try:
-                    z_acc = execute_sales_by_account_category(conn, s_id, zone=z)
+                    z_acc = execute_sales_by_account_category(conn, s_id, zone=z_name)
                     if z_acc:
-                        set_cached_component_data(conn, s_id, "sales_by_account", z_acc, f"zone:{z}")
+                        set_cached_component_data(conn, s_id, "sales_by_account", z_acc, f"zone:{z_code}")
+                        set_cached_component_data(conn, s_id, "sales_by_account", z_acc, f"zone:{z_name}")
                 except Exception: pass
+
+                z = z_name
 
                 try:
                     with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "zone": [z]}):

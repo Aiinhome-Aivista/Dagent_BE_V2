@@ -38,31 +38,20 @@ def get_sales_revenue_data_controller(get_db_connection):
         if not force_refresh:
             cached = get_cached_component_data(conn, session_id, "sales_revenue", filter_context)
             if cached and cached.get("data") is not None:
-                return jsonify({
-                    "status": "success",
-                    "data": cached["data"],
-                    "_cached": True,
-                    "_last_synced_at": cached.get("_last_synced_at")
-                }), 200
-
-            # Instant in-memory filter from pre-cached 'all' data
-            if zone and str(zone).lower() != "all":
-                cached_all = get_cached_component_data(conn, session_id, "sales_revenue", "all")
-                if cached_all and isinstance(cached_all.get("data"), list):
-                    z_target = str(zone).strip().lower()
-                    filtered_rows = [
-                        r for r in cached_all["data"]
-                        if (str(r.get("zone", "")).strip().lower() == z_target or
-                            str(r.get("zoneCode", "")).strip().lower() == z_target)
-                    ]
-                    if filtered_rows:
-                        set_cached_component_data(conn, session_id, "sales_revenue", filtered_rows, filter_context)
-                        return jsonify({
-                            "status": "success",
-                            "data": filtered_rows,
-                            "_cached": True,
-                            "_last_synced_at": cached_all.get("_last_synced_at")
-                        }), 200
+                data_list = cached.get("data")
+                # When drilling down into a zone, ensure cached data is actual region breakdown, not an old single-zone summary row
+                is_invalid_drilldown_cache = (
+                    zone and str(zone).lower() != "all" and
+                    isinstance(data_list, list) and len(data_list) <= 1 and
+                    len(data_list) > 0 and "region" not in data_list[0] and "Region" not in data_list[0]
+                )
+                if not is_invalid_drilldown_cache:
+                    return jsonify({
+                        "status": "success",
+                        "data": cached["data"],
+                        "_cached": True,
+                        "_last_synced_at": cached.get("_last_synced_at")
+                    }), 200
 
         chart_data = execute_sales_revenue_by_zone(conn, session_id, zone=zone)
         if chart_data is not None:
