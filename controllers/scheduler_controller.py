@@ -40,6 +40,7 @@ def get_scheduler_config_controller(get_db_connection):
                 "last_run_at": str(cfg["last_run_at"]) if cfg.get("last_run_at") else None,
                 "last_run_status": cfg.get("last_run_status") or "idle",
                 "last_run_duration_sec": float(cfg.get("last_run_duration_sec") or 0),
+                "error_message": cfg.get("error_message"),
                 "next_run_at": str(cfg["next_run_at"]) if cfg.get("next_run_at") else None
             }
         }), 200

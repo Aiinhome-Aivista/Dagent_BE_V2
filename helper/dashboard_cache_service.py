@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS `scheduler_configurations` (
     `last_run_at` DATETIME DEFAULT NULL,
     `last_run_status` VARCHAR(50) DEFAULT 'idle',
     `last_run_duration_sec` DECIMAL(8, 2) DEFAULT 0.00,
+    `error_message` TEXT DEFAULT NULL,
     `next_run_at` DATETIME DEFAULT NULL,
     `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -48,6 +49,12 @@ def ensure_cache_tables(conn):
         cur.execute(CACHE_TABLE_SQL)
         cur.execute(SCHEDULER_TABLE_SQL)
         conn.commit()
+        # Ensure error_message column exists if table was created previously
+        try:
+            cur.execute("ALTER TABLE `scheduler_configurations` ADD COLUMN `error_message` TEXT DEFAULT NULL AFTER `last_run_duration_sec`")
+            conn.commit()
+        except Exception:
+            pass
         _tables_initialized = True
     except Exception as e:
         print(f"[Dashboard Cache] Table init note: {e}", flush=True)
@@ -192,7 +199,7 @@ def save_or_update_scheduler_config(conn, job_name: str, schedule_time: str, fre
             except Exception: pass
 
 
-def record_scheduler_run(conn, job_name: str, status: str, duration_sec: float = 0.0, next_run_at=None):
+def record_scheduler_run(conn, job_name: str, status: str, duration_sec: float = 0.0, next_run_at=None, error_message: str = None):
     """Records the execution status and duration of a scheduler job."""
     if not conn:
         return False
@@ -200,17 +207,19 @@ def record_scheduler_run(conn, job_name: str, status: str, duration_sec: float =
     try:
         ensure_cache_tables(conn)
         cur = conn.cursor()
+        err_val = str(error_message)[:4000] if error_message else None
         cur.execute("""
             INSERT INTO scheduler_configurations
-                (job_name, title, schedule_time, frequency, is_active, last_run_at, last_run_status, last_run_duration_sec, next_run_at, updated_at)
-            VALUES (%s, 'Dashboard Key Metrics & Analytics Sync', '19:00', 'daily', TRUE, NOW(), %s, %s, %s, NOW())
+                (job_name, title, schedule_time, frequency, is_active, last_run_at, last_run_status, last_run_duration_sec, error_message, next_run_at, updated_at)
+            VALUES (%s, 'Dashboard Key Metrics & Analytics Sync', '19:00', 'daily', TRUE, NOW(), %s, %s, %s, %s, NOW())
             ON DUPLICATE KEY UPDATE
                 last_run_at = NOW(),
                 last_run_status = VALUES(last_run_status),
                 last_run_duration_sec = VALUES(last_run_duration_sec),
-                next_run_at = VALUES(next_run_at),
+                error_message = VALUES(error_message),
+                next_run_at = COALESCE(VALUES(next_run_at), next_run_at),
                 updated_at = NOW();
-        """, (str(job_name).strip(), str(status), float(duration_sec), next_run_at))
+        """, (str(job_name).strip(), str(status), float(duration_sec), err_val, next_run_at))
         conn.commit()
         return True
     except Exception as e:

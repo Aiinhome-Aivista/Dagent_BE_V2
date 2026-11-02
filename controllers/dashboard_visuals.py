@@ -768,9 +768,8 @@ def tyre_sales_data_controller(get_db_connection):
     selected_zones = make_list(data.get("selected_zones") or data.get("zones") or data.get("Zone") or data.get("zone"))
     selected_regions = make_list(data.get("selected_regions") or data.get("regions") or data.get("Region") or data.get("region"))
     selected_constructions = make_list(data.get("selected_constructions") or data.get("construction_types") or data.get("construction_type") or data.get("constructions") or data.get("construction"))
-
-    if not session_id:
-        return jsonify({"error": "Missing session_id"}), 400
+    force_refresh = bool(data.get("force_refresh", False))
+    is_default_filter = not (selected_years or selected_customer_categories or selected_zones or selected_regions or selected_constructions)
 
     conn = None
     hana_conn = None
@@ -782,6 +781,36 @@ def tyre_sales_data_controller(get_db_connection):
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
+
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data
+
+        if not session_id:
+            try:
+                cur_ws = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_ws.execute("SELECT session_id FROM workspaces WHERE session_id IS NOT NULL AND session_id != '' ORDER BY id ASC LIMIT 1")
+                ws_row = cur_ws.fetchone()
+                if ws_row and ws_row.get("session_id"):
+                    session_id = ws_row["session_id"]
+                cur_ws.close()
+            except Exception:
+                pass
+
+        if is_default_filter and not force_refresh:
+            cached_res = get_cached_component_data(conn, session_id, "tyre_sales", "all")
+            if cached_res and cached_res.get("data"):
+                cdata = cached_res["data"]
+                return jsonify({
+                    "status": "success",
+                    "visualizations": cdata.get("visualizations", []),
+                    "data": cdata.get("data", []),
+                    "message": "Data retrieved successfully.",
+                    "sql_error": "",
+                    "_cached": True,
+                    "_last_synced_at": cached_res.get("_last_synced_at")
+                }), 200
+
+        if not session_id:
+            return jsonify({"error": "Missing session_id"}), 400
 
         # Try live SAP HANA connection first
         hana_conn, tunnel, sap_schema = get_sap_connection_for_session(conn, session_id, user_id=user_id)
@@ -947,6 +976,12 @@ def tyre_sales_data_controller(get_db_connection):
                 "yKey": "vehicle_type"
             })
 
+        if is_default_filter and chart_data and not error_msg:
+            set_cached_component_data(conn, session_id, "tyre_sales", {
+                "visualizations": visualizations,
+                "data": chart_data
+            }, "all")
+
         return jsonify({
             "status": "success" if not error_msg else "error",
             "visualizations": visualizations,
@@ -1000,9 +1035,15 @@ def sales_by_zone_data_controller(get_db_connection):
     selected_years = make_list(data.get("selected_years") or data.get("years") or data.get("year"))
     selected_months = make_list(data.get("selected_months") or data.get("months") or data.get("month"))
     selected_zones = make_list(data.get("selected_zones") or data.get("zones") or data.get("zone") or data.get("Zone"))
-
-    if not session_id:
-        return jsonify({"error": "Missing session_id"}), 400
+    force_refresh = bool(data.get("force_refresh", False))
+    is_default_filter = (
+        (not product_type or str(product_type).lower() == "all") and
+        (not construction_type or str(construction_type).lower() == "all") and
+        (not vehicle_type or str(vehicle_type).lower() == "all") and
+        (not selected_years or selected_years == ["All"]) and
+        (not selected_months or selected_months == ["All"]) and
+        (not selected_zones or selected_zones == ["All"])
+    )
 
     conn = None
     hana_conn = None
@@ -1015,6 +1056,36 @@ def sales_by_zone_data_controller(get_db_connection):
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
+
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data
+
+        if not session_id:
+            try:
+                cur_ws = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_ws.execute("SELECT session_id FROM workspaces WHERE session_id IS NOT NULL AND session_id != '' ORDER BY id ASC LIMIT 1")
+                ws_row = cur_ws.fetchone()
+                if ws_row and ws_row.get("session_id"):
+                    session_id = ws_row["session_id"]
+                cur_ws.close()
+            except Exception:
+                pass
+
+        if is_default_filter and not force_refresh:
+            cached_res = get_cached_component_data(conn, session_id, "sales_by_zone", "all")
+            if cached_res and cached_res.get("data"):
+                cdata = cached_res["data"]
+                return jsonify({
+                    "status": "success",
+                    "visualizations": cdata.get("visualizations", []),
+                    "data": cdata.get("data", []),
+                    "message": "Data retrieved successfully.",
+                    "sql_error": "",
+                    "_cached": True,
+                    "_last_synced_at": cached_res.get("_last_synced_at")
+                }), 200
+
+        if not session_id:
+            return jsonify({"error": "Missing session_id"}), 400
 
         hana_conn, tunnel, sap_schema = get_sap_connection_for_session(conn, session_id, user_id=user_id)
         is_hana = bool(hana_conn)
@@ -1374,6 +1445,12 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
                 "yKey": "value"
             })
 
+        if is_default_filter and chart_data and not error_msg:
+            set_cached_component_data(conn, session_id, "sales_by_zone", {
+                "visualizations": visualizations,
+                "data": chart_data
+            }, "all")
+
         return jsonify({
             "status": "success" if not error_msg else "error",
             "visualizations": visualizations,
@@ -1440,6 +1517,8 @@ def year_wise_sales_comparison_controller(get_db_connection):
     selected_regions = make_list(data.get("selected_regions") or data.get("regions") or data.get("Region") or data.get("region"))
     selected_months = make_list(data.get("selected_months") or data.get("months") or data.get("Month") or data.get("month"))
     selected_customer_types = make_list(data.get("selected_customer_types") or data.get("customer_types") or data.get("customer_type"))
+    force_refresh = bool(data.get("force_refresh", False))
+    is_default_filter = not (selected_years or selected_zones or selected_regions or selected_months or selected_customer_types)
 
     conn = None
     hana_conn = None
@@ -1451,6 +1530,37 @@ def year_wise_sales_comparison_controller(get_db_connection):
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
+
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data
+
+        if not session_id:
+            try:
+                cur_ws = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_ws.execute("SELECT session_id FROM workspaces WHERE session_id IS NOT NULL AND session_id != '' ORDER BY id ASC LIMIT 1")
+                ws_row = cur_ws.fetchone()
+                if ws_row and ws_row.get("session_id"):
+                    session_id = ws_row["session_id"]
+                cur_ws.close()
+            except Exception:
+                pass
+
+        if is_default_filter and not force_refresh:
+            cached_res = get_cached_component_data(conn, session_id, "year_wise_sales", "all")
+            if cached_res and cached_res.get("data"):
+                cdata = cached_res["data"]
+                return jsonify({
+                    "seriesKey": "year",
+                    "title": "Year-wise Sales Comparison",
+                    "type": "bar_chart",
+                    "xKey": "month",
+                    "yKey": "sales_value",
+                    "visualization": cdata.get("visualization", []) if isinstance(cdata, dict) else cdata,
+                    "_cached": True,
+                    "_last_synced_at": cached_res.get("_last_synced_at")
+                }), 200
+
+        if not session_id:
+            return jsonify({"error": "Missing session_id"}), 400
 
         hana_conn, tunnel, sap_schema = get_sap_connection_for_session(conn, session_id, user_id=user_id)
         is_hana = bool(hana_conn)
@@ -1587,6 +1697,11 @@ def year_wise_sales_comparison_controller(get_db_connection):
                 "sales_value": float(row.get("total_sales") or 0.0),
                 "year": str(row.get("year"))
             })
+
+        if is_default_filter and visualization_data:
+            set_cached_component_data(conn, session_id, "year_wise_sales", {
+                "visualization": visualization_data
+            }, "all")
 
         return jsonify({
             "seriesKey": "year",

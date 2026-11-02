@@ -37,18 +37,95 @@ def _execute_sync_task():
 
         print(f"[Scheduler] Starting sync for {len(workspaces)} workspaces...", flush=True)
 
-        from controllers.dashboard_visuals import default_dashboard_metrics_controller
+        from controllers.dashboard_visuals import (
+            default_dashboard_metrics_controller,
+            tyre_sales_data_controller,
+            sales_by_zone_data_controller,
+            year_wise_sales_comparison_controller,
+        )
+        from helper.sap_analytics_service import (
+            execute_sales_revenue_by_zone,
+            execute_sales_by_account_category,
+            execute_non_billed_accounts_pct,
+            execute_overdue_pct,
+            execute_exposure_pct,
+        )
+        from helper.dashboard_cache_service import set_cached_component_data
 
         for ws in workspaces:
             s_id = ws.get("session_id")
             u_id = ws.get("user_id")
             ws_name = ws.get("name")
+            if not s_id:
+                continue
+
+            print(f"[Scheduler] Starting sync for workspace '{ws_name}' ({s_id[:8]}...)", flush=True)
+
+            # 1. Key Metrics (16 KPIs)
             try:
                 with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "force_refresh": True}):
                     default_dashboard_metrics_controller(_get_db_conn_func)
-                print(f"[Scheduler] Synced metrics for workspace '{ws_name}' ({s_id[:8]}...)", flush=True)
-            except Exception as ws_err:
-                print(f"[Scheduler] Error syncing workspace '{ws_name}': {ws_err}", flush=True)
+            except Exception as e:
+                print(f"[Scheduler] Error syncing key_metrics for '{ws_name}': {e}", flush=True)
+
+            # 2. Tyre Sales Chart
+            try:
+                with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "force_refresh": True}):
+                    tyre_sales_data_controller(_get_db_conn_func)
+            except Exception as e:
+                print(f"[Scheduler] Error syncing tyre_sales for '{ws_name}': {e}", flush=True)
+
+            # 3. Sales By Zone (Pie Chart)
+            try:
+                with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "force_refresh": True}):
+                    sales_by_zone_data_controller(_get_db_conn_func)
+            except Exception as e:
+                print(f"[Scheduler] Error syncing sales_by_zone for '{ws_name}': {e}", flush=True)
+
+            # 4. Year-wise Sales Comparison (Bar Chart)
+            try:
+                with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "force_refresh": True}):
+                    year_wise_sales_comparison_controller(_get_db_conn_func)
+            except Exception as e:
+                print(f"[Scheduler] Error syncing year_wise_sales for '{ws_name}': {e}", flush=True)
+
+            # 5. Fast Analytical Cards
+            try:
+                rev = execute_sales_revenue_by_zone(conn, s_id)
+                if rev is not None:
+                    set_cached_component_data(conn, s_id, "sales_revenue", rev, "all")
+            except Exception as e:
+                print(f"[Scheduler] Error syncing sales_revenue for '{ws_name}': {e}", flush=True)
+
+            try:
+                acc = execute_sales_by_account_category(conn, s_id)
+                if acc is not None:
+                    set_cached_component_data(conn, s_id, "sales_by_account", acc, "all")
+            except Exception as e:
+                print(f"[Scheduler] Error syncing sales_by_account for '{ws_name}': {e}", flush=True)
+
+            try:
+                nb = execute_non_billed_accounts_pct(conn, s_id)
+                if nb is not None:
+                    set_cached_component_data(conn, s_id, "non_billed_pct", nb, "all")
+            except Exception as e:
+                print(f"[Scheduler] Error syncing non_billed_pct for '{ws_name}': {e}", flush=True)
+
+            try:
+                od = execute_overdue_pct(conn, s_id)
+                if od is not None:
+                    set_cached_component_data(conn, s_id, "overdue_pct", od, "all")
+            except Exception as e:
+                print(f"[Scheduler] Error syncing overdue_pct for '{ws_name}': {e}", flush=True)
+
+            try:
+                exp = execute_exposure_pct(conn, s_id)
+                if exp is not None:
+                    set_cached_component_data(conn, s_id, "exposure_pct", exp, "all")
+            except Exception as e:
+                print(f"[Scheduler] Error syncing exposure_pct for '{ws_name}': {e}", flush=True)
+
+            print(f"[Scheduler] Completed sync for workspace '{ws_name}'", flush=True)
 
         duration = round(time.time() - start_t, 2)
         next_run = None
@@ -62,8 +139,16 @@ def _execute_sync_task():
 
     except Exception as e:
         duration = round(time.time() - start_t, 2)
-        print(f"[Scheduler] Sync job failed: {e}", flush=True)
-        record_scheduler_run(conn, "sync_dashboard_metrics", "failed", duration)
+        import traceback
+        err_msg = str(e)
+        print(f"[Scheduler] Sync job failed: {err_msg}", flush=True)
+        traceback.print_exc()
+        next_run = None
+        if _scheduler:
+            job = _scheduler.get_job(JOB_ID)
+            if job and job.next_run_time:
+                next_run = job.next_run_time.strftime("%Y-%m-%d %H:%M:%S")
+        record_scheduler_run(conn, "sync_dashboard_metrics", "failed", duration, next_run, error_message=err_msg)
     finally:
         if conn and hasattr(conn, "is_connected") and conn.is_connected():
             try: conn.close()
