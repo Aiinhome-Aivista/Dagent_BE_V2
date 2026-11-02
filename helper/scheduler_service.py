@@ -190,7 +190,7 @@ def init_scheduler(app, get_db_connection):
     if _scheduler is not None:
         return _scheduler
 
-    _scheduler = BackgroundScheduler(daemon=True)
+    _scheduler = BackgroundScheduler(timezone="Asia/Kolkata", daemon=True)
 
     conn = get_db_connection()
     if conn:

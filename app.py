@@ -2269,7 +2269,7 @@ if __name__ == '__main__':
 
     # Start APScheduler
 
-    scheduler = BackgroundScheduler()
+    scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
 
     scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
 
