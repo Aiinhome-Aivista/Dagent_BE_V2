@@ -27,7 +27,7 @@ def _execute_sync_task():
     try:
         cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
         cur.execute("""
-            SELECT session_id, MAX(user_id) AS user_id, MAX(name) AS name 
+            SELECT session_id, MAX(user_id) AS user_id, MAX(workspace_name) AS workspace_name 
             FROM workspaces 
             WHERE session_id IS NOT NULL AND session_id != ''
             GROUP BY session_id
@@ -56,7 +56,7 @@ def _execute_sync_task():
         for ws in workspaces:
             s_id = ws.get("session_id")
             u_id = ws.get("user_id")
-            ws_name = ws.get("name")
+            ws_name = ws.get("workspace_name") or ws.get("session_id")
             if not s_id:
                 continue
 
