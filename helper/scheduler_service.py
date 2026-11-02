@@ -46,6 +46,7 @@ def _execute_sync_task():
         from helper.sap_analytics_service import (
             execute_sales_revenue_by_zone,
             execute_sales_by_account_category,
+            execute_category_sales,
             execute_non_billed_accounts_pct,
             execute_overdue_pct,
             execute_exposure_pct,
@@ -103,6 +104,13 @@ def _execute_sync_task():
                     set_cached_component_data(conn, s_id, "sales_by_account", acc, "all")
             except Exception as e:
                 print(f"[Scheduler] Error syncing sales_by_account for '{ws_name}': {e}", flush=True)
+
+            try:
+                cats = execute_category_sales(conn, s_id)
+                if cats is not None:
+                    set_cached_component_data(conn, s_id, "category_sales", cats, "all")
+            except Exception as e:
+                print(f"[Scheduler] Error syncing category_sales for '{ws_name}': {e}", flush=True)
 
             try:
                 nb = execute_non_billed_accounts_pct(conn, s_id)

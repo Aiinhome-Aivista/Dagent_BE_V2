@@ -115,6 +115,16 @@ def get_cached_component_data(conn, session_id: str, component_key: str, filter_
             except Exception: pass
 
 
+import decimal
+
+def _json_serial_default(obj):
+    if isinstance(obj, decimal.Decimal):
+        return float(obj)
+    if hasattr(obj, "isoformat"):
+        return obj.isoformat()
+    return str(obj)
+
+
 def set_cached_component_data(conn, session_id: str, component_key: str, payload: dict, filter_context: str = "all", duration_sec: float = 0.0):
     """
     Upserts calculated component data into MySQL cache table.
@@ -126,7 +136,7 @@ def set_cached_component_data(conn, session_id: str, component_key: str, payload
     try:
         ensure_cache_tables(conn)
         cur = conn.cursor()
-        json_str = json.dumps(payload, ensure_ascii=False)
+        json_str = json.dumps(payload, ensure_ascii=False, default=_json_serial_default)
         cur.execute("""
             INSERT INTO dashboard_cached_metrics
                 (session_id, component_key, filter_context, payload, sync_status, execution_duration_sec, last_synced_at)
