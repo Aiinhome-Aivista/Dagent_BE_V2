@@ -2269,19 +2269,19 @@ if __name__ == '__main__':
 
     # Start APScheduler
 
-    # scheduler = BackgroundScheduler()
+    scheduler = BackgroundScheduler()
 
-    # scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
-
-    
-
-    # # Run the chat cleanup job every day at midnight
-
-    # # scheduler.add_job(func=cleanup_audit_memory_chats, trigger="cron", hour=0, minute=0)
+    scheduler.add_job(func=check_and_send_scheduled_reports, trigger="interval", minutes=1)
 
     
 
-    # scheduler.start()
+    # Run the chat cleanup job every day at midnight
+
+    # scheduler.add_job(func=cleanup_audit_memory_chats, trigger="cron", hour=0, minute=0)
+
+    
+
+    scheduler.start()
 
 
 
