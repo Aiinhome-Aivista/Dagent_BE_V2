@@ -1,6 +1,11 @@
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+IST_TZ = timezone(timedelta(hours=5, minutes=30))
+
+def get_now_ist():
+    return datetime.now(IST_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 CACHE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `dashboard_cached_metrics` (
@@ -62,6 +67,57 @@ def ensure_cache_tables(conn):
         if cur:
             try: cur.close()
             except Exception: pass
+
+
+def make_filter_context(params) -> str:
+    """
+    Builds a consistent, normalized filter context string from incoming filter parameters.
+    Handles single values, lists, and dicts. Returns 'all' if no filters are selected.
+    """
+    if not params or not isinstance(params, dict):
+        return "all"
+    parts = []
+
+    def get_clean_items(val):
+        if val is None:
+            return []
+        if isinstance(val, (list, tuple, set)):
+            items = []
+            for x in val:
+                s = str(x).strip()
+                if s and s.lower() != "all":
+                    items.append(s)
+            return sorted(items)
+        s = str(val).strip()
+        return [s] if (s and s.lower() != "all") else []
+
+    year_items = get_clean_items(params.get("selected_years") or params.get("years") or params.get("year"))
+    if year_items:
+        parts.append(f"year:{','.join(year_items)}")
+
+    zone_items = get_clean_items(params.get("selected_zones") or params.get("zones") or params.get("zone") or params.get("Zone"))
+    if zone_items:
+        parts.append(f"zone:{','.join(zone_items)}")
+
+    region_items = get_clean_items(params.get("selected_regions") or params.get("regions") or params.get("region") or params.get("Region"))
+    if region_items:
+        parts.append(f"reg:{','.join(region_items)}")
+
+    cat_items = get_clean_items(params.get("selected_customer_categories") or params.get("customer_categories") or params.get("customer_category") or params.get("customer_types") or params.get("customer_type"))
+    if cat_items:
+        parts.append(f"cat:{','.join(cat_items)}")
+
+    con_items = get_clean_items(params.get("selected_constructions") or params.get("construction_types") or params.get("construction_type") or params.get("constructions") or params.get("construction"))
+    if con_items:
+        parts.append(f"con:{','.join(con_items)}")
+
+    month_items = get_clean_items(params.get("selected_months") or params.get("months") or params.get("month"))
+    if month_items:
+        parts.append(f"m:{','.join(month_items)}")
+
+    if not parts:
+        return "all"
+    return "|".join(parts)
 
 
 def get_cached_component_data(conn, session_id: str, component_key: str, filter_context: str = "all"):
@@ -137,16 +193,17 @@ def set_cached_component_data(conn, session_id: str, component_key: str, payload
         ensure_cache_tables(conn)
         cur = conn.cursor()
         json_str = json.dumps(payload, ensure_ascii=False, default=_json_serial_default)
+        now_ist = get_now_ist()
         cur.execute("""
             INSERT INTO dashboard_cached_metrics
                 (session_id, component_key, filter_context, payload, sync_status, execution_duration_sec, last_synced_at)
-            VALUES (%s, %s, %s, %s, 'success', %s, NOW())
+            VALUES (%s, %s, %s, %s, 'success', %s, %s)
             ON DUPLICATE KEY UPDATE
                 payload = VALUES(payload),
                 sync_status = 'success',
                 execution_duration_sec = VALUES(execution_duration_sec),
-                last_synced_at = NOW();
-        """, (str(session_id), str(component_key), str(filter_context), json_str, duration_sec))
+                last_synced_at = %s;
+        """, (str(session_id), str(component_key), str(filter_context), json_str, duration_sec, now_ist, now_ist))
         conn.commit()
         return True
     except Exception as e:
@@ -218,18 +275,19 @@ def record_scheduler_run(conn, job_name: str, status: str, duration_sec: float =
         ensure_cache_tables(conn)
         cur = conn.cursor()
         err_val = str(error_message)[:4000] if error_message else None
+        now_ist = get_now_ist()
         cur.execute("""
             INSERT INTO scheduler_configurations
                 (job_name, title, schedule_time, frequency, is_active, last_run_at, last_run_status, last_run_duration_sec, error_message, next_run_at, updated_at)
-            VALUES (%s, 'Dashboard Key Metrics & Analytics Sync', '19:00', 'daily', TRUE, NOW(), %s, %s, %s, %s, NOW())
+            VALUES (%s, 'Dashboard Key Metrics & Analytics Sync', '19:00', 'daily', TRUE, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
-                last_run_at = NOW(),
+                last_run_at = %s,
                 last_run_status = VALUES(last_run_status),
                 last_run_duration_sec = VALUES(last_run_duration_sec),
                 error_message = VALUES(error_message),
                 next_run_at = COALESCE(VALUES(next_run_at), next_run_at),
-                updated_at = NOW();
-        """, (str(job_name).strip(), str(status), float(duration_sec), err_val, next_run_at))
+                updated_at = %s;
+        """, (str(job_name).strip(), now_ist, str(status), float(duration_sec), err_val, next_run_at, now_ist, now_ist, now_ist))
         conn.commit()
         return True
     except Exception as e:

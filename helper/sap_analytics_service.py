@@ -1288,7 +1288,7 @@ def query_sales_numbers_hana(cursor, schema, year, month, day):
 
         FROM (
 
-            SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.TYRE_QUANTITY, s.VOLUME, s.INDICATOR_CANCEL 
+            SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.TYRE_QUANTITY, 0 AS VOLUME, s.INDICATOR_CANCEL 
 
             FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
 
@@ -1298,7 +1298,7 @@ def query_sales_numbers_hana(cursor, schema, year, month, day):
 
             UNION ALL
 
-            SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.TYRE_QUANTITY, s.VOLUME, s.INDICATOR_CANCEL 
+            SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.TYRE_QUANTITY, 0 AS VOLUME, s.INDICATOR_CANCEL 
 
             FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
 
@@ -1354,7 +1354,7 @@ def query_sales_numbers_hana(cursor, schema, year, month, day):
 
         FROM (
 
-            SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.TYRE_QUANTITY, s.VOLUME, s.INDICATOR_CANCEL 
+            SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.TYRE_QUANTITY, 0 AS VOLUME, s.INDICATOR_CANCEL 
 
             FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
 
@@ -1364,7 +1364,7 @@ def query_sales_numbers_hana(cursor, schema, year, month, day):
 
             UNION ALL
 
-            SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.TYRE_QUANTITY, s.VOLUME, s.INDICATOR_CANCEL 
+            SELECT s.DEALER_CODE, s.SKU, s.DISTRIBUTION_CHANNEL, s.INVOICE_DATE, s.TYRE_QUANTITY, 0 AS VOLUME, s.INDICATOR_CANCEL 
 
             FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
 
@@ -2204,7 +2204,7 @@ def query_sales_summary_in_no_and_values_hana(cursor, schema, year, month, day):
 
         FROM (
 
-            SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.TYRE_QUANTITY, s.VOLUME, s.DISTRIBUTION_CHANNEL 
+            SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.TYRE_QUANTITY, 0 AS VOLUME, s.DISTRIBUTION_CHANNEL 
 
             FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
 
@@ -2216,7 +2216,7 @@ def query_sales_summary_in_no_and_values_hana(cursor, schema, year, month, day):
 
             UNION ALL
 
-            SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.TYRE_QUANTITY, s.VOLUME, s.DISTRIBUTION_CHANNEL 
+            SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.TYRE_QUANTITY, 0 AS VOLUME, s.DISTRIBUTION_CHANNEL 
 
             FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
 

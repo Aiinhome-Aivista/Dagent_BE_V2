@@ -1,3 +1,4 @@
+from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data
 from flask import request, send_file, jsonify
 
 import io
@@ -438,7 +439,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
 
         for row in rows:
 
-            label = row.get('report_name') or row.get('market_segment', 'Unknown')
+            label = row.get('REPORT_NAME') or row.get('report_name') or row.get('MARKET_SEGMENT') or row.get('market_segment') or 'Unknown'
 
             
 
@@ -460,17 +461,23 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
 
             c1 = ws.cell(row=row_num, column=1, value=label)
 
-            c2 = ws.cell(row=row_num, column=2, value=row.get('Month', 0))
+            val_month = row.get('Month') if row.get('Month') is not None else row.get('month', 0)
+            val_mtd = row.get('MTD') if row.get('MTD') is not None else row.get('mtd', 0)
+            val_target = row.get('Target') if row.get('Target') is not None else row.get('target', 0)
+            val_actual = row.get('Actual') if row.get('Actual') is not None else row.get('actual', 0)
+            val_day = row.get('Sale_For_Day') if row.get('Sale_For_Day') is not None else (row.get('sale_for_day') or 0)
 
-            c3 = ws.cell(row=row_num, column=3, value=row.get('MTD', 0))
+            c2 = ws.cell(row=row_num, column=2, value=val_month)
 
-            c4 = ws.cell(row=row_num, column=4, value=row.get('Target', 0))
+            c3 = ws.cell(row=row_num, column=3, value=val_mtd)
 
-            c5 = ws.cell(row=row_num, column=5, value=row.get('Actual', 0))
+            c4 = ws.cell(row=row_num, column=4, value=val_target)
+
+            c5 = ws.cell(row=row_num, column=5, value=val_actual)
 
             c6 = ws.cell(row=row_num, column=6, value=achv)
 
-            c7 = ws.cell(row=row_num, column=7, value=row.get('Sale_For_Day', 0) if row.get('Sale_For_Day') is not None else 0)
+            c7 = ws.cell(row=row_num, column=7, value=val_day)
 
             c8 = ws.cell(row=row_num, column=8, value=grth)
 
@@ -2090,6 +2097,13 @@ def export_domestic_sales_preview_controller(get_db_connection):
 
         day = data.get("day") or request.args.get("day")
 
+        filter_context = f"{year or 'all'}_{month or 'all'}_{day or 'all'}"
+        cached_prev = get_cached_component_data(conn, session_id, "domestic_sales_preview", filter_context)
+        if not cached_prev:
+            cached_prev = get_cached_component_data(conn, session_id, "domestic_sales_preview", "all")
+        if cached_prev and isinstance(cached_prev.get("data"), dict) and cached_prev["data"].get("status") == "success":
+            return jsonify(cached_prev["data"]), 200
+
         
 
         if not year or not month or not day:
@@ -2410,35 +2424,22 @@ def export_domestic_sales_preview_controller(get_db_connection):
 
 
 
-        return jsonify({
-
+        result_payload = {
             "status": "success",
-
             "meta": {
-
                 "year": year, "month": month, "day": day,
-
                 "month_abbr": month_abbr,
-
                 "curr_year": curr_year_str, "prev_year": prev_year_str
-
             },
-
             "sections": {
-
-                "s1": {"title": f"Domestic Sales Value Achievement – {month_abbr}-{curr_year_str}", "matrix": m1},
-
-                "s2": {"title": f"Sales Number's – {month_abbr}-{curr_year_str}", "matrix": m2},
-
-                "s3": {"title": f"Sales Report by Values (Cr) – {month_abbr}-{curr_year_str}", "matrix": m3},
-
-                "s4": {"title": f"Sales Summary in No's & Values – {month_abbr}-{curr_year_str}", "matrix": m4}
-
+                "s1": {"title": f"Domestic Sales Value Achievement - {month_abbr}-{curr_year_str}", "matrix": m1},
+                "s2": {"title": f"Sales Numbers - {month_abbr}-{curr_year_str}", "matrix": m2},
+                "s3": {"title": f"Sales Report by Values (Cr) - {month_abbr}-{curr_year_str}", "matrix": m3},
+                "s4": {"title": f"Sales Summary in No and Values - {month_abbr}-{curr_year_str}", "matrix": m4}
             }
-
-        })
-
-
+        }
+        set_cached_component_data(conn, session_id, "domestic_sales_preview", result_payload, "all")
+        return jsonify(result_payload), 200
 
     except Exception as e:
 

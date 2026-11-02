@@ -782,7 +782,7 @@ def tyre_sales_data_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
 
         if not session_id:
             try:
@@ -795,8 +795,11 @@ def tyre_sales_data_controller(get_db_connection):
             except Exception:
                 pass
 
-        if is_default_filter and not force_refresh:
-            cached_res = get_cached_component_data(conn, session_id, "tyre_sales", "all")
+        filter_context = make_filter_context(data)
+        if not force_refresh:
+            cached_res = get_cached_component_data(conn, session_id, "tyre_sales", filter_context)
+            if not cached_res and filter_context != "all":
+                pass
             if cached_res and cached_res.get("data"):
                 cdata = cached_res["data"]
                 return jsonify({
@@ -866,7 +869,7 @@ def tyre_sales_data_controller(get_db_connection):
         actual_region = cols.get("region")
         actual_construction = cols.get("construction_type")
 
-        revenue_expr = f"CAST(REPLACE(TRIM({actual_invoice_value}), ',', '') AS DECIMAL(18,2))"
+        revenue_expr = f"COALESCE({actual_invoice_value}, 0)" if is_hana else f"CAST(REPLACE(TRIM({actual_invoice_value}), ',', '') AS DECIMAL(18,2))"
         where_clauses = [f"{actual_vehicle_type} IS NOT NULL", f"{actual_vehicle_type} <> ''"]
         params = []
 
@@ -976,11 +979,11 @@ def tyre_sales_data_controller(get_db_connection):
                 "yKey": "vehicle_type"
             })
 
-        if is_default_filter and chart_data and not error_msg:
+        if chart_data and not error_msg:
             set_cached_component_data(conn, session_id, "tyre_sales", {
                 "visualizations": visualizations,
                 "data": chart_data
-            }, "all")
+            }, filter_context)
 
         return jsonify({
             "status": "success" if not error_msg else "error",
@@ -1021,7 +1024,6 @@ def sales_by_zone_data_controller(get_db_connection):
     session_id = data.get("session_id")
     user_id = data.get("user_id")
 
-    product_type = data.get("product_type") or data.get("category") or data.get("product_category")
     construction_type = data.get("construction_type") or data.get("construction")
     vehicle_type = data.get("vehicle_type") or data.get("tyre_type") or data.get("tyreType") or data.get("tyre_types")
 
@@ -1037,7 +1039,6 @@ def sales_by_zone_data_controller(get_db_connection):
     selected_zones = make_list(data.get("selected_zones") or data.get("zones") or data.get("zone") or data.get("Zone"))
     force_refresh = bool(data.get("force_refresh", False))
     is_default_filter = (
-        (not product_type or str(product_type).lower() == "all") and
         (not construction_type or str(construction_type).lower() == "all") and
         (not vehicle_type or str(vehicle_type).lower() == "all") and
         (not selected_years or selected_years == ["All"]) and
@@ -1057,7 +1058,7 @@ def sales_by_zone_data_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
 
         if not session_id:
             try:
@@ -1070,8 +1071,9 @@ def sales_by_zone_data_controller(get_db_connection):
             except Exception:
                 pass
 
-        if is_default_filter and not force_refresh:
-            cached_res = get_cached_component_data(conn, session_id, "sales_by_zone", "all")
+        filter_context = make_filter_context(data)
+        if not force_refresh:
+            cached_res = get_cached_component_data(conn, session_id, "sales_by_zone", filter_context)
             if cached_res and cached_res.get("data"):
                 cdata = cached_res["data"]
                 return jsonify({
@@ -1124,7 +1126,7 @@ def sales_by_zone_data_controller(get_db_connection):
                 curr_tbl = find_hana_tbl(["zpvfsdcurrentsales", "currentsales"]) or "ZPVF_SD_CurrentSales_01_TR"
 
                 filter_conds = [
-                    'S."distribution_channel" = \'10\'',
+                    '(S."DISTRIBUTION_CHANNEL" = \'10\' OR S."DISTRIBUTION_CHANNEL" = 10)',
                     "COALESCE(S.\"indicator_cancel\", '') NOT IN ('X', 'Y', '1')"
                 ]
 
@@ -1137,7 +1139,7 @@ def sales_by_zone_data_controller(get_db_connection):
                         except ValueError: pass
                 if valid_years:
                     yrs_str = ", ".join(str(y) for y in valid_years)
-                    filter_conds.append(f'YEAR(S."invoice_date") IN ({yrs_str})')
+                    filter_conds.append(f'YEAR(S."INVOICE_DATE") IN ({yrs_str})')
 
                 # Month filter
                 valid_months = []
@@ -1150,16 +1152,9 @@ def sales_by_zone_data_controller(get_db_connection):
                         elif sm.isdigit(): valid_months.append(int(sm))
                 if valid_months:
                     mths_str = ", ".join(str(m) for m in valid_months)
-                    filter_conds.append(f'MONTH(S."invoice_date") IN ({mths_str})')
+                    filter_conds.append(f'MONTH(S."INVOICE_DATE") IN ({mths_str})')
 
-                # Product Type filter
-                if product_type and str(product_type).strip().lower() != 'all':
-                    p_val = str(product_type).strip().replace("'", "''")
-                    filter_conds.append(f"""EXISTS (
-                        SELECT 1 FROM "{schema}"."{sku_tbl}" SKU
-                        WHERE SKU."MATNR" = S."SKU"
-                          AND (SKU."TT_TYPE" = '{p_val}' OR SKU."CAT_CODE" = '{p_val}')
-                    )""")
+
 
                 # Construction Type filter
                 if construction_type and str(construction_type).strip().lower() != 'all':
@@ -1189,24 +1184,24 @@ def sales_by_zone_data_controller(get_db_connection):
                 # Cancelled invoices exclusion
                 filter_conds.append(f"""NOT EXISTS (
                     SELECT 1 FROM "{schema}"."{canc_tbl}" C
-                    WHERE CAST(C."distribution_channel" AS NVARCHAR(10)) = '10'
-                      AND C."invoice_number" = S."invoice_number"
-                      AND C."plant" = S."plant"
+                    WHERE (CAST(C."DISTRIBUTION_CHANNEL" AS NVARCHAR(10)) = '10' OR C."DISTRIBUTION_CHANNEL" = 10)
+                      AND C."INVOICE_NUMBER" = S."INVOICE_NUMBER"
+                      AND C."PLANT" = S."PLANT"
                       AND C."FKART" = S."FKART"
                 )""")
 
                 # Sales source selection
                 if valid_years and all(y <= 2025 for y in valid_years):
-                    sales_src_sql = f"""SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
-                                   "distribution_channel", "indicator_cancel", "invoice_value", "Tyre_Quantity"
+                    sales_src_sql = f"""SELECT "INVOICE_NUMBER", "PLANT", "FKART", "DEALER_CODE", "SKU", "INVOICE_DATE",
+                                   "DISTRIBUTION_CHANNEL", "INDICATOR_CANCEL", "INVOICE_VALUE", "TYRE_QUANTITY"
                             FROM "{schema}"."{hist_tbl}" """
                 else:
-                    sales_src_sql = f"""SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
-                                   "distribution_channel", "indicator_cancel", "invoice_value", "Tyre_Quantity"
+                    sales_src_sql = f"""SELECT "INVOICE_NUMBER", "PLANT", "FKART", "DEALER_CODE", "SKU", "INVOICE_DATE",
+                                   "DISTRIBUTION_CHANNEL", "INDICATOR_CANCEL", "INVOICE_VALUE", "TYRE_QUANTITY"
                             FROM "{schema}"."{hist_tbl}"
                             UNION ALL
-                            SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
-                                   "distribution_channel", "indicator_cancel", "invoice_value", "Tyre_Quantity"
+                            SELECT "INVOICE_NUMBER", "PLANT", "FKART", "DEALER_CODE", "SKU", "INVOICE_DATE",
+                                   "DISTRIBUTION_CHANNEL", "INDICATOR_CANCEL", "INVOICE_VALUE", "TYRE_QUANTITY"
                             FROM "{schema}"."{curr_tbl}" """
 
                 where_combined = " AND ".join(filter_conds)
@@ -1237,8 +1232,8 @@ SALES_SOURCE AS (
 SALES_AGGREGATED AS (
     SELECT
         TM."P_ZONE",
-        SUM(IFNULL(S."invoice_value", 0)) AS "TOTAL_SALES",
-        SUM(IFNULL(S."Tyre_Quantity", 0)) AS "TOTAL_QUANTITY",
+        SUM(IFNULL(S."INVOICE_VALUE", 0)) AS "TOTAL_SALES",
+        SUM(IFNULL(S."TYRE_QUANTITY", 0)) AS "TOTAL_QUANTITY",
         COUNT(*) AS "TOTAL_RECORDS",
         COUNT(DISTINCT S."invoice_number") AS "TOTAL_INVOICES",
         COUNT(DISTINCT S."dealer_code") AS "TOTAL_DEALERS"
@@ -1317,8 +1312,7 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
             optional_dims = {}
             if has_valid_filters(selected_years) or has_valid_filters(selected_months):
                 optional_dims["invoice_date"] = ["invoice_date", "date", "billing__doc_date", "fkdat"]
-            if product_type and str(product_type).lower() != 'all':
-                optional_dims["customer_category"] = ["cat_code", "cat_desc", "category", "product_category", "catg", "prd_cat"]
+
             if vehicle_type and str(vehicle_type).lower() != 'all':
                 optional_dims["vehicle_type"] = ["cat_code", "cat_desc", "tyre_type", "vehicle_type", "tyre_type_name", "maktx"]
             if construction_type and str(construction_type).lower() != 'all':
@@ -1350,9 +1344,7 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
                 where_clauses.append(f"({klabc_col} IS NULL OR UPPER(TRIM({klabc_col})) <> 'X')")
             params = []
 
-            if product_type and str(product_type).lower() != 'all' and actual_cat:
-                where_clauses.append(f"{actual_cat} = %s")
-                params.append(product_type)
+
 
             if construction_type and str(construction_type).lower() != 'all' and actual_const:
                 label_to_id = {
@@ -1445,11 +1437,11 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
                 "yKey": "value"
             })
 
-        if is_default_filter and chart_data and not error_msg:
+        if chart_data and not error_msg:
             set_cached_component_data(conn, session_id, "sales_by_zone", {
                 "visualizations": visualizations,
                 "data": chart_data
-            }, "all")
+            }, filter_context)
 
         return jsonify({
             "status": "success" if not error_msg else "error",
@@ -1531,7 +1523,7 @@ def year_wise_sales_comparison_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
 
         if not session_id:
             try:
@@ -1544,8 +1536,9 @@ def year_wise_sales_comparison_controller(get_db_connection):
             except Exception:
                 pass
 
-        if is_default_filter and not force_refresh:
-            cached_res = get_cached_component_data(conn, session_id, "year_wise_sales", "all")
+        filter_context = make_filter_context(data)
+        if not force_refresh:
+            cached_res = get_cached_component_data(conn, session_id, "year_wise_sales", filter_context)
             if cached_res and cached_res.get("data"):
                 cdata = cached_res["data"]
                 return jsonify({
@@ -1616,7 +1609,7 @@ def year_wise_sales_comparison_controller(get_db_connection):
         actual_region = cols.get("region")
         actual_customer_type_expr = cols.get("customer_type")
 
-        revenue_expr = f"CAST(REPLACE(TRIM({actual_invoice_value_expr}), ',', '') AS DECIMAL(18,2))"
+        revenue_expr = f"COALESCE({actual_invoice_value_expr}, 0)" if is_hana else f"CAST(REPLACE(TRIM({actual_invoice_value_expr}), ',', '') AS DECIMAL(18,2))"
         where_clauses = [f"{actual_invoice_date_expr} IS NOT NULL"]
         params = []
 
@@ -1698,10 +1691,10 @@ def year_wise_sales_comparison_controller(get_db_connection):
                 "year": str(row.get("year"))
             })
 
-        if is_default_filter and visualization_data:
+        if visualization_data:
             set_cached_component_data(conn, session_id, "year_wise_sales", {
                 "visualization": visualization_data
-            }, "all")
+            }, filter_context)
 
         return jsonify({
             "seriesKey": "year",
@@ -1765,6 +1758,11 @@ def available_years_controller(get_db_connection):
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
+
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        cached_res = get_cached_component_data(conn, session_id, "available_years", "all")
+        if cached_res and cached_res.get("data"):
+            return jsonify(cached_res["data"]), 200
 
         hana_conn, tunnel, sap_schema = get_sap_connection_for_session(conn, session_id, user_id=user_id)
         is_hana = bool(hana_conn)
@@ -1920,7 +1918,7 @@ def available_years_controller(get_db_connection):
                     # print(f"[Available Years] Construction types error: {e}")
                     pass
 
-        return jsonify({
+        resp_data = {
             "status": "success",
             "years": years,
             "zones": zones,
@@ -1928,7 +1926,9 @@ def available_years_controller(get_db_connection):
             "months": months,
             "customer_types": customer_types,
             "construction_types": construction_types
-        }), 200
+        }
+        set_cached_component_data(conn, session_id, "available_years", resp_data, "all")
+        return jsonify(resp_data), 200
 
     except Exception as exc:
         # print(f"[Available Years] Database query failed: {exc}")
@@ -1980,6 +1980,11 @@ def dashboard_filters_controller(get_db_connection):
         conn = get_db_connection()
         if not conn:
             return jsonify({"status": "success", **filters_data}), 200
+
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        cached_res = get_cached_component_data(conn, session_id, "dashboard_filters", "all")
+        if cached_res and cached_res.get("data"):
+            return jsonify(cached_res["data"]), 200
 
         hana_conn, tunnel, sap_schema = get_sap_connection_for_session(conn, session_id, user_id=user_id)
         is_hana = bool(hana_conn)
@@ -2154,7 +2159,10 @@ def dashboard_filters_controller(get_db_connection):
         if month_set:
             filters_data["months"] = [calendar.month_name[m] for m in sorted(list(month_set))]
 
-        return jsonify({"status": "success", **filters_data}), 200
+        filt_payload = {"status": "success", **filters_data}
+        if any(filters_data.values()):
+            set_cached_component_data(conn, session_id, "dashboard_filters", filt_payload, "all")
+        return jsonify(filt_payload), 200
 
     except Exception as exc:
         # print(f"[Dashboard Filters] query failed: {exc}")
@@ -2221,7 +2229,7 @@ def default_dashboard_metrics_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
 
         if not session_id:
             try:

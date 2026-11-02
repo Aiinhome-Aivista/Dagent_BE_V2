@@ -42,7 +42,10 @@ def _execute_sync_task():
             tyre_sales_data_controller,
             sales_by_zone_data_controller,
             year_wise_sales_comparison_controller,
+            available_years_controller,
+            dashboard_filters_controller,
         )
+        from controllers.export_report_controller import export_domestic_sales_preview_controller
         from helper.sap_analytics_service import (
             execute_sales_revenue_by_zone,
             execute_sales_by_account_category,
@@ -90,6 +93,26 @@ def _execute_sync_task():
             except Exception as e:
                 print(f"[Scheduler] Error syncing year_wise_sales for '{ws_name}': {e}", flush=True)
 
+            # 4b. Available Years & Filters
+            try:
+                with _app_instance.test_request_context(query_string={"session_id": s_id, "user_id": u_id}):
+                    available_years_controller(_get_db_conn_func)
+            except Exception as e:
+                print(f"[Scheduler] Error syncing available_years for '{ws_name}': {e}", flush=True)
+
+            try:
+                with _app_instance.test_request_context(query_string={"session_id": s_id, "user_id": u_id}):
+                    dashboard_filters_controller(_get_db_conn_func)
+            except Exception as e:
+                print(f"[Scheduler] Error syncing dashboard_filters for '{ws_name}': {e}", flush=True)
+
+            # 4c. Domestic Sales Preview Table
+            try:
+                with _app_instance.test_request_context(json={"session_id": s_id}):
+                    export_domestic_sales_preview_controller(_get_db_conn_func)
+            except Exception as e:
+                print(f"[Scheduler] Error syncing domestic_sales_preview for '{ws_name}': {e}", flush=True)
+
             # 5. Fast Analytical Cards
             try:
                 rev = execute_sales_revenue_by_zone(conn, s_id)
@@ -132,6 +155,57 @@ def _execute_sync_task():
                     set_cached_component_data(conn, s_id, "exposure_pct", exp, "all")
             except Exception as e:
                 print(f"[Scheduler] Error syncing exposure_pct for '{ws_name}': {e}", flush=True)
+
+            # 6. Pre-calculate and save common Filter Combinations in advance
+            COMMON_ZONES = ["WEST", "NORTH", "Central Zone", "EAST", "South Zone - II", "SOUTH", "Nepal"]
+            COMMON_YEARS = [2026, 2025]
+
+            print(f"[Scheduler] Pre-caching filter variations for '{ws_name}'...", flush=True)
+            for z in COMMON_ZONES:
+                try:
+                    if rev and isinstance(rev, list):
+                        z_rev = [r for r in rev if r.get("zone", "").strip().lower() == z.strip().lower() or r.get("zoneCode", "").strip().lower() == z.strip().lower()]
+                        if z_rev:
+                            set_cached_component_data(conn, s_id, "sales_revenue", z_rev, f"zone:{z}")
+                except Exception: pass
+
+                try:
+                    z_cats = execute_category_sales(conn, s_id, zone=z)
+                    if z_cats:
+                        set_cached_component_data(conn, s_id, "category_sales", z_cats, f"zone:{z}")
+                except Exception: pass
+
+                try:
+                    z_acc = execute_sales_by_account_category(conn, s_id, zone=z)
+                    if z_acc:
+                        set_cached_component_data(conn, s_id, "sales_by_account", z_acc, f"zone:{z}")
+                except Exception: pass
+
+                try:
+                    with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "zone": [z]}):
+                        tyre_sales_data_controller(_get_db_conn_func)
+                except Exception: pass
+
+                try:
+                    with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "zone": [z]}):
+                        year_wise_sales_comparison_controller(_get_db_conn_func)
+                except Exception: pass
+
+            for yr in COMMON_YEARS:
+                try:
+                    with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "year": [yr]}):
+                        tyre_sales_data_controller(_get_db_conn_func)
+                except Exception: pass
+
+                try:
+                    with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "years": [yr]}):
+                        sales_by_zone_data_controller(_get_db_conn_func)
+                except Exception: pass
+
+                try:
+                    with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "years": [yr]}):
+                        year_wise_sales_comparison_controller(_get_db_conn_func)
+                except Exception: pass
 
             print(f"[Scheduler] Completed sync for workspace '{ws_name}'", flush=True)
 

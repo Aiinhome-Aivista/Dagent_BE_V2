@@ -6,7 +6,7 @@ from helper.sap_analytics_service import (
     execute_overdue_pct,
     execute_exposure_pct,
 )
-from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data
+from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
 
 
 def _resolve_session_id(conn, session_id):
@@ -33,10 +33,10 @@ def get_sales_revenue_data_controller(get_db_connection):
         session_id = _resolve_session_id(conn, request.args.get("session_id"))
         zone = request.args.get("zone")
         force_refresh = request.args.get("force_refresh", "").lower() in ("true", "1")
-        is_default = not zone or zone.lower() == "all"
+        filter_context = make_filter_context(request.args)
 
-        if is_default and not force_refresh:
-            cached = get_cached_component_data(conn, session_id, "sales_revenue", "all")
+        if not force_refresh:
+            cached = get_cached_component_data(conn, session_id, "sales_revenue", filter_context)
             if cached and cached.get("data") is not None:
                 return jsonify({
                     "status": "success",
@@ -45,9 +45,28 @@ def get_sales_revenue_data_controller(get_db_connection):
                     "_last_synced_at": cached.get("_last_synced_at")
                 }), 200
 
+            # Instant in-memory filter from pre-cached 'all' data
+            if zone and str(zone).lower() != "all":
+                cached_all = get_cached_component_data(conn, session_id, "sales_revenue", "all")
+                if cached_all and isinstance(cached_all.get("data"), list):
+                    z_target = str(zone).strip().lower()
+                    filtered_rows = [
+                        r for r in cached_all["data"]
+                        if (str(r.get("zone", "")).strip().lower() == z_target or
+                            str(r.get("zoneCode", "")).strip().lower() == z_target)
+                    ]
+                    if filtered_rows:
+                        set_cached_component_data(conn, session_id, "sales_revenue", filtered_rows, filter_context)
+                        return jsonify({
+                            "status": "success",
+                            "data": filtered_rows,
+                            "_cached": True,
+                            "_last_synced_at": cached_all.get("_last_synced_at")
+                        }), 200
+
         chart_data = execute_sales_revenue_by_zone(conn, session_id, zone=zone)
-        if is_default and chart_data is not None:
-            set_cached_component_data(conn, session_id, "sales_revenue", chart_data, "all")
+        if chart_data is not None:
+            set_cached_component_data(conn, session_id, "sales_revenue", chart_data, filter_context)
 
         return jsonify({
             "status": "success",
@@ -71,10 +90,10 @@ def get_sales_by_account_category_controller(get_db_connection):
         session_id = _resolve_session_id(conn, request.args.get("session_id"))
         zone = request.args.get("zone")
         force_refresh = request.args.get("force_refresh", "").lower() in ("true", "1")
-        is_default = not zone or zone.lower() == "all"
+        filter_context = make_filter_context(request.args)
 
-        if is_default and not force_refresh:
-            cached = get_cached_component_data(conn, session_id, "sales_by_account", "all")
+        if not force_refresh:
+            cached = get_cached_component_data(conn, session_id, "sales_by_account", filter_context)
             if cached and cached.get("data") is not None:
                 return jsonify({
                     "status": "success",
@@ -84,8 +103,8 @@ def get_sales_by_account_category_controller(get_db_connection):
                 }), 200
 
         chart_data = execute_sales_by_account_category(conn, session_id, zone=zone)
-        if is_default and chart_data is not None:
-            set_cached_component_data(conn, session_id, "sales_by_account", chart_data, "all")
+        if chart_data is not None:
+            set_cached_component_data(conn, session_id, "sales_by_account", chart_data, filter_context)
 
         return jsonify({"status": "success", "data": chart_data}), 200
 
