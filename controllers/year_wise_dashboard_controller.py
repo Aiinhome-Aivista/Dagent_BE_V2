@@ -20,6 +20,7 @@ Business Rules:
 """
 
 import time
+import calendar
 from flask import request, jsonify
 
 # In-memory backend cache for master filter queries to prevent repeated DB hits (TTL: 10 minutes)
@@ -39,6 +40,44 @@ def _set_cache(key, data):
     }
 
 
+def fetchall_dict(cursor):
+    """
+    Safely converts query results from any cursor (hdbcli pyhdbcli.ResultRow, pymysql DictCursor,
+    or standard cursor) into a list of lowercase-keyed Python dicts.
+    """
+    rows = cursor.fetchall()
+    if not rows:
+        return []
+    if isinstance(rows[0], dict):
+        return [{str(k).lower(): v for k, v in r.items()} for r in rows]
+
+    cols = [str(desc[0]).lower() for desc in cursor.description] if cursor.description else []
+    result = []
+    for r in rows:
+        if isinstance(r, dict):
+            result.append({str(k).lower(): v for k, v in r.items()})
+        else:
+            try:
+                result.append(dict(zip(cols, r)))
+            except Exception:
+                row_dict = {}
+                for idx, c in enumerate(cols):
+                    try: row_dict[c] = r[idx]
+                    except Exception: pass
+                result.append(row_dict)
+    return result
+
+
+def _val(r, *keys, default=None):
+    if not isinstance(r, dict):
+        return default
+    for k in keys:
+        lk = str(k).lower()
+        if lk in r and r[lk] is not None:
+            return r[lk]
+    return default
+
+
 def _resolve_session(conn, session_id):
     if session_id and session_id != "null" and session_id != "undefined":
         return session_id.strip()
@@ -47,8 +86,10 @@ def _resolve_session(conn, session_id):
         cur.execute("SELECT session_id FROM workspaces WHERE session_id IS NOT NULL AND session_id != '' ORDER BY id ASC LIMIT 1")
         row = cur.fetchone()
         cur.close()
-        if row and row.get("session_id"):
+        if row and isinstance(row, dict) and row.get("session_id"):
             return row["session_id"]
+        elif row and hasattr(row, "__getitem__"):
+            return row[0]
     except Exception:
         pass
     return session_id or ""
@@ -94,8 +135,10 @@ def _get_connection_context(get_db_connection, session_id_arg=None, user_id_arg=
                     LIMIT 1
                 """, (session_id,))
                 s_row = cur.fetchone()
-            if s_row:
+            if s_row and isinstance(s_row, dict):
                 user_db = s_row.get("new_user_db") or s_row.get("workspace_db")
+            elif s_row and hasattr(s_row, "__getitem__"):
+                user_db = s_row[0]
             if not user_db:
                 user_db = "jk_sales_workspace_db"
             cur.close()
@@ -123,6 +166,16 @@ def _close_connections(mysql_conn, hana_conn, tunnel, cursor=None):
         except Exception: pass
 
 
+MONTH_MAP_LABEL_TO_NUM = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12
+}
+MONTH_MAP_NUM_TO_LABEL = {v: k for k, v in MONTH_MAP_LABEL_TO_NUM.items()}
+for i in range(1, 13):
+    MONTH_MAP_LABEL_TO_NUM[calendar.month_name[i].upper()] = i
+    MONTH_MAP_LABEL_TO_NUM[calendar.month_abbr[i].upper()] = i
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Fetch Zones directly from ZIVF_ZoneMaster_01_TR
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,13 +187,13 @@ def fetch_zones(cursor, is_hana, schema, user_db):
                 "P_ZONE" AS ZONE_CODE,
                 "NAME" AS ZONE_NAME
             FROM "{schema}"."ZIVF_ZoneMaster_01_TR"
-            WHERE "P_ZONE" IS NOT NULL AND TRIM("P_ZONE") <> ''
+            WHERE "P_ZONE" IS NOT NULL
             ORDER BY "P_ZONE" ASC
         """
         cursor.execute(sql)
-        for r in cursor.fetchall():
-            zc = r[0] if isinstance(r, (list, tuple)) else r.get("ZONE_CODE")
-            zn = r[1] if isinstance(r, (list, tuple)) else r.get("ZONE_NAME")
+        for r in fetchall_dict(cursor):
+            zc = _val(r, "zone_code", "p_zone")
+            zn = _val(r, "zone_name", "name")
             if zc:
                 zones.append({"label": str(zn or zc).strip(), "value": str(zc).strip()})
     else:
@@ -151,9 +204,9 @@ def fetch_zones(cursor, is_hana, schema, user_db):
             ORDER BY zone_code ASC
         """
         cursor.execute(sql)
-        for r in cursor.fetchall():
-            zc = r.get("ZONE_CODE") if isinstance(r, dict) else r[0]
-            zn = r.get("ZONE_NAME") if isinstance(r, dict) else r[1]
+        for r in fetchall_dict(cursor):
+            zc = _val(r, "zone_code")
+            zn = _val(r, "zone_name")
             if zc:
                 zones.append({"label": str(zn or zc).strip(), "value": str(zc).strip()})
 
@@ -169,7 +222,7 @@ def fetch_regions(cursor, is_hana, schema, user_db, zone=None):
 
     if is_hana:
         params = []
-        where_cls = 'WHERE "region_code" IS NOT NULL AND TRIM("region_code") <> \'\''
+        where_cls = 'WHERE "region_code" IS NOT NULL'
         if zone_filter:
             where_cls += ' AND UPPER(TRIM("zone_code")) = ?'
             params.append(zone_filter)
@@ -188,10 +241,10 @@ def fetch_regions(cursor, is_hana, schema, user_db, zone=None):
         else:
             cursor.execute(sql)
 
-        for r in cursor.fetchall():
-            rc = r[0] if isinstance(r, (list, tuple)) else r.get("REGION_CODE")
-            rn = r[1] if isinstance(r, (list, tuple)) else r.get("REGION_NAME")
-            zc = r[2] if isinstance(r, (list, tuple)) else r.get("ZONE_CODE")
+        for r in fetchall_dict(cursor):
+            rc = _val(r, "region_code")
+            rn = _val(r, "region_name")
+            zc = _val(r, "zone_code")
             if rc:
                 regions.append({
                     "label": str(rn or rc).strip(),
@@ -200,7 +253,7 @@ def fetch_regions(cursor, is_hana, schema, user_db, zone=None):
                 })
     else:
         params = []
-        where_cls = "WHERE region IS NOT NULL AND TRIM(region) <> ''"
+        where_cls = "WHERE region IS NOT NULL"
         if zone_filter:
             where_cls += " AND UPPER(TRIM(zone)) = %s"
             params.append(zone_filter)
@@ -216,10 +269,10 @@ def fetch_regions(cursor, is_hana, schema, user_db, zone=None):
         else:
             cursor.execute(sql)
 
-        for r in cursor.fetchall():
-            rc = r.get("REGION_CODE") if isinstance(r, dict) else r[0]
-            rn = r.get("REGION_NAME") if isinstance(r, dict) else r[1]
-            zc = r.get("ZONE_CODE") if isinstance(r, dict) else r[2]
+        for r in fetchall_dict(cursor):
+            rc = _val(r, "region_code", "region")
+            rn = _val(r, "region_name")
+            zc = _val(r, "zone_code", "zone")
             if rc:
                 regions.append({
                     "label": str(rn or rc).strip(),
@@ -242,7 +295,6 @@ def fetch_customer_types(cursor, is_hana, schema, user_db, zone=None, region=Non
         params = []
         where_conds = [
             'cm."CH_TYPE" IS NOT NULL',
-            'TRIM(cm."CH_TYPE") <> \'\'',
             'IFNULL(cm."KLABC", \'\') <> \'X\''
         ]
         from_part = f'"{schema}"."ZIVF_CustomerMaster_01_MD" cm'
@@ -268,8 +320,8 @@ def fetch_customer_types(cursor, is_hana, schema, user_db, zone=None, region=Non
         else:
             cursor.execute(sql)
 
-        for r in cursor.fetchall():
-            ct = r[0] if isinstance(r, (list, tuple)) else r.get("CUSTOMER_TYPE")
+        for r in fetchall_dict(cursor):
+            ct = _val(r, "customer_type", "ch_type")
             if ct:
                 customer_types.append({"label": str(ct).strip(), "value": str(ct).strip()})
     else:
@@ -302,8 +354,8 @@ def fetch_customer_types(cursor, is_hana, schema, user_db, zone=None, region=Non
         else:
             cursor.execute(sql)
 
-        for r in cursor.fetchall():
-            ct = r.get("CUSTOMER_TYPE") if isinstance(r, dict) else r[0]
+        for r in fetchall_dict(cursor):
+            ct = _val(r, "customer_type", "ch_type")
             if ct:
                 customer_types.append({"label": str(ct).strip(), "value": str(ct).strip()})
 
@@ -338,9 +390,9 @@ def fetch_master_months(cursor, is_hana, schema, user_db):
             ORDER BY MONTH_NO ASC
         """
         cursor.execute(sql)
-        for r in cursor.fetchall():
-            m_no = r[0] if isinstance(r, (list, tuple)) else r.get("MONTH_NO")
-            m_name = r[1] if isinstance(r, (list, tuple)) else r.get("MONTH_NAME")
+        for r in fetchall_dict(cursor):
+            m_no = _val(r, "month_no")
+            m_name = _val(r, "month_name")
             if m_no:
                 months.append({"label": str(m_name).strip(), "value": int(m_no)})
     else:
@@ -366,9 +418,9 @@ def fetch_master_months(cursor, is_hana, schema, user_db):
             ORDER BY MONTH_NO ASC
         """
         cursor.execute(sql)
-        for r in cursor.fetchall():
-            m_no = r.get("MONTH_NO") if isinstance(r, dict) else r[0]
-            m_name = r.get("MONTH_NAME") if isinstance(r, dict) else r[1]
+        for r in fetchall_dict(cursor):
+            m_no = _val(r, "month_no")
+            m_name = _val(r, "month_name")
             if m_no:
                 months.append({"label": str(m_name).upper().strip(), "value": int(m_no)})
 
@@ -398,8 +450,8 @@ def fetch_master_years(cursor, is_hana, schema, user_db):
             ORDER BY SALES_YEAR DESC
         """
         cursor.execute(sql)
-        for r in cursor.fetchall():
-            y = r[0] if isinstance(r, (list, tuple)) else r.get("SALES_YEAR")
+        for r in fetchall_dict(cursor):
+            y = _val(r, "sales_year", "year")
             if y:
                 years.append({"label": str(y).strip(), "value": int(y)})
     else:
@@ -411,8 +463,8 @@ def fetch_master_years(cursor, is_hana, schema, user_db):
             LIMIT 3
         """
         cursor.execute(sql)
-        for r in cursor.fetchall():
-            y = r.get("SALES_YEAR") if isinstance(r, dict) else r[0]
+        for r in fetchall_dict(cursor):
+            y = _val(r, "sales_year", "year")
             if y:
                 years.append({"label": str(y).strip(), "value": int(y)})
 
@@ -609,9 +661,9 @@ def fetch_available_periods(cursor, is_hana, schema, user_db, zone=None, region=
     else:
         cursor.execute(sql_months)
 
-    for r in cursor.fetchall():
-        m_no = r[0] if isinstance(r, (list, tuple)) else (r.get("MONTH_NO") if isinstance(r, dict) else None)
-        m_name = r[1] if isinstance(r, (list, tuple)) else (r.get("MONTH_NAME") if isinstance(r, dict) else None)
+    for r in fetchall_dict(cursor):
+        m_no = _val(r, "month_no")
+        m_name = _val(r, "month_name")
         if m_no:
             avail_months.append({"label": str(m_name).upper().strip(), "value": int(m_no)})
 
@@ -639,8 +691,8 @@ def fetch_available_periods(cursor, is_hana, schema, user_db, zone=None, region=
     else:
         cursor.execute(sql_years)
 
-    for r in cursor.fetchall():
-        y_val = r[0] if isinstance(r, (list, tuple)) else (r.get("SALES_YEAR") if isinstance(r, dict) else None)
+    for r in fetchall_dict(cursor):
+        y_val = _val(r, "sales_year", "year")
         if y_val:
             avail_years.append(int(y_val))
 
@@ -911,22 +963,15 @@ def get_year_wise_sales_controller(get_db_connection):
         else:
             cursor.execute(query)
 
-        results = cursor.fetchall()
         visualization_data = []
+        for r in fetchall_dict(cursor):
+            m_no = int(_val(r, "month_no", default=1))
+            m_name = str(_val(r, "month_name", default="")).upper().strip()
+            yr_val = str(_val(r, "sales_year", "year", default=""))
+            sales_val = float(_val(r, "total_sales", default=0.0))
 
-        for row in results:
-            if isinstance(row, (list, tuple)):
-                m_no = int(row[0] or 1)
-                m_name = str(row[1]).upper().strip()
-                yr_val = str(row[2])
-                sales_val = float(row[3] or 0.0)
-            elif isinstance(row, dict):
-                m_no = int(row.get("MONTH_NO") or row.get("month_num") or 1)
-                m_name = str(row.get("MONTH_NAME") or row.get("month") or "").upper().strip()
-                yr_val = str(row.get("SALES_YEAR") or row.get("year"))
-                sales_val = float(row.get("TOTAL_SALES") or row.get("total_sales") or 0.0)
-            else:
-                continue
+            if not m_name and m_no in MONTH_MAP_NUM_TO_LABEL:
+                m_name = MONTH_MAP_NUM_TO_LABEL[m_no]
 
             visualization_data.append({
                 "month": m_name,
