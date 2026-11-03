@@ -380,15 +380,13 @@ def save_dashboard_key_metrics(conn, session_id: str, metrics_data: dict):
         from datetime import datetime, timezone, timedelta
         ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d %H:%M:%S')
 
+        # Clean delete existing rows for this session so fresh rows have updated created_at and last_synced_at
+        cur.execute("DELETE FROM `dashboard_key_metrics` WHERE session_id = %s", (str(session_id).strip(),))
+
         sql = """
             INSERT INTO `dashboard_key_metrics`
                 (`session_id`, `metric_key`, `metric_label`, `metric_value`, `metric_subtext`, `last_synced_at`, `created_at`)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-                `metric_label` = VALUES(`metric_label`),
-                `metric_value` = VALUES(`metric_value`),
-                `metric_subtext` = VALUES(`metric_subtext`),
-                `last_synced_at` = VALUES(`last_synced_at`)
         """
         batch = []
         for k, v in metrics_data.items():

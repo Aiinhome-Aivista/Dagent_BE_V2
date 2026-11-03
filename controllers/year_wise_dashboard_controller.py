@@ -1109,6 +1109,9 @@ def bulk_sync_year_wise_sales_comparison(mysql_conn, session_id: str, user_id=No
 
     try:
         ins_cur = mysql_conn.cursor()
+        # Clean delete existing rows for this session so fresh rows have updated created_at and last_synced_at
+        ins_cur.execute("DELETE FROM `year_wise_sales_comparison` WHERE session_id = %s", (str(effective_session).strip(),))
+
         upsert_sql = """
             INSERT INTO `year_wise_sales_comparison`
                 (`session_id`, `zone_code`, `region_code`, `customer_type`, `sales_year`, `month_no`, `month_name`, `sales_value`, `last_synced_at`, `created_at`)
