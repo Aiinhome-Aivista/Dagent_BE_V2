@@ -1051,14 +1051,16 @@ def get_year_wise_sales_controller(get_db_connection):
         # 4. Upsert freshly fetched permutation rows into year_wise_sales_comparison table
         if mysql_conn and visualization_data:
             try:
+                from datetime import datetime, timezone, timedelta
+                ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d %H:%M:%S')
                 ins_cur = mysql_conn.cursor()
                 upsert_sql = """
                     INSERT INTO `year_wise_sales_comparison`
-                        (`session_id`, `zone_code`, `region_code`, `customer_type`, `sales_year`, `month_no`, `month_name`, `sales_value`, `last_synced_at`)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        (`session_id`, `zone_code`, `region_code`, `customer_type`, `sales_year`, `month_no`, `month_name`, `sales_value`, `last_synced_at`, `created_at`)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
                         sales_value = VALUES(sales_value),
-                        last_synced_at = NOW()
+                        last_synced_at = VALUES(last_synced_at)
                 """
                 insert_batch = []
                 for item in visualization_data:
@@ -1066,7 +1068,7 @@ def get_year_wise_sales_controller(get_db_connection):
                     m_num = MONTH_MAP_LABEL_TO_NUM.get(m_label, 1)
                     y_num = int(item["year"]) if str(item["year"]).isdigit() else 2026
                     s_val = float(item["sales_value"])
-                    insert_batch.append((effective_session, zone_param, region_param, cust_param, y_num, m_num, m_label, s_val))
+                    insert_batch.append((effective_session, zone_param, region_param, cust_param, y_num, m_num, m_label, s_val, ist_now, ist_now))
 
                 ins_cur.executemany(upsert_sql, insert_batch)
                 mysql_conn.commit()

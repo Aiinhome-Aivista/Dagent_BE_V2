@@ -25,6 +25,12 @@ def _execute_sync_task():
 
     start_t = time.time()
     try:
+        from helper.dashboard_cache_service import ensure_key_metrics_table
+        from controllers.sales_dashboard import ensure_sales_revenue_table
+        from controllers.year_wise_dashboard_controller import ensure_year_wise_sales_table
+        ensure_key_metrics_table(conn)
+        ensure_sales_revenue_table(conn)
+        ensure_year_wise_sales_table(conn)
         cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
         cur.execute("""
             SELECT session_id, MAX(user_id) AS user_id, MAX(workspace_name) AS workspace_name 

@@ -377,15 +377,18 @@ def save_dashboard_key_metrics(conn, session_id: str, metrics_data: dict):
     try:
         ensure_key_metrics_table(conn)
         cur = conn.cursor()
+        from datetime import datetime, timezone, timedelta
+        ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d %H:%M:%S')
+
         sql = """
             INSERT INTO `dashboard_key_metrics`
-                (`session_id`, `metric_key`, `metric_label`, `metric_value`, `metric_subtext`, `last_synced_at`)
-            VALUES (%s, %s, %s, %s, %s, NOW())
+                (`session_id`, `metric_key`, `metric_label`, `metric_value`, `metric_subtext`, `last_synced_at`, `created_at`)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 `metric_label` = VALUES(`metric_label`),
                 `metric_value` = VALUES(`metric_value`),
                 `metric_subtext` = VALUES(`metric_subtext`),
-                `last_synced_at` = NOW()
+                `last_synced_at` = VALUES(`last_synced_at`)
         """
         batch = []
         for k, v in metrics_data.items():
@@ -393,7 +396,7 @@ def save_dashboard_key_metrics(conn, session_id: str, metrics_data: dict):
                 lbl = str(v.get("label", ""))[:100]
                 val = str(v.get("value", ""))[:100]
                 sub = str(v.get("subtext", ""))[:255]
-                batch.append((str(session_id).strip(), str(k)[:50], lbl, val, sub))
+                batch.append((str(session_id).strip(), str(k)[:50], lbl, val, sub, ist_now, ist_now))
 
         if batch:
             cur.executemany(sql, batch)

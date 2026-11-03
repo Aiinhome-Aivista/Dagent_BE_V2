@@ -782,7 +782,14 @@ def tyre_sales_data_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context, get_dashboard_key_metrics, save_dashboard_key_metrics, ensure_key_metrics_table
+        from helper.dashboard_cache_service import (
+            get_cached_component_data,
+            set_cached_component_data,
+            make_filter_context,
+            ensure_key_metrics_table,
+            get_dashboard_key_metrics,
+            save_dashboard_key_metrics
+        )
 
         if not session_id:
             try:
@@ -1058,7 +1065,14 @@ def sales_by_zone_data_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        from helper.dashboard_cache_service import (
+            get_cached_component_data,
+            set_cached_component_data,
+            make_filter_context,
+            ensure_key_metrics_table,
+            get_dashboard_key_metrics,
+            save_dashboard_key_metrics
+        )
 
         if not session_id:
             try:
@@ -1523,7 +1537,14 @@ def year_wise_sales_comparison_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        from helper.dashboard_cache_service import (
+            get_cached_component_data,
+            set_cached_component_data,
+            make_filter_context,
+            ensure_key_metrics_table,
+            get_dashboard_key_metrics,
+            save_dashboard_key_metrics
+        )
 
         if not session_id:
             try:
@@ -1759,7 +1780,14 @@ def available_years_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        from helper.dashboard_cache_service import (
+            get_cached_component_data,
+            set_cached_component_data,
+            make_filter_context,
+            ensure_key_metrics_table,
+            get_dashboard_key_metrics,
+            save_dashboard_key_metrics
+        )
         cached_res = get_cached_component_data(conn, session_id, "available_years", "all")
         if cached_res and cached_res.get("data"):
             return jsonify(cached_res["data"]), 200
@@ -1981,7 +2009,14 @@ def dashboard_filters_controller(get_db_connection):
         if not conn:
             return jsonify({"status": "success", **filters_data}), 200
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        from helper.dashboard_cache_service import (
+            get_cached_component_data,
+            set_cached_component_data,
+            make_filter_context,
+            ensure_key_metrics_table,
+            get_dashboard_key_metrics,
+            save_dashboard_key_metrics
+        )
         cached_res = get_cached_component_data(conn, session_id, "dashboard_filters", "all")
         if cached_res and cached_res.get("data"):
             return jsonify(cached_res["data"]), 200
@@ -2229,7 +2264,14 @@ def default_dashboard_metrics_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        from helper.dashboard_cache_service import (
+            get_cached_component_data,
+            set_cached_component_data,
+            make_filter_context,
+            ensure_key_metrics_table,
+            get_dashboard_key_metrics,
+            save_dashboard_key_metrics
+        )
 
         if not session_id:
             try:

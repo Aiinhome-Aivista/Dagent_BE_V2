@@ -91,10 +91,13 @@ def save_sales_revenue_table_data(conn, session_id, zone, chart_data):
         # Trigger / Refresh rule: Delete existing rows for this session and zone, then insert fresh
         cur.execute("DELETE FROM `sales_revenue_plan_vs_sale` WHERE session_id = %s AND zone_code = %s", (str(session_id).strip(), zone_val))
 
+        from datetime import datetime, timezone, timedelta
+        ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d %H:%M:%S')
+
         ins_sql = """
             INSERT INTO `sales_revenue_plan_vs_sale`
-                (`session_id`, `zone_code`, `city_or_zone_name`, `plan_value_cr`, `sale_value_cr`, `achiev_value_pct`, `last_synced_at`)
-            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                (`session_id`, `zone_code`, `city_or_zone_name`, `plan_value_cr`, `sale_value_cr`, `achiev_value_pct`, `last_synced_at`, `created_at`)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """
         batch = []
         for item in chart_data:
@@ -102,7 +105,7 @@ def save_sales_revenue_table_data(conn, session_id, zone, chart_data):
             p_val = float(item.get("planValueCr") or 0.0)
             s_val = float(item.get("saleValueCr") or item.get("saleV") or 0.0)
             a_val = float(item.get("achievValuePct") or 0.0)
-            batch.append((str(session_id).strip(), zone_val, c_name, p_val, s_val, a_val))
+            batch.append((str(session_id).strip(), zone_val, c_name, p_val, s_val, a_val, ist_now, ist_now))
 
         if batch:
             cur.executemany(ins_sql, batch)
