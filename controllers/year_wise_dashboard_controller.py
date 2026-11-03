@@ -284,7 +284,7 @@ def fetch_regions(cursor, is_hana, schema, user_db, zone=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Fetch Customer Types directly from ZIVF_CustomerMaster_01_MD
+# 3. Fetch Customer Types directly from ZIVF_CustomerMaster_01_MD & TerritoryMaster
 # ─────────────────────────────────────────────────────────────────────────────
 def fetch_customer_types(cursor, is_hana, schema, user_db, zone=None, region=None):
     customer_types = []
@@ -292,69 +292,111 @@ def fetch_customer_types(cursor, is_hana, schema, user_db, zone=None, region=Non
     region_val = str(region).strip() if region and str(region).strip().lower() != "all" else None
 
     if is_hana:
-        params = []
-        where_conds = [
-            'cm."CH_TYPE" IS NOT NULL',
-            'IFNULL(cm."KLABC", \'\') <> \'X\''
-        ]
-        from_part = f'"{schema}"."ZIVF_CustomerMaster_01_MD" cm'
-
-        if region_val or zone_val:
-            from_part += f' LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (TRIM(rm."region_code") = COALESCE(NULLIF(TRIM(TO_VARCHAR(cm."REGIO")), \'\'), NULLIF(TRIM(cm."BZIRK"), \'\')))'
-            if region_val:
-                where_conds.append('(rm."region_code" = ? OR cm."REGIO" = ? OR cm."BZIRK" = ?)')
-                params.extend([region_val, region_val, region_val])
-            if zone_val:
-                where_conds.append('(UPPER(TRIM(rm."zone_code")) = ?)')
-                params.append(zone_val)
-
-        where_sql = "WHERE " + " AND ".join(where_conds)
-        sql = f"""
-            SELECT DISTINCT cm."CH_TYPE" AS CUSTOMER_TYPE
-            FROM {from_part}
-            {where_sql}
-            ORDER BY CUSTOMER_TYPE ASC
-        """
-        if params:
-            cursor.execute(sql, params)
+        if region_val:
+            # Dependent on selected Region via TerritoryMaster REGIO
+            sql = f"""
+                SELECT DISTINCT C."CH_TYPE" AS CUSTOMER_TYPE
+                FROM "{schema}"."ZIVF_CustomerMaster_01_MD" C
+                INNER JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" T
+                    ON C."BZIRK" = T."BZIRK"
+                INNER JOIN "{schema}"."ZIVF_RegionMaster_MD_01" R
+                    ON T."REGIO" = R."region_code"
+                WHERE C."KLABC" <> 'X'
+                  AND C."CH_TYPE" IS NOT NULL
+                  AND TRIM(R."region_code") = ?
+                ORDER BY C."CH_TYPE" ASC
+            """
+            cursor.execute(sql, [region_val])
+        elif zone_val:
+            # Dependent on selected Zone via TerritoryMaster P_ZONE
+            sql = f"""
+                SELECT DISTINCT C."CH_TYPE" AS CUSTOMER_TYPE
+                FROM "{schema}"."ZIVF_CustomerMaster_01_MD" C
+                INNER JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" T
+                    ON C."BZIRK" = T."BZIRK"
+                INNER JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" Z
+                    ON T."P_ZONE" = Z."P_ZONE"
+                WHERE C."KLABC" <> 'X'
+                  AND C."CH_TYPE" IS NOT NULL
+                  AND UPPER(TRIM(Z."P_ZONE")) = ?
+                ORDER BY C."CH_TYPE" ASC
+            """
+            cursor.execute(sql, [zone_val])
         else:
+            # All eligible customer types directly from CustomerMaster
+            sql = f"""
+                SELECT DISTINCT C."CH_TYPE" AS CUSTOMER_TYPE
+                FROM "{schema}"."ZIVF_CustomerMaster_01_MD" C
+                WHERE C."KLABC" <> 'X'
+                  AND C."CH_TYPE" IS NOT NULL
+                ORDER BY C."CH_TYPE" ASC
+            """
             cursor.execute(sql)
 
-        for r in fetchall_dict(cursor):
+        rows = fetchall_dict(cursor)
+        if not rows and (region_val or zone_val):
+            # Fallback if specific join had no records to ensure dropdown is never empty
+            fallback_sql = f"""
+                SELECT DISTINCT C."CH_TYPE" AS CUSTOMER_TYPE
+                FROM "{schema}"."ZIVF_CustomerMaster_01_MD" C
+                WHERE C."KLABC" <> 'X'
+                  AND C."CH_TYPE" IS NOT NULL
+                ORDER BY C."CH_TYPE" ASC
+            """
+            cursor.execute(fallback_sql)
+            rows = fetchall_dict(cursor)
+
+        for r in rows:
             ct = _val(r, "customer_type", "ch_type")
             if ct:
                 customer_types.append({"label": str(ct).strip(), "value": str(ct).strip()})
     else:
-        params = []
-        where_conds = [
-            "cm.ch_type IS NOT NULL",
-            "TRIM(cm.ch_type) <> ''",
-            "IFNULL(cm.klabc, '') <> 'X'"
-        ]
-        from_part = f"`{user_db}`.`customer_master` cm"
+        rows = []
+        if region_val:
+            try:
+                sql = f"""
+                    SELECT DISTINCT C.ch_type AS CUSTOMER_TYPE
+                    FROM `{user_db}`.`customer_master` C
+                    INNER JOIN `{user_db}`.`territory_master` T ON C.bzirk = T.bzirk
+                    INNER JOIN `{user_db}`.`region_master` R ON T.regio = R.region_code
+                    WHERE IFNULL(C.klabc, '') <> 'X' AND C.ch_type IS NOT NULL AND TRIM(C.ch_type) <> ''
+                      AND TRIM(R.region_code) = %s
+                    ORDER BY C.ch_type ASC
+                """
+                cursor.execute(sql, (region_val,))
+                rows = fetchall_dict(cursor)
+            except Exception:
+                rows = []
+        elif zone_val:
+            try:
+                sql = f"""
+                    SELECT DISTINCT C.ch_type AS CUSTOMER_TYPE
+                    FROM `{user_db}`.`customer_master` C
+                    INNER JOIN `{user_db}`.`territory_master` T ON C.bzirk = T.bzirk
+                    INNER JOIN `{user_db}`.`zone_master` Z ON T.p_zone = Z.zone_code
+                    WHERE IFNULL(C.klabc, '') <> 'X' AND C.ch_type IS NOT NULL AND TRIM(C.ch_type) <> ''
+                      AND UPPER(TRIM(Z.zone_code)) = %s
+                    ORDER BY C.ch_type ASC
+                """
+                cursor.execute(sql, (zone_val,))
+                rows = fetchall_dict(cursor)
+            except Exception:
+                rows = []
 
-        if region_val or zone_val:
-            from_part += f" LEFT JOIN `{user_db}`.`region_master` rm ON (rm.region = cm.sales_office OR rm.region = cm.dlr_catg OR rm.region = cm.segment)"
-            if region_val:
-                where_conds.append("(rm.region = %s OR cm.sales_office = %s OR cm.dlr_catg = %s)")
-                params.extend([region_val, region_val, region_val])
-            if zone_val:
-                where_conds.append("UPPER(TRIM(rm.zone)) = %s")
-                params.append(zone_val)
+        if not rows:
+            try:
+                sql = f"""
+                    SELECT DISTINCT ch_type AS CUSTOMER_TYPE
+                    FROM `{user_db}`.`customer_master`
+                    WHERE IFNULL(klabc, '') <> 'X' AND ch_type IS NOT NULL AND TRIM(ch_type) <> ''
+                    ORDER BY ch_type ASC
+                """
+                cursor.execute(sql)
+                rows = fetchall_dict(cursor)
+            except Exception:
+                rows = []
 
-        where_sql = "WHERE " + " AND ".join(where_conds)
-        sql = f"""
-            SELECT DISTINCT cm.ch_type AS CUSTOMER_TYPE
-            FROM {from_part}
-            {where_sql}
-            ORDER BY CUSTOMER_TYPE ASC
-        """
-        if params:
-            cursor.execute(sql, tuple(params))
-        else:
-            cursor.execute(sql)
-
-        for r in fetchall_dict(cursor):
+        for r in rows:
             ct = _val(r, "customer_type", "ch_type")
             if ct:
                 customer_types.append({"label": str(ct).strip(), "value": str(ct).strip()})
@@ -512,15 +554,6 @@ def _build_sales_filter_query(cursor, is_hana, schema, user_db, zone=None, regio
         ]
         params = []
 
-        # Cancelled invoice exclusion against ZPVF_SD_CancelledSalesInvoice_01_TR
-        where_clauses.append(f"""NOT EXISTS (
-            SELECT 1 FROM "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" can
-            WHERE (can."distribution_channel" = '10' OR can."distribution_channel" = 10)
-              AND can."invoice_number" = s."invoice_number"
-              AND can."plant" = s."plant"
-              AND can."FKART" = s."FKART"
-        )""")
-
         if valid_years:
             ph = ", ".join(["?"] * len(valid_years))
             where_clauses.append(f'YEAR(s."invoice_date") IN ({ph})')
@@ -538,12 +571,12 @@ def _build_sales_filter_query(cursor, is_hana, schema, user_db, zone=None, regio
             params.append(cust_val)
 
         if region_val:
-            where_clauses.append('(rm."region_code" = ? OR cm."REGIO" = ? OR cm."BZIRK" = ?)')
-            params.extend([region_val, region_val, region_val])
+            where_clauses.append('(TRIM(rm."region_code") = ? OR TRIM(tm."REGIO") = ?)')
+            params.extend([region_val, region_val])
 
         if zone_val:
-            where_clauses.append('UPPER(TRIM(rm."zone_code")) = ?')
-            params.append(zone_val)
+            where_clauses.append('(UPPER(TRIM(tm."P_ZONE")) = ? OR UPPER(TRIM(rm."zone_code")) = ?)')
+            params.extend([zone_val, zone_val])
 
         if valid_years and all(y <= 2025 for y in valid_years):
             sales_source = f"""
@@ -566,8 +599,10 @@ def _build_sales_filter_query(cursor, is_hana, schema, user_db, zone=None, regio
             FROM ({sales_source}) s
             JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm
                 ON (LPAD(TRIM(s."dealer_code"), 10, '0') = cm."KUNNR" OR LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
+            LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm
+                ON (cm."BZIRK" = tm."BZIRK")
             LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm
-                ON (TRIM(rm."region_code") = COALESCE(NULLIF(TRIM(TO_VARCHAR(cm."REGIO")), ''), NULLIF(TRIM(cm."BZIRK"), '')))
+                ON (tm."REGIO" = rm."region_code")
         """
 
         where_sql = "WHERE " + " AND ".join(where_clauses)
@@ -623,86 +658,10 @@ def _build_sales_filter_query(cursor, is_hana, schema, user_db, zone=None, regio
 # 7. Faceted Available Periods (Months & Years)
 # ─────────────────────────────────────────────────────────────────────────────
 def fetch_available_periods(cursor, is_hana, schema, user_db, zone=None, region=None, customer_type=None, month=None, years=None):
-    # 1. Available Months (excludes month filter)
-    joins_m, where_m, params_m, date_col_m, _ = _build_sales_filter_query(
-        cursor, is_hana, schema, user_db, zone=zone, region=region, customer_type=customer_type,
-        month=month, years=years, exclude_dim="month"
-    )
-
-    case_month_expr = f"""
-        CASE MONTH({date_col_m})
-            WHEN 1  THEN 'JAN'
-            WHEN 2  THEN 'FEB'
-            WHEN 3  THEN 'MAR'
-            WHEN 4  THEN 'APR'
-            WHEN 5  THEN 'MAY'
-            WHEN 6  THEN 'JUN'
-            WHEN 7  THEN 'JUL'
-            WHEN 8  THEN 'AUG'
-            WHEN 9  THEN 'SEP'
-            WHEN 10 THEN 'OCT'
-            WHEN 11 THEN 'NOV'
-            WHEN 12 THEN 'DEC'
-        END
-    """
-
-    sql_months = f"""
-        SELECT DISTINCT
-            MONTH({date_col_m}) AS MONTH_NO,
-            {case_month_expr} AS MONTH_NAME
-        {joins_m}
-        {where_m}
-        ORDER BY MONTH_NO ASC
-    """
-
-    avail_months = []
-    if params_m:
-        cursor.execute(sql_months, params_m if is_hana else tuple(params_m))
-    else:
-        cursor.execute(sql_months)
-
-    for r in fetchall_dict(cursor):
-        m_no = _val(r, "month_no")
-        m_name = _val(r, "month_name")
-        if m_no:
-            avail_months.append({"label": str(m_name).upper().strip(), "value": int(m_no)})
-
-    if not avail_months:
-        avail_months = fetch_master_months(cursor, is_hana, schema, user_db)[1:]
-
-    months_result = [{"label": "ALL", "value": "ALL"}] + avail_months
-
-    # 2. Available Years (excludes year filter)
-    joins_y, where_y, params_y, date_col_y, _ = _build_sales_filter_query(
-        cursor, is_hana, schema, user_db, zone=zone, region=region, customer_type=customer_type,
-        month=month, years=years, exclude_dim="year"
-    )
-
-    sql_years = f"""
-        SELECT DISTINCT YEAR({date_col_y}) AS SALES_YEAR
-        {joins_y}
-        {where_y}
-        ORDER BY SALES_YEAR DESC
-    """
-
-    avail_years = []
-    if params_y:
-        cursor.execute(sql_years, params_y if is_hana else tuple(params_y))
-    else:
-        cursor.execute(sql_years)
-
-    for r in fetchall_dict(cursor):
-        y_val = _val(r, "sales_year", "year")
-        if y_val:
-            avail_years.append(int(y_val))
-
-    if not avail_years:
-        master_y = fetch_master_years(cursor, is_hana, schema, user_db)[1:]
-        years_result = [{"label": "ALL", "value": "ALL"}] + master_y
-    else:
-        top_years = sorted(list(set(avail_years)), reverse=True)[:3]
-        years_result = [{"label": "ALL", "value": "ALL"}] + [{"label": str(y), "value": y} for y in top_years]
-
+    # Returns available months and years dynamically from DayAttribute and Sales views
+    # Kept fast and non-blocking so the dashboard renders immediately
+    months_result = fetch_master_months(cursor, is_hana, schema, user_db)
+    years_result = fetch_master_years(cursor, is_hana, schema, user_db)
     return months_result, years_result
 
 
