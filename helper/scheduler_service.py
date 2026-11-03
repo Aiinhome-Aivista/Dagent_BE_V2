@@ -253,6 +253,18 @@ def init_scheduler(app, get_db_connection):
         try:
             from helper.dashboard_cache_service import get_scheduler_config
             cfg = get_scheduler_config(conn, "sync_dashboard_metrics")
+
+            # If server was restarted while a previous run was in progress, reset to idle
+            if cfg and cfg.get("last_run_status") in ("running", "in_progress"):
+                try:
+                    cur_rst = conn.cursor()
+                    cur_rst.execute("UPDATE scheduler_configurations SET last_run_status = 'idle' WHERE job_name = 'sync_dashboard_metrics'")
+                    conn.commit()
+                    cur_rst.close()
+                    print("[Scheduler] Reset interrupted running state to idle on startup.", flush=True)
+                except Exception:
+                    pass
+
             if cfg and cfg.get("is_active"):
                 trigger = parse_schedule_trigger(cfg.get("schedule_time", "19:00"), cfg.get("frequency", "daily"))
                 _scheduler.add_job(
