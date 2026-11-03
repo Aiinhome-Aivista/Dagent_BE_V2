@@ -297,3 +297,109 @@ def record_scheduler_run(conn, job_name: str, status: str, duration_sec: float =
         if cur:
             try: cur.close()
             except Exception: pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dedicated Table for Dashboard Key Metrics (Right-side Panel)
+# ─────────────────────────────────────────────────────────────────────────────
+KEY_METRICS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS `dashboard_key_metrics` (
+    `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `session_id` VARCHAR(100) NOT NULL,
+    `metric_key` VARCHAR(50) NOT NULL,
+    `metric_label` VARCHAR(100) NOT NULL,
+    `metric_value` VARCHAR(100) NOT NULL,
+    `metric_subtext` VARCHAR(255) DEFAULT '',
+    `last_synced_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY `uk_session_metric` (`session_id`, `metric_key`),
+    INDEX `idx_session` (`session_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+_key_metrics_table_initialized = False
+
+def ensure_key_metrics_table(conn):
+    global _key_metrics_table_initialized
+    if _key_metrics_table_initialized or not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute(KEY_METRICS_TABLE_SQL)
+        conn.commit()
+        cur.close()
+        _key_metrics_table_initialized = True
+    except Exception as e:
+        print(f"[Key Metrics Table] init note: {e}", flush=True)
+
+def get_dashboard_key_metrics(conn, session_id: str):
+    if not conn or not session_id:
+        return None
+    try:
+        ensure_key_metrics_table(conn)
+        cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+        cur.execute("""
+            SELECT metric_key, metric_label, metric_value, metric_subtext, last_synced_at
+            FROM `dashboard_key_metrics`
+            WHERE session_id = %s
+        """, (str(session_id).strip(),))
+        rows = cur.fetchall()
+        cur.close()
+
+        if not rows:
+            return None
+
+        result = {}
+        last_sync = None
+        for r in rows:
+            if isinstance(r, dict):
+                k = r.get("metric_key")
+                lbl = r.get("metric_label")
+                val = r.get("metric_value")
+                sub = r.get("metric_subtext")
+                sync = r.get("last_synced_at")
+            else:
+                k, lbl, val, sub, sync = r[0], r[1], r[2], r[3], r[4]
+            if k:
+                result[k] = {"label": lbl or "", "value": val or "N/A", "subtext": sub or ""}
+                if sync: last_sync = sync
+
+        if len(result) >= 5:
+            return {"data": result, "_last_synced_at": last_sync}
+        return None
+    except Exception as e:
+        print(f"[Key Metrics Table] Read error: {e}", flush=True)
+        return None
+
+def save_dashboard_key_metrics(conn, session_id: str, metrics_data: dict):
+    if not conn or not session_id or not metrics_data:
+        return False
+    try:
+        ensure_key_metrics_table(conn)
+        cur = conn.cursor()
+        sql = """
+            INSERT INTO `dashboard_key_metrics`
+                (`session_id`, `metric_key`, `metric_label`, `metric_value`, `metric_subtext`, `last_synced_at`)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            ON DUPLICATE KEY UPDATE
+                `metric_label` = VALUES(`metric_label`),
+                `metric_value` = VALUES(`metric_value`),
+                `metric_subtext` = VALUES(`metric_subtext`),
+                `last_synced_at` = NOW()
+        """
+        batch = []
+        for k, v in metrics_data.items():
+            if isinstance(v, dict):
+                lbl = str(v.get("label", ""))[:100]
+                val = str(v.get("value", ""))[:100]
+                sub = str(v.get("subtext", ""))[:255]
+                batch.append((str(session_id).strip(), str(k)[:50], lbl, val, sub))
+
+        if batch:
+            cur.executemany(sql, batch)
+            conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[Key Metrics Table] Save error: {e}", flush=True)
+        return False

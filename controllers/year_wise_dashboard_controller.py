@@ -546,65 +546,67 @@ def _build_sales_filter_query(cursor, is_hana, schema, user_db, zone=None, regio
     cust_val = str(customer_type).strip().upper() if customer_type and str(customer_type).strip().lower() != "all" else None
 
     if is_hana:
-        where_clauses = [
-            "(s.\"distribution_channel\" = '10' OR s.\"distribution_channel\" = 10)",
-            "(s.\"indicator_cancel\" IS NULL OR s.\"indicator_cancel\" NOT IN ('X', 'Y', '1'))",
-            "s.\"invoice_date\" IS NOT NULL",
-            'IFNULL(cm."KLABC", \'\') <> \'X\''
-        ]
+        min_year = min(valid_years) if valid_years else 2024
+        start_date = f"'{min_year}-01-01'"
+
+        if valid_years and all(y <= 2025 for y in valid_years):
+            sales_source = f"""
+                SELECT "dealer_code", "invoice_date", "ndp_value", "taxable_value", "invoice_value"
+                FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
+                WHERE "distribution_channel" = '10'
+                  AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
+                  AND "invoice_date" >= {start_date}
+            """
+        else:
+            sales_source = f"""
+                SELECT "dealer_code", "invoice_date", "ndp_value", "taxable_value", "invoice_value"
+                FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
+                WHERE "distribution_channel" = '10'
+                  AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
+                  AND "invoice_date" >= {start_date}
+                UNION ALL
+                SELECT "dealer_code", "invoice_date", "ndp_value", "taxable_value", "invoice_value"
+                FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
+                WHERE "distribution_channel" = '10'
+                  AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
+                  AND "invoice_date" >= {start_date}
+            """
+
+        where_clauses = ["s.\"invoice_date\" IS NOT NULL"]
         params = []
 
         if valid_years:
             ph = ", ".join(["?"] * len(valid_years))
             where_clauses.append(f'YEAR(s."invoice_date") IN ({ph})')
             params.extend(valid_years)
-        else:
-            where_clauses.append('s."invoice_date" >= ADD_YEARS(CURRENT_DATE, -2) AND s."invoice_date" <= CURRENT_DATE')
 
         if valid_months:
             ph = ", ".join(["?"] * len(valid_months))
             where_clauses.append(f'MONTH(s."invoice_date") IN ({ph})')
             params.extend(valid_months)
 
-        if cust_val:
-            where_clauses.append('UPPER(TRIM(cm."CH_TYPE")) = ?')
-            params.append(cust_val)
+        join_lines = [f"FROM ({sales_source}) s"]
+        need_cm = bool(cust_val or region_val or zone_val)
+        need_tm = bool(region_val or zone_val)
 
-        if region_val:
-            where_clauses.append('(TRIM(rm."region_code") = ? OR TRIM(tm."REGIO") = ?)')
-            params.extend([region_val, region_val])
+        if need_cm:
+            join_lines.append(f'INNER JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON s."dealer_code" = cm."KUNNR"')
+            where_clauses.append('IFNULL(cm."KLABC", \'\') <> \'X\'')
+            if cust_val:
+                where_clauses.append('UPPER(TRIM(cm."CH_TYPE")) = ?')
+                params.append(cust_val)
 
-        if zone_val:
-            where_clauses.append('(UPPER(TRIM(tm."P_ZONE")) = ? OR UPPER(TRIM(rm."zone_code")) = ?)')
-            params.extend([zone_val, zone_val])
+        if need_tm:
+            join_lines.append(f'INNER JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm ON cm."BZIRK" = tm."BZIRK"')
+            if region_val:
+                join_lines.append(f'INNER JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON tm."REGIO" = rm."region_code"')
+                where_clauses.append('TRIM(rm."region_code") = ?')
+                params.append(region_val)
+            elif zone_val:
+                where_clauses.append('UPPER(TRIM(tm."P_ZONE")) = ?')
+                params.append(zone_val)
 
-        if valid_years and all(y <= 2025 for y in valid_years):
-            sales_source = f"""
-                SELECT "invoice_number", "plant", "FKART", "dealer_code", "invoice_date",
-                       "distribution_channel", "indicator_cancel", "invoice_value", "ndp_value", "taxable_value"
-                FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
-            """
-        else:
-            sales_source = f"""
-                SELECT "invoice_number", "plant", "FKART", "dealer_code", "invoice_date",
-                       "distribution_channel", "indicator_cancel", "invoice_value", "ndp_value", "taxable_value"
-                FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
-                UNION ALL
-                SELECT "invoice_number", "plant", "FKART", "dealer_code", "invoice_date",
-                       "distribution_channel", "indicator_cancel", "invoice_value", "ndp_value", "taxable_value"
-                FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
-            """
-
-        joins = f"""
-            FROM ({sales_source}) s
-            JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm
-                ON (LPAD(TRIM(s."dealer_code"), 10, '0') = cm."KUNNR" OR LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
-            LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm
-                ON (cm."BZIRK" = tm."BZIRK")
-            LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm
-                ON (tm."REGIO" = rm."region_code")
-        """
-
+        joins = "\n".join(join_lines)
         where_sql = "WHERE " + " AND ".join(where_clauses)
         rev_expr = 'COALESCE(s."ndp_value", s."taxable_value", s."invoice_value", 0)'
         date_expr = 's."invoice_date"'
@@ -836,6 +838,42 @@ def get_available_periods_controller(get_db_connection):
         _close_connections(mysql_conn, hana_conn, tunnel, cursor)
 
 
+YEAR_WISE_SALES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS `year_wise_sales_comparison` (
+    `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `session_id` VARCHAR(100) NOT NULL,
+    `zone_code` VARCHAR(20) NOT NULL DEFAULT 'ALL',
+    `region_code` VARCHAR(20) NOT NULL DEFAULT 'ALL',
+    `customer_type` VARCHAR(20) NOT NULL DEFAULT 'ALL',
+    `sales_year` INT NOT NULL,
+    `month_no` TINYINT NOT NULL,
+    `month_name` VARCHAR(10) NOT NULL,
+    `sales_value` DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
+    `invoice_count` INT NOT NULL DEFAULT 0,
+    `last_synced_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY `uk_perm` (`session_id`, `zone_code`, `region_code`, `customer_type`, `sales_year`, `month_no`),
+    INDEX `idx_filter` (`zone_code`, `region_code`, `customer_type`),
+    INDEX `idx_year_month` (`sales_year`, `month_no`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+_table_initialized = False
+
+def ensure_year_wise_sales_table(conn):
+    global _table_initialized
+    if _table_initialized or not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute(YEAR_WISE_SALES_TABLE_SQL)
+        conn.commit()
+        cur.close()
+        _table_initialized = True
+    except Exception as e:
+        print(f"[Year-wise Sales Table] init note: {e}", flush=True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # API 5: Year-wise Sales Aggregated Data
 # GET/POST /api/dashboard/year-wise-sales
@@ -856,6 +894,7 @@ def get_year_wise_sales_controller(get_db_connection):
 
         session_id = data.get("session_id")
         user_id = data.get("user_id")
+        force_refresh = bool(data.get("force_refresh", False))
 
         def make_list(val):
             if val is None: return []
@@ -877,6 +916,77 @@ def get_year_wise_sales_controller(get_db_connection):
         mysql_conn, hana_conn, tunnel, is_hana, schema, user_db, effective_session = _get_connection_context(
             get_db_connection, session_id, user_id
         )
+
+        # 1. Ensure dedicated table year_wise_sales_comparison exists
+        ensure_year_wise_sales_table(mysql_conn)
+
+        # 2. Check year_wise_sales_comparison table first (Ultra fast cached hit)
+        if not force_refresh and mysql_conn:
+            try:
+                m_cur = mysql_conn.cursor(dictionary=True) if hasattr(mysql_conn, "cursor") else mysql_conn.cursor()
+                year_clause = ""
+                y_params = [effective_session, zone_param, region_param, cust_param]
+
+                parsed_years = []
+                if selected_years and selected_years != ["ALL"]:
+                    for y in selected_years:
+                        try: parsed_years.append(int(y))
+                        except Exception: pass
+
+                if parsed_years:
+                    placeholders = ", ".join(["%s"] * len(parsed_years))
+                    year_clause = f"AND sales_year IN ({placeholders})"
+                    y_params.extend(parsed_years)
+
+                check_sql = f"""
+                    SELECT 
+                        month_no AS MONTH_NO,
+                        month_name AS MONTH_NAME,
+                        sales_year AS SALES_YEAR,
+                        sales_value AS TOTAL_SALES
+                    FROM `year_wise_sales_comparison`
+                    WHERE session_id = %s
+                      AND zone_code = %s
+                      AND region_code = %s
+                      AND customer_type = %s
+                      {year_clause}
+                    ORDER BY sales_year ASC, month_no ASC
+                """
+                m_cur.execute(check_sql, tuple(y_params))
+                cached_rows = fetchall_dict(m_cur)
+                m_cur.close()
+
+                if cached_rows and len(cached_rows) >= 12:
+                    visualization_data = []
+                    for r in cached_rows:
+                        m_no = int(_val(r, "month_no", default=1))
+                        m_name = str(_val(r, "month_name", default="")).upper().strip()
+                        yr_val = str(_val(r, "sales_year", "year", default=""))
+                        sales_val = float(_val(r, "total_sales", default=0.0))
+
+                        if not m_name and m_no in MONTH_MAP_NUM_TO_LABEL:
+                            m_name = MONTH_MAP_NUM_TO_LABEL[m_no]
+
+                        visualization_data.append({
+                            "month": m_name,
+                            "sales_value": sales_val,
+                            "year": yr_val
+                        })
+
+                    return jsonify({
+                        "status": "success",
+                        "source": "year_wise_sales_comparison",
+                        "seriesKey": "year",
+                        "title": "Year-wise Sales Comparison",
+                        "type": "bar_chart",
+                        "xKey": "month",
+                        "yKey": "sales_value",
+                        "visualization": visualization_data
+                    }), 200
+            except Exception as e:
+                print(f"[Year-wise Table Check] Fallback to live query: {e}", flush=True)
+
+        # 3. Live query execution if not present in table
         cursor = hana_conn.cursor() if is_hana else mysql_conn.cursor()
 
         joins, where_sql, params, date_col, rev_expr = _build_sales_filter_query(
@@ -938,8 +1048,35 @@ def get_year_wise_sales_controller(get_db_connection):
                 "year": yr_val
             })
 
+        # 4. Upsert freshly fetched permutation rows into year_wise_sales_comparison table
+        if mysql_conn and visualization_data:
+            try:
+                ins_cur = mysql_conn.cursor()
+                upsert_sql = """
+                    INSERT INTO `year_wise_sales_comparison`
+                        (`session_id`, `zone_code`, `region_code`, `customer_type`, `sales_year`, `month_no`, `month_name`, `sales_value`, `last_synced_at`)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON DUPLICATE KEY UPDATE
+                        sales_value = VALUES(sales_value),
+                        last_synced_at = NOW()
+                """
+                insert_batch = []
+                for item in visualization_data:
+                    m_label = item["month"]
+                    m_num = MONTH_MAP_LABEL_TO_NUM.get(m_label, 1)
+                    y_num = int(item["year"]) if str(item["year"]).isdigit() else 2026
+                    s_val = float(item["sales_value"])
+                    insert_batch.append((effective_session, zone_param, region_param, cust_param, y_num, m_num, m_label, s_val))
+
+                ins_cur.executemany(upsert_sql, insert_batch)
+                mysql_conn.commit()
+                ins_cur.close()
+            except Exception as e:
+                print(f"[Year-wise Table Upsert] Error: {e}", flush=True)
+
         return jsonify({
             "status": "success",
+            "source": "live_query",
             "seriesKey": "year",
             "title": "Year-wise Sales Comparison",
             "type": "bar_chart",

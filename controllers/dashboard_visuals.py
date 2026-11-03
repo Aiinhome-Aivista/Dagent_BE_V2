@@ -782,7 +782,7 @@ def tyre_sales_data_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context, get_dashboard_key_metrics, save_dashboard_key_metrics, ensure_key_metrics_table
 
         if not session_id:
             try:
@@ -2242,11 +2242,24 @@ def default_dashboard_metrics_controller(get_db_connection):
             except Exception:
                 pass
 
+        # Check dedicated dashboard_key_metrics table first
+        ensure_key_metrics_table(conn)
         if not force_refresh:
+            km_res = get_dashboard_key_metrics(conn, session_id)
+            if km_res and km_res.get("data"):
+                return jsonify({
+                    "status": "success",
+                    "source": "dashboard_key_metrics",
+                    "data": km_res["data"],
+                    "_cached": True,
+                    "_last_synced_at": km_res.get("_last_synced_at")
+                }), 200
+
             cached_res = get_cached_component_data(conn, session_id, "key_metrics", "all")
             if cached_res and cached_res.get("data"):
                 return jsonify({
                     "status": "success",
+                    "source": "dashboard_cached_metrics",
                     "data": cached_res["data"],
                     "_cached": True,
                     "_last_synced_at": cached_res.get("_last_synced_at")
@@ -3646,6 +3659,7 @@ ORDER BY yr DESC"""
         }
         try:
             calc_sec = round(time.time() - start_calc_t, 2) if 'start_calc_t' in locals() else 0.0
+            save_dashboard_key_metrics(conn, session_id, metrics_data)
             set_cached_component_data(conn, session_id, "key_metrics", metrics_data, "all", duration_sec=calc_sec)
         except Exception:
             pass

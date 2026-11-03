@@ -86,10 +86,11 @@ def _execute_sync_task():
             except Exception as e:
                 print(f"[Scheduler] Error syncing sales_by_zone for '{ws_name}': {e}", flush=True)
 
-            # 4. Year-wise Sales Comparison (Bar Chart)
+            # 4. Year-wise Sales Comparison (Dedicated table: year_wise_sales_comparison)
             try:
+                from controllers.year_wise_dashboard_controller import get_year_wise_sales_controller
                 with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "force_refresh": True}):
-                    year_wise_sales_comparison_controller(_get_db_conn_func)
+                    get_year_wise_sales_controller(_get_db_conn_func)
             except Exception as e:
                 print(f"[Scheduler] Error syncing year_wise_sales for '{ws_name}': {e}", flush=True)
 
@@ -113,10 +114,12 @@ def _execute_sync_task():
             except Exception as e:
                 print(f"[Scheduler] Error syncing domestic_sales_preview for '{ws_name}': {e}", flush=True)
 
-            # 5. Fast Analytical Cards
+            # 5. Sales Revenue Plan vs Sale (Dedicated table: sales_revenue_plan_vs_sale)
             try:
+                from controllers.sales_dashboard import save_sales_revenue_table_data
                 rev = execute_sales_revenue_by_zone(conn, s_id)
                 if rev is not None:
+                    save_sales_revenue_table_data(conn, s_id, "ALL", rev)
                     set_cached_component_data(conn, s_id, "sales_revenue", rev, "all")
             except Exception as e:
                 print(f"[Scheduler] Error syncing sales_revenue for '{ws_name}': {e}", flush=True)
