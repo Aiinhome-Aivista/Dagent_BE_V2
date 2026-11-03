@@ -105,8 +105,9 @@ def _execute_sync_task():
             # 4. Year-wise Sales Comparison (Dedicated table: year_wise_sales_comparison)
             try:
                 from controllers.year_wise_dashboard_controller import get_year_wise_sales_controller
-                with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "force_refresh": True}):
-                    get_year_wise_sales_controller(_get_db_conn_func)
+                for z in ["ALL", "EZ", "WZ", "NZ", "SZ", "CZ"]:
+                    with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "selected_zones": [z], "force_refresh": True}):
+                        get_year_wise_sales_controller(_get_db_conn_func)
             except Exception as e:
                 print(f"[Scheduler] Error syncing year_wise_sales for '{ws_name}': {e}", flush=True)
 

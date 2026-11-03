@@ -568,6 +568,9 @@ def get_tyre_sales_table_data(conn, session_id: str):
                 tt, sv = str(r[0] or ""), float(r[1] or 0)
             res_list.append({
                 "vehicle_type": tt,
+                "category": tt,
+                "tyre_type": tt,
+                "name": tt,
                 "sales_value": sv
             })
         return {"data": res_list, "_last_synced_at": last_sync}

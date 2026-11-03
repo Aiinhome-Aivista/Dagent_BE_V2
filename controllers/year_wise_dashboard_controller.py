@@ -590,21 +590,43 @@ def _build_sales_filter_query(cursor, is_hana, schema, user_db, zone=None, regio
         need_tm = bool(region_val or zone_val)
 
         if need_cm:
-            join_lines.append(f'INNER JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON s."dealer_code" = cm."KUNNR"')
+            join_lines.append(f'INNER JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (s."dealer_code" = cm."KUNNR" OR LPAD(TRIM(s."dealer_code"), 10, \'0\') = cm."KUNNR" OR LTRIM(s."dealer_code", \'0\') = LTRIM(cm."KUNNR", \'0\'))')
             where_clauses.append('IFNULL(cm."KLABC", \'\') <> \'X\'')
             if cust_val:
                 where_clauses.append('UPPER(TRIM(cm."CH_TYPE")) = ?')
                 params.append(cust_val)
 
         if need_tm:
-            join_lines.append(f'INNER JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm ON cm."BZIRK" = tm."BZIRK"')
+            join_lines.append(f'LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm ON (cm."BZIRK" = tm."BZIRK" OR TRIM(cm."BZIRK") = TRIM(tm."BZIRK"))')
+            join_lines.append(f'LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (tm."REGIO" = rm."region_code" OR TRIM(tm."REGIO") = TRIM(rm."region_code"))')
+            join_lines.append(f'LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (COALESCE(tm."P_ZONE", rm."zone_code") = zm."P_ZONE")')
+
+            if zone_val:
+                where_clauses.append('''
+                    (UPPER(TRIM(tm."P_ZONE")) = ? 
+                     OR UPPER(TRIM(rm."zone_code")) = ? 
+                     OR UPPER(TRIM(zm."NAME")) = ? 
+                     OR UPPER(TRIM(zm."P_ZONE")) = ?
+                     OR (? IN ('EAST', 'EZ') AND COALESCE(tm."P_ZONE", rm."zone_code", zm."P_ZONE") = 'EZ')
+                     OR (? IN ('WEST', 'WZ') AND COALESCE(tm."P_ZONE", rm."zone_code", zm."P_ZONE") = 'WZ')
+                     OR (? IN ('NORTH', 'NZ') AND COALESCE(tm."P_ZONE", rm."zone_code", zm."P_ZONE") = 'NZ')
+                     OR (? IN ('SOUTH', 'SZ') AND COALESCE(tm."P_ZONE", rm."zone_code", zm."P_ZONE") = 'SZ')
+                     OR (? IN ('CENTRAL', 'CZ') AND COALESCE(tm."P_ZONE", rm."zone_code", zm."P_ZONE") = 'CZ')
+                     OR (? IN ('TZ') AND COALESCE(tm."P_ZONE", rm."zone_code", zm."P_ZONE") = 'TZ')
+                     OR (? IN ('NEPAL', 'NP') AND COALESCE(tm."P_ZONE", rm."zone_code", zm."P_ZONE") = 'NP'))
+                ''')
+                params.extend([zone_val, zone_val, zone_val, zone_val, zone_val, zone_val, zone_val, zone_val, zone_val, zone_val, zone_val])
+
             if region_val:
-                join_lines.append(f'INNER JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON tm."REGIO" = rm."region_code"')
-                where_clauses.append('TRIM(rm."region_code") = ?')
-                params.append(region_val)
-            elif zone_val:
-                where_clauses.append('UPPER(TRIM(tm."P_ZONE")) = ?')
-                params.append(zone_val)
+                where_clauses.append('''
+                    (TRIM(rm."region_code") = ? 
+                     OR UPPER(TRIM(rm."region_name")) = UPPER(?) 
+                     OR TRIM(tm."REGIO") = ? 
+                     OR TRIM(tm."BZIRK") = ? 
+                     OR UPPER(TRIM(tm."NAME")) = UPPER(?) 
+                     OR TRIM(cm."BZIRK") = ?)
+                ''')
+                params.extend([region_val, region_val, region_val, region_val, region_val, region_val])
 
         joins = "\n".join(join_lines)
         where_sql = "WHERE " + " AND ".join(where_clauses)
@@ -956,7 +978,7 @@ def get_year_wise_sales_controller(get_db_connection):
                 cached_rows = fetchall_dict(m_cur)
                 m_cur.close()
 
-                if cached_rows and len(cached_rows) >= 12:
+                if cached_rows and len(cached_rows) >= 1:
                     visualization_data = []
                     for r in cached_rows:
                         m_no = int(_val(r, "month_no", default=1))
