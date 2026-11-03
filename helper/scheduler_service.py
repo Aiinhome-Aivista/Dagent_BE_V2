@@ -25,12 +25,22 @@ def _execute_sync_task():
 
     start_t = time.time()
     try:
-        from helper.dashboard_cache_service import ensure_key_metrics_table
+        from helper.dashboard_cache_service import (
+            ensure_key_metrics_table,
+            ensure_sales_by_zone_table,
+            ensure_tyre_sales_table,
+            ensure_category_sales_table,
+            ensure_account_category_sales_table
+        )
         from controllers.sales_dashboard import ensure_sales_revenue_table
         from controllers.year_wise_dashboard_controller import ensure_year_wise_sales_table
         ensure_key_metrics_table(conn)
         ensure_sales_revenue_table(conn)
         ensure_year_wise_sales_table(conn)
+        ensure_sales_by_zone_table(conn)
+        ensure_tyre_sales_table(conn)
+        ensure_category_sales_table(conn)
+        ensure_account_category_sales_table(conn)
         cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
         cur.execute("""
             SELECT session_id, MAX(user_id) AS user_id, MAX(workspace_name) AS workspace_name 
@@ -130,16 +140,22 @@ def _execute_sync_task():
             except Exception as e:
                 print(f"[Scheduler] Error syncing sales_revenue for '{ws_name}': {e}", flush=True)
 
+            # 6. Actual Sales by Account Category (Dedicated table: dashboard_account_category_sales)
             try:
+                from helper.dashboard_cache_service import save_account_category_sales_table_data
                 acc = execute_sales_by_account_category(conn, s_id)
                 if acc is not None:
+                    save_account_category_sales_table_data(conn, s_id, "ALL", acc)
                     set_cached_component_data(conn, s_id, "sales_by_account", acc, "all")
             except Exception as e:
                 print(f"[Scheduler] Error syncing sales_by_account for '{ws_name}': {e}", flush=True)
 
+            # 7. Category Sales (Dedicated table: dashboard_category_sales)
             try:
+                from helper.dashboard_cache_service import save_category_sales_table_data
                 cats = execute_category_sales(conn, s_id)
                 if cats is not None:
+                    save_category_sales_table_data(conn, s_id, "ALL", cats)
                     set_cached_component_data(conn, s_id, "category_sales", cats, "all")
             except Exception as e:
                 print(f"[Scheduler] Error syncing category_sales for '{ws_name}': {e}", flush=True)
@@ -164,73 +180,6 @@ def _execute_sync_task():
                     set_cached_component_data(conn, s_id, "exposure_pct", exp, "all")
             except Exception as e:
                 print(f"[Scheduler] Error syncing exposure_pct for '{ws_name}': {e}", flush=True)
-
-            # 6. Pre-calculate and save common Filter Combinations in advance
-            ZONE_PAIRS = [
-                ("CZ", "Central Zone"),
-                ("EZ", "EAST"),
-                ("NZ", "NORTH"),
-                ("WZ", "WEST"),
-                ("SZ", "SOUTH"),
-                ("TZ", "South Zone - II"),
-                ("NP", "Nepal"),
-            ]
-            COMMON_YEARS = [2026, 2025]
-
-            print(f"[Scheduler] Pre-caching filter variations for '{ws_name}'...", flush=True)
-            for z_code, z_name in ZONE_PAIRS:
-                # 1. Real region breakdown drill-down for Sales Revenue
-                try:
-                    z_rev = execute_sales_revenue_by_zone(conn, s_id, zone=z_code)
-                    if z_rev:
-                        set_cached_component_data(conn, s_id, "sales_revenue", z_rev, f"zone:{z_code}")
-                        set_cached_component_data(conn, s_id, "sales_revenue", z_rev, f"zone:{z_name}")
-                except Exception as e:
-                    print(f"[Scheduler] Error pre-caching sales revenue drilldown for {z_code}: {e}", flush=True)
-
-                # 2. Category sales filtered by zone
-                try:
-                    z_cats = execute_category_sales(conn, s_id, zone=z_name)
-                    if z_cats:
-                        set_cached_component_data(conn, s_id, "category_sales", z_cats, f"zone:{z_code}")
-                        set_cached_component_data(conn, s_id, "category_sales", z_cats, f"zone:{z_name}")
-                except Exception: pass
-
-                # 3. Account category sales filtered by zone
-                try:
-                    z_acc = execute_sales_by_account_category(conn, s_id, zone=z_name)
-                    if z_acc:
-                        set_cached_component_data(conn, s_id, "sales_by_account", z_acc, f"zone:{z_code}")
-                        set_cached_component_data(conn, s_id, "sales_by_account", z_acc, f"zone:{z_name}")
-                except Exception: pass
-
-                z = z_name
-
-                try:
-                    with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "zone": [z]}):
-                        tyre_sales_data_controller(_get_db_conn_func)
-                except Exception: pass
-
-                try:
-                    with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "zone": [z]}):
-                        year_wise_sales_comparison_controller(_get_db_conn_func)
-                except Exception: pass
-
-            for yr in COMMON_YEARS:
-                try:
-                    with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "year": [yr]}):
-                        tyre_sales_data_controller(_get_db_conn_func)
-                except Exception: pass
-
-                try:
-                    with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "years": [yr]}):
-                        sales_by_zone_data_controller(_get_db_conn_func)
-                except Exception: pass
-
-                try:
-                    with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "years": [yr]}):
-                        year_wise_sales_comparison_controller(_get_db_conn_func)
-                except Exception: pass
 
             print(f"[Scheduler] Completed sync for workspace '{ws_name}'", flush=True)
 

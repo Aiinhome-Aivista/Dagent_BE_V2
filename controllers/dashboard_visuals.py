@@ -802,6 +802,28 @@ def tyre_sales_data_controller(get_db_connection):
             except Exception:
                 pass
 
+        from helper.dashboard_cache_service import get_tyre_sales_table_data, save_tyre_sales_table_data
+        if not force_refresh:
+            tbl_tyre = get_tyre_sales_table_data(conn, session_id)
+            if tbl_tyre and tbl_tyre.get("data"):
+                return jsonify({
+                    "status": "success",
+                    "source": "dashboard_tyre_sales_top_10",
+                    "visualizations": [{
+                        "data": tbl_tyre["data"],
+                        "seriesKey": "",
+                        "title": "Top 10 Tyre Types by Sales",
+                        "type": "horizontal_bar_chart",
+                        "xKey": "sales_value",
+                        "yKey": "vehicle_type"
+                    }],
+                    "data": tbl_tyre["data"],
+                    "message": "Data retrieved successfully.",
+                    "sql_error": "",
+                    "_cached": True,
+                    "_last_synced_at": tbl_tyre.get("_last_synced_at")
+                }), 200
+
         filter_context = make_filter_context(data)
         if not force_refresh:
             cached_res = get_cached_component_data(conn, session_id, "tyre_sales", filter_context)
@@ -987,6 +1009,7 @@ def tyre_sales_data_controller(get_db_connection):
             })
 
         if chart_data and not error_msg:
+            save_tyre_sales_table_data(conn, session_id, chart_data)
             set_cached_component_data(conn, session_id, "tyre_sales", {
                 "visualizations": visualizations,
                 "data": chart_data
@@ -1084,6 +1107,29 @@ def sales_by_zone_data_controller(get_db_connection):
                 cur_ws.close()
             except Exception:
                 pass
+
+        from helper.dashboard_cache_service import get_sales_by_zone_table_data, save_sales_by_zone_table_data
+        zone_arg = selected_zones[0] if selected_zones else "ALL"
+        if not force_refresh and is_default_filter:
+            tbl_zone = get_sales_by_zone_table_data(conn, session_id, zone_arg)
+            if tbl_zone and tbl_zone.get("data"):
+                return jsonify({
+                    "status": "success",
+                    "source": "dashboard_sales_by_zone",
+                    "visualizations": [{
+                        "data": tbl_zone["data"],
+                        "seriesKey": "",
+                        "title": "Sales by Zone",
+                        "type": "pie_chart",
+                        "xKey": "name",
+                        "yKey": "value"
+                    }],
+                    "data": tbl_zone["data"],
+                    "message": "Data retrieved successfully.",
+                    "sql_error": "",
+                    "_cached": True,
+                    "_last_synced_at": tbl_zone.get("_last_synced_at")
+                }), 200
 
         filter_context = make_filter_context(data)
         if not force_refresh:
@@ -1452,6 +1498,7 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
             })
 
         if chart_data and not error_msg:
+            save_sales_by_zone_table_data(conn, session_id, zone_arg, chart_data)
             set_cached_component_data(conn, session_id, "sales_by_zone", {
                 "visualizations": visualizations,
                 "data": chart_data

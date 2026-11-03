@@ -68,7 +68,9 @@ def get_sales_revenue_table_data(conn, session_id, zone=None):
             a_pct = float(r.get("achiev_value_pct") if isinstance(r, dict) else r[3])
             last_sync = r.get("last_synced_at") if isinstance(r, dict) else r[4]
             result.append({
+                "zone": c_name,
                 "city": c_name,
+                "city_or_zone_name": c_name,
                 "planValueCr": p_val,
                 "saleValueCr": s_val,
                 "achievValuePct": a_pct
@@ -195,7 +197,18 @@ def get_sales_by_account_category_controller(get_db_connection):
         force_refresh = request.args.get("force_refresh", "").lower() in ("true", "1")
         filter_context = make_filter_context(request.args)
 
+        from helper.dashboard_cache_service import get_account_category_sales_table_data, save_account_category_sales_table_data
         if not force_refresh:
+            tbl_acc = get_account_category_sales_table_data(conn, session_id, zone=zone)
+            if tbl_acc and tbl_acc.get("data"):
+                return jsonify({
+                    "status": "success",
+                    "source": "dashboard_account_category_sales",
+                    "data": tbl_acc["data"],
+                    "_cached": True,
+                    "_last_synced_at": tbl_acc.get("_last_synced_at")
+                }), 200
+
             cached = get_cached_component_data(conn, session_id, "sales_by_account", filter_context)
             if cached and cached.get("data") is not None:
                 return jsonify({
@@ -207,6 +220,7 @@ def get_sales_by_account_category_controller(get_db_connection):
 
         chart_data = execute_sales_by_account_category(conn, session_id, zone=zone)
         if chart_data is not None:
+            save_account_category_sales_table_data(conn, session_id, zone, chart_data)
             set_cached_component_data(conn, session_id, "sales_by_account", chart_data, filter_context)
 
         return jsonify({"status": "success", "data": chart_data}), 200
