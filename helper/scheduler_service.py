@@ -102,12 +102,10 @@ def _execute_sync_task():
             except Exception as e:
                 print(f"[Scheduler] Error syncing sales_by_zone for '{ws_name}': {e}", flush=True)
 
-            # 4. Year-wise Sales Comparison (Dedicated table: year_wise_sales_comparison)
+            # 4. Year-wise Sales Comparison (Dedicated table: year_wise_sales_comparison - Bulk Permutations)
             try:
-                from controllers.year_wise_dashboard_controller import get_year_wise_sales_controller
-                for z in ["ALL", "EZ", "WZ", "NZ", "SZ", "CZ"]:
-                    with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "selected_zones": [z], "force_refresh": True}):
-                        get_year_wise_sales_controller(_get_db_conn_func)
+                from controllers.year_wise_dashboard_controller import bulk_sync_year_wise_sales_comparison
+                bulk_sync_year_wise_sales_comparison(conn, s_id, u_id)
             except Exception as e:
                 print(f"[Scheduler] Error syncing year_wise_sales for '{ws_name}': {e}", flush=True)
 
