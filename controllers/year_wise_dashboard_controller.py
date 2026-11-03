@@ -915,7 +915,8 @@ def bulk_sync_year_wise_sales_comparison(mysql_conn, session_id: str, user_id=No
     if not mysql_conn or not session_id:
         return False
 
-    from helper.dashboard_cache_service import get_ist_now_str
+    from helper.dashboard_cache_service import get_now_ist
+    get_ist_now_str = get_now_ist
     import collections
 
     ensure_year_wise_sales_table(mysql_conn)
