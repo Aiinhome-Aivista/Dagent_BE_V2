@@ -668,16 +668,16 @@ def _retrieve(all_chunks, bm25_idx, col, question, understanding):
         if i not in forced: candidate_indices.append(i)
         if len(candidate_indices) >= TOP_K: break
 
-    # OPTIMIZATION 5: Cross-encoder reranking top-300 → keep best 250
-    RERANK_TOP  = 300
-    RERANK_KEEP = 250
+    # OPTIMIZATION 5: Cross-encoder reranking top-40 → keep best 20
+    RERANK_TOP  = 40
+    RERANK_KEEP = 20
     rerank_pool = candidate_indices[:RERANK_TOP]
 
     if len(rerank_pool) > RERANK_KEEP:
         try:
             ce_model  = _get_cross_encoder()
             pairs     = [(question, all_chunks[i]["text"][:512]) for i in rerank_pool]
-            ce_scores = ce_model.predict(pairs)
+            ce_scores = ce_model.predict(pairs, batch_size=16)
             reranked  = sorted(zip(rerank_pool, ce_scores), key=lambda x: -x[1])
             forced_in = [i for i in rerank_pool if i in forced]
             reranked_nf = [i for i, _ in reranked if i not in forced]

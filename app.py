@@ -4,6 +4,18 @@ os.environ["PYTHONWARNINGS"] = "ignore"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["MPLBACKEND"] = "Agg" # Force Matplotlib headless mode globally
 os.environ["PYTHONUNBUFFERED"] = "1"  # Force unbuffered stdout/stderr — ensures all print() appear immediately in logs
+# Limit OpenMP / BLAS threads to prevent 100% multi-core saturation on shared CPU
+os.environ["OMP_NUM_THREADS"] = "2"
+os.environ["MKL_NUM_THREADS"] = "2"
+os.environ["OPENBLAS_NUM_THREADS"] = "2"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
+os.environ["NUMEXPR_NUM_THREADS"] = "2"
+
+try:
+    import torch
+    torch.set_num_threads(2)
+except Exception:
+    pass
 import logging
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -1042,4 +1054,4 @@ if __name__ == '__main__':
     scheduler.start()
 
 
-    app.run(host="0.0.0.0", port=3019, debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=3020, debug=True, use_reloader=False)
