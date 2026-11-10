@@ -145,6 +145,7 @@ def get_assigned_llm_config(scenario, company_id=None):
                 row = result.mappings().fetchone()
                 if row:
                     config_data = dict(row)
+                    config_data["_scope"] = f"Company: {company_id}"
 
             # Step 2: Fallback to global default (company_id IS NULL)
             if not config_data:
@@ -159,6 +160,10 @@ def get_assigned_llm_config(scenario, company_id=None):
                 row = result.mappings().fetchone()
                 if row:
                     config_data = dict(row)
+                    if company_id:
+                        config_data["_scope"] = f"Company: {company_id} (Fallback to Global Default)"
+                    else:
+                        config_data["_scope"] = "Global Default"
             
         _config_cache[cache_key] = {"data": config_data, "timestamp": now}
         return config_data
@@ -311,7 +316,7 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
         company_id = detect_current_company_id()
 
     config = get_assigned_llm_config(scenario, company_id=company_id)
-    comp_label = f"Company: {company_id}" if company_id else "Global Default"
+    comp_label = (config.get("_scope") if config else None) or (f"Company: {company_id}" if company_id else "Global Default")
 
     if not config:
         print(f"[LLM Error] No DB config found for scenario '{scenario}' ({comp_label}). Attempting local fallback.")
