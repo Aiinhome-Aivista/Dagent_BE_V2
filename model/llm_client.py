@@ -38,45 +38,127 @@ def get_current_scenario():
     return "rag_chat"
 
 
-def get_assigned_llm_config(scenario):
-    """Fetch the LLM configuration for the given scenario from the DB."""
+def detect_current_company_id():
+    """Dynamically detect company_id from request context, payload, session, or user."""
+    if not has_request_context():
+        return None
+    try:
+        # 1. Direct header or URL param
+        hdr_cid = request.headers.get("X-Company-Id")
+        if hdr_cid and str(hdr_cid).isdigit():
+            return int(hdr_cid)
+        arg_cid = request.args.get("company_id")
+        if arg_cid and str(arg_cid).isdigit():
+            return int(arg_cid)
+
+        # 2. JSON body check
+        data = request.get_json(silent=True) or {}
+        if data.get("company_id") and str(data.get("company_id")).isdigit():
+            return int(data["company_id"])
+
+        # 3. Derive from user_id
+        user_id = data.get("user_id") or request.args.get("user_id")
+        if user_id and str(user_id).isdigit():
+            from sqlalchemy import text
+            with engine.connect() as conn:
+                row = conn.execute(
+                    text("SELECT company_id FROM users WHERE id = :uid"),
+                    {"uid": int(user_id)}
+                ).fetchone()
+                if row and row[0]:
+                    return int(row[0])
+
+        # 4. Derive from session_id or workspace_id
+        session_id = data.get("session_id") or request.args.get("session_id")
+        workspace_id = data.get("workspace_id") or request.args.get("workspace_id")
+        if session_id or workspace_id:
+            from sqlalchemy import text
+            with engine.connect() as conn:
+                if workspace_id and str(workspace_id).isdigit():
+                    q = text("""
+                        SELECT u.company_id 
+                        FROM workspaces w 
+                        JOIN users u ON w.user_id = u.id 
+                        WHERE w.id = :wid LIMIT 1
+                    """)
+                    row = conn.execute(q, {"wid": int(workspace_id)}).fetchone()
+                elif session_id:
+                    q = text("""
+                        SELECT u.company_id 
+                        FROM workspaces w 
+                        JOIN users u ON w.user_id = u.id 
+                        WHERE w.session_id = :sid LIMIT 1
+                    """)
+                    row = conn.execute(q, {"sid": str(session_id)}).fetchone()
+                else:
+                    row = None
+                if row and row[0]:
+                    return int(row[0])
+    except Exception as e:
+        print(f"[LLM Client] detect_current_company_id warning: {e}")
+    return None
+
+
+def get_assigned_llm_config(scenario, company_id=None):
+    """Fetch the LLM configuration for scenario: Company-specific first, fallback to Global."""
     now = time.time()
-    if scenario in _config_cache:
-        cached = _config_cache[scenario]
+    cache_key = f"{scenario}::{company_id if company_id else 'global'}"
+    if cache_key in _config_cache:
+        cached = _config_cache[cache_key]
         if now - cached["timestamp"] < CACHE_TTL:
             return cached["data"]
             
     try:
         from sqlalchemy import text
         with engine.connect() as conn:
-            query = text("""
-                SELECT p.provider_type, p.api_key, p.model_name, p.base_url, a.temperature, a.max_tokens, a.timeout
-                FROM llm_scenario_assignments a
-                JOIN llm_providers p ON a.provider_id = p.id
-                WHERE a.scenario = :scenario AND p.is_active = TRUE
-            """)
-            result = conn.execute(query, {"scenario": scenario})
-            row = result.mappings().fetchone()
+            config_data = None
             
-        config_data = dict(row) if row else None
-        _config_cache[scenario] = {"data": config_data, "timestamp": now}
+            # Step 1: Check for company-specific assignment
+            if company_id:
+                query_company = text("""
+                    SELECT p.provider_type, p.api_key, p.model_name, p.base_url, a.temperature, a.max_tokens, a.timeout
+                    FROM llm_scenario_assignments a
+                    JOIN llm_providers p ON a.provider_id = p.id
+                    WHERE a.scenario = :scenario AND a.company_id = :company_id AND p.is_active = TRUE
+                    LIMIT 1
+                """)
+                result = conn.execute(query_company, {"scenario": scenario, "company_id": company_id})
+                row = result.mappings().fetchone()
+                if row:
+                    config_data = dict(row)
+
+            # Step 2: Fallback to global default (company_id IS NULL)
+            if not config_data:
+                query_global = text("""
+                    SELECT p.provider_type, p.api_key, p.model_name, p.base_url, a.temperature, a.max_tokens, a.timeout
+                    FROM llm_scenario_assignments a
+                    JOIN llm_providers p ON a.provider_id = p.id
+                    WHERE a.scenario = :scenario AND a.company_id IS NULL AND p.is_active = TRUE
+                    LIMIT 1
+                """)
+                result = conn.execute(query_global, {"scenario": scenario})
+                row = result.mappings().fetchone()
+                if row:
+                    config_data = dict(row)
+            
+        _config_cache[cache_key] = {"data": config_data, "timestamp": now}
         return config_data
     except Exception as e:
-        print(f"[LLM Client] DB fetch error for scenario '{scenario}': {e}")
-        if scenario in _config_cache:
-            return _config_cache[scenario]["data"]
+        print(f"[LLM Client] DB fetch error for scenario '{scenario}' (Company: {company_id}): {e}")
+        if cache_key in _config_cache:
+            return _config_cache[cache_key]["data"]
         return None
 
 
 def _get_fallback_mistral_local_config():
-    """Fetch the active mistral_local provider from the DB for fallback purposes."""
+    """Fetch the active local provider from the DB for fallback purposes."""
     try:
         from sqlalchemy import text
         with engine.connect() as conn:
             query = text("""
                 SELECT api_key, model_name, base_url
                 FROM llm_providers
-                WHERE provider_type = 'mistral_local' AND is_active = TRUE
+                WHERE provider_type IN ('local', 'mistral_local') AND is_active = TRUE
                 LIMIT 1
             """)
             result = conn.execute(query)
@@ -197,7 +279,7 @@ PROVIDER_HANDLERS = {
 }
 
 
-def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 0.3, scenario: str = None) -> str:
+def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 0.3, scenario: str = None, company_id: int = None) -> str:
     # --- DEBUG LOG FOR ALL LLM CALLS ---
     system_msg = next((m["content"] for m in messages if m.get("role") == "system"), None)
     if system_msg:
@@ -206,13 +288,17 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
 
     if scenario is None:
         scenario = get_current_scenario()
-    config = get_assigned_llm_config(scenario)
+    if company_id is None:
+        company_id = detect_current_company_id()
+
+    config = get_assigned_llm_config(scenario, company_id=company_id)
+    comp_label = f"Company: {company_id}" if company_id else "Global Default"
 
     if not config:
-        print(f"[LLM Error] No DB config found for scenario '{scenario}'. Attempting mistral_local fallback.")
+        print(f"[LLM Error] No DB config found for scenario '{scenario}' ({comp_label}). Attempting local fallback.")
         fallback_config = _get_fallback_mistral_local_config()
         if not fallback_config:
-            err_msg = f"No DB config found for scenario '{scenario}' and no active mistral_local provider available in DB."
+            err_msg = f"No DB config found for scenario '{scenario}' and no active local provider available in DB."
             return json.dumps({"error": err_msg}) if json_mode else f"[LLM Error] {err_msg}"
         
         provider = "local"
@@ -220,7 +306,7 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
         model_name = fallback_config.get("model_name")
         base_url = fallback_config.get("base_url")
         timeout_val = 600
-        print(f"[LLM Client] DB Routing Active -> Scenario: {scenario} | Provider: {provider} | Model: {model_name} (FALLBACK)")
+        print(f"[LLM Client] DB Routing Active -> Scenario: {scenario} | Scope: {comp_label} | Provider: {provider} | Model: {model_name} (FALLBACK)")
     else:
         provider = config['provider_type']
         api_key = config['api_key']
@@ -231,7 +317,7 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
         timeout_val = config.get('timeout')
         if timeout_val is None:
             timeout_val = 600 if provider == "local" else 90
-        print(f"[LLM Client] DB Routing Active -> Scenario: {scenario} | Provider: {provider} | Model: {model_name}")
+        print(f"[LLM Client] DB Routing Active -> Scenario: {scenario} | Scope: {comp_label} | Provider: {provider} | Model: {model_name}")
 
     try:
         # 3. Execute with whichever provider was selected, with retry logic
@@ -255,14 +341,14 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
 
     except Exception as e:
         print(f"[LLM Error] Provider '{provider}' failed after retries: {e}")
-        if provider != "mistral_local":
-            print("[LLM Error] Attempting ultimate fallback to mistral_local from DB...")
+        if provider != "mistral_local" and provider != "local":
+            print("[LLM Error] Attempting ultimate fallback to local provider from DB...")
             try:
                 fallback_config = _get_fallback_mistral_local_config()
                 if fallback_config:
                     return _call_local(messages, json_mode, temperature, fallback_config.get("api_key"), fallback_config.get("model_name"), fallback_config.get("base_url"))
                 else:
-                    raise ValueError("No active mistral_local provider found in DB")
+                    raise ValueError("No active local provider found in DB")
             except Exception as fallback_err:
                 print(f"[LLM Error] Both primary and local fallback failed. Error: {fallback_err}")
                 if json_mode:
@@ -274,6 +360,6 @@ def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 
         return f"[LLM Error] LLM failed completely. Error: {str(e)}"
 
 
-def call_llm(prompt: str, scenario: str = None) -> str:
-    return call_llm_chat([{"role": "user", "content": prompt}], json_mode=False, scenario=scenario)
+def call_llm(prompt: str, scenario: str = None, company_id: int = None) -> str:
+    return call_llm_chat([{"role": "user", "content": prompt}], json_mode=False, scenario=scenario, company_id=company_id)
 
