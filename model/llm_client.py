@@ -72,26 +72,45 @@ def detect_current_company_id():
         session_id = data.get("session_id") or request.args.get("session_id")
         workspace_id = data.get("workspace_id") or request.args.get("workspace_id")
         if session_id or workspace_id:
+            sid_str = str(session_id or "")
+            wid_int = int(workspace_id) if workspace_id and str(workspace_id).isdigit() else 0
             from sqlalchemy import text
             with engine.connect() as conn:
-                if workspace_id and str(workspace_id).isdigit():
-                    q = text("""
-                        SELECT u.company_id 
-                        FROM workspaces w 
-                        JOIN users u ON w.user_id = u.id 
-                        WHERE w.id = :wid LIMIT 1
-                    """)
-                    row = conn.execute(q, {"wid": int(workspace_id)}).fetchone()
-                elif session_id:
-                    q = text("""
-                        SELECT u.company_id 
-                        FROM workspaces w 
-                        JOIN users u ON w.user_id = u.id 
-                        WHERE w.session_id = :sid LIMIT 1
-                    """)
-                    row = conn.execute(q, {"sid": str(session_id)}).fetchone()
-                else:
-                    row = None
+                # 4a. Check workspace_users table for assigned user with non-null company_id
+                q_wu = text("""
+                    SELECT u.company_id 
+                    FROM workspace_users wu 
+                    JOIN users u ON wu.user_id = u.id 
+                    WHERE (wu.session_id = :sid OR wu.workspace_id = :wid)
+                      AND u.company_id IS NOT NULL 
+                    LIMIT 1
+                """)
+                row = conn.execute(q_wu, {"sid": sid_str, "wid": wid_int}).fetchone()
+                if row and row[0]:
+                    return int(row[0])
+
+                # 4b. Match workspace_name to companies.company_name
+                q_name = text("""
+                    SELECT c.id 
+                    FROM workspaces w 
+                    JOIN companies c ON LOWER(REPLACE(REPLACE(w.workspace_name, '_', ''), ' ', '')) = LOWER(REPLACE(REPLACE(c.company_name, '_', ''), ' ', ''))
+                    WHERE w.session_id = :sid OR w.id = :wid
+                    LIMIT 1
+                """)
+                row = conn.execute(q_name, {"sid": sid_str, "wid": wid_int}).fetchone()
+                if row and row[0]:
+                    return int(row[0])
+
+                # 4c. Creator user company_id fallback
+                q_creator = text("""
+                    SELECT u.company_id 
+                    FROM workspaces w 
+                    JOIN users u ON w.user_id = u.id 
+                    WHERE (w.session_id = :sid OR w.id = :wid)
+                      AND u.company_id IS NOT NULL 
+                    LIMIT 1
+                """)
+                row = conn.execute(q_creator, {"sid": sid_str, "wid": wid_int}).fetchone()
                 if row and row[0]:
                     return int(row[0])
     except Exception as e:
